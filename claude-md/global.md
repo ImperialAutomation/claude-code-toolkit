@@ -55,6 +55,10 @@
 
 ## Claude Code Workarounds
 
+- When a tool call is denied due to permissions:
+  1. Check if a native tool or existing `~/.claude/bin/` script achieves the same result
+  2. If not: propose a new `~/.claude/bin/` script that wraps the blocked command, so it can be allowlisted once via `Bash(~/.claude/bin/script-name.sh *)`. Present the script to the user for approval before creating it
+  3. Only ask the user for direct permission as a last resort
 - ALWAYS prefer native tools (Read, Write, Edit, Grep, Glob) over Bash equivalents. Bash is ONLY for actual shell operations (git, docker, npm, etc.) — never for file reading, writing, searching, or editing.
   - Use Glob to find files — not `find` or `ls`
   - Use Grep to search file contents — not `grep` or `rg`
