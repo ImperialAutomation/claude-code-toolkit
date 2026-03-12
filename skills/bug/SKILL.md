@@ -25,18 +25,6 @@ The user provides: `$ARGUMENTS`
 /bug 724 "Webhook signature fails in test mode"   # Explicit parent #724
 ```
 
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands, `git` commands, and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file with `--body-file`
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- Use Write to create new files — NEVER use `mkdir` via Bash (Write auto-creates parent directories)
-- Use `git rm` to delete files — NEVER use `rm` via Bash
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`) — NEVER use `for` loops or chained `&&` commands to repeat `gh` calls
-
 ## Workflow
 
 ### Step 1: Parse Arguments and Detect Parent Issue
@@ -191,9 +179,3 @@ Updating tracking PR...
 Done! Bug #731 will auto-close when PR #727 merges.
 ```
 
-## Notes
-
-1. **Default = branch detection**: No number needed in most cases
-2. **Always add to Closes**: The bug MUST be in Closes statements for auto-close
-3. **Use bug emoji**: 🐛 in title for visibility
-4. **Link bidirectionally**: Bug references parent, PR references bug

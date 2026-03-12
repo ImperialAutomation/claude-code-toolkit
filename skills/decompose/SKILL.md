@@ -13,18 +13,6 @@ Help the user break down a large GitHub issue into manageable sub-issues, tracke
 
 The user provides an issue number: `$ARGUMENTS`
 
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands, `git` commands, and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file with `--body-file`
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- Use Write to create new files — NEVER use `mkdir` via Bash (Write auto-creates parent directories)
-- Use `git rm` to delete files — NEVER use `rm` via Bash
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`) — NEVER use `for` loops or chained `&&` commands to repeat `gh` calls
-
 ## Workflow
 
 ### Step 1: Fetch and Analyze the Issue
@@ -175,13 +163,6 @@ Write the updated body to a temp file first, then use `--body-file`:
 gh issue edit $ARGUMENTS --body-file /tmp/issue_body.md
 ```
 
-## Important Notes
-
-1. **Always ask before creating**: Never create issues/PRs without user confirmation
-2. **Preserve original content**: When editing issues, preserve all original content
-3. **Use consistent naming**: `issue-[number]-[feature-name]` for branches
-4. **Link everything**: Sub-issues reference parent, PR references all issues
-5. **Status emojis**: ⏳ Pending, 🔄 In Progress, ✅ Complete, ❌ Blocked
 
 ## Example Usage
 

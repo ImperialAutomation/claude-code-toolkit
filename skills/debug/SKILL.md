@@ -21,42 +21,21 @@ NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST
 
 If you haven't completed Phase 1, you CANNOT propose fixes.
 
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands, `git` commands, running tests, and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts
-
 ## Phase 1: Root Cause Investigation
 
 BEFORE attempting ANY fix:
 
-1. **Read error messages carefully**
-   * Don't skip past errors or warnings — they often contain the answer
-   * Read stack traces completely, note line numbers and file paths
-   * Show the error to the user
+1. **Show the error** — present the full error message and stack trace to the user
 
 2. **Reproduce consistently**
    * Can you trigger it reliably? What are the exact steps?
    * If not reproducible → gather more data, don't guess
 
-3. **Check recent changes**
-   * `git diff` and recent commits — what changed?
-   * New dependencies, config changes, environmental differences?
+3. **Check recent changes** — `git diff` and recent commits, new dependencies, config changes
 
-4. **Trace data flow**
-   * Where does the bad value originate?
-   * Trace backward through the call stack until you find the source
-   * Fix at source, not at symptom
+4. **Trace data flow** — where does the bad value originate? Trace backward to the source
 
-5. **For multi-component systems: add diagnostics first**
-   * Log what enters and exits each component boundary
-   * Run once to gather evidence showing WHERE it breaks
-   * Then investigate that specific component
+5. **For multi-component systems: add diagnostics first** — log what enters/exits each component boundary, run once to find WHERE it breaks
 
 ## Phase 2: Pattern Analysis
 
@@ -90,22 +69,3 @@ This pattern indicates an architectural problem, not a bug:
 
 Discuss with the user before continuing. This is not a failed hypothesis — this is a wrong architecture.
 
-## Red Flags — STOP and Return to Phase 1
-
-If you catch yourself thinking:
-- "Quick fix for now, investigate later"
-- "Just try changing X and see if it works"
-- "It's probably X, let me fix that"
-- "I don't fully understand but this might work"
-- "Add multiple changes, run tests"
-
-ALL of these mean: STOP. You're guessing. Return to Phase 1.
-
-## Quick Reference
-
-| Phase | Key Activity | Done when |
-|-------|-------------|-----------|
-| 1. Root Cause | Read errors, reproduce, trace data flow | You understand WHAT and WHY |
-| 2. Pattern | Find working examples, compare differences | You identified the discrepancy |
-| 3. Hypothesis | Form theory, test one variable | Confirmed or new hypothesis |
-| 4. Fix | Failing test → fix → green → commit | Bug resolved, tests pass |

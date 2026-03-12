@@ -13,26 +13,11 @@ Automatically implement all sub-issues of a parent epic in dependency order. Eac
 
 The user provides a parent issue number: `$ARGUMENTS`
 
-FOLLOW ALL STEPS STRICTLY. NO SHORTCUTS. This skill runs autonomously — no confirmation stops between sub-issues.
-
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands, `git` commands, running tests, and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- Use Write to create new files — NEVER use `mkdir` via Bash (Write auto-creates parent directories)
-- Use `git rm` to delete files — NEVER use `rm` via Bash
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`) — NEVER use `for` loops or chained `&&` commands to repeat `gh` calls
-
-Follow the Test Quality Policy and Anti-Patterns from CLAUDE.md throughout all phases.
+This skill runs autonomously — no confirmation stops between sub-issues.
 
 **HARD BOUNDARIES — NEVER cross these:**
 - NEVER merge the tracking PR (the user reviews and merges manually)
 - NEVER close the parent issue (closing happens automatically when the tracking PR is merged)
-- NEVER push directly to `main` or `develop`
 - Only merge sub-issue PRs into the **feature branch** — nothing else
 
 ## Architecture
@@ -308,21 +293,3 @@ Display a final report:
 The tracking PR is ready for manual review and merge to develop.
 ```
 
-## Error Handling Summary
-
-When a sub-agent reports failure:
-1. Create a bug issue with full context (error, attempts, suggestions)
-2. Add the bug issue to the tracking PR table
-3. Delete the failed sub-branch (local + remote if pushed)
-4. Check dependency graph: if issue X fails and issue Y depends on X → skip Y with a note
-5. Continue with the next non-blocked issue in the current or next wave
-
-## Status Indicators
-
-| Emoji | Meaning |
-|-------|---------|
-| ⏳ | Pending — not started |
-| 🔄 | In Progress — sub-agent running |
-| ✅ | Complete — PR merged |
-| ❌ | Failed — bug issue created |
-| ⏭️ | Skipped — blocked by failed dependency |

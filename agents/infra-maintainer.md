@@ -196,6 +196,4 @@ Only after human confirmation, create each approved issue using `gh issue create
 - ALWAYS provide evidence for assessments (command output, config excerpts)
 - ALWAYS consider impact on running services when proposing changes
 - Read the project's `CLAUDE.md` first if it exists — it contains infrastructure details
-- Prefer reading existing configuration over guessing
-- When uncertain, ask for more context rather than assuming
 - Keep recommendations practical and actionable — avoid theoretical improvements that add complexity without clear benefit

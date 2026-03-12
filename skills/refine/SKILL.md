@@ -13,20 +13,6 @@ Refine an existing GitHub issue through interactive Q&A to produce clear scope, 
 
 The user provides an issue number: `$ARGUMENTS`
 
-FOLLOW ALL STEPS STRICTLY. NO SHORTCUTS.
-
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands, `git` commands, and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file with `--body-file`
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- Use Write to create new files — NEVER use `mkdir` via Bash (Write auto-creates parent directories)
-- Use `git rm` to delete files — NEVER use `rm` via Bash
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`) — NEVER use `for` loops or chained `&&` commands to repeat `gh` calls
-
 ## Phase 1: Understand Current State
 
 1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/issue-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels,assignees`, then use the Read tool to read it

@@ -215,6 +215,4 @@ When an idea naturally breaks down into multiple issues:
 - ALWAYS write action-oriented titles (start with a verb: "Add", "Fix", "Update", "Remove", "Implement")
 - ALWAYS include acceptance criteria that are specific and testable
 - Keep issue bodies concise — enough context to implement, no unnecessary prose
-- Use `docker compose` (with space), never `docker-compose` (with hyphen)
 - When using Bash, only run `gh issue create`, `gh issue edit`, `gh issue view`, `gh issue list`, `gh label list`, and similar non-destructive GitHub CLI commands
-- Write issue bodies to `/tmp/` files, then reference them with `--body-file` (never use heredoc in Bash)

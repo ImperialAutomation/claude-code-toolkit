@@ -25,18 +25,6 @@ The user provides: `$ARGUMENTS`
 /extend            # Detect parent from branch (issue-723-...)
 ```
 
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands, `git` commands, and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file with `--body-file`
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- Use Write to create new files — NEVER use `mkdir` via Bash (Write auto-creates parent directories)
-- Use `git rm` to delete files — NEVER use `rm` via Bash
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`) — NEVER use `for` loops or chained `&&` commands to repeat `gh` calls
-
 ## Workflow
 
 ### Step 1: Identify Parent Issue
@@ -201,9 +189,3 @@ Closes #729  ← NEW
 | Analyzes | Full issue | Remaining tasks only |
 | Sub-issues | Initial set | Additional set |
 
-## Notes
-
-1. **Preserves existing work**: Never modifies existing sub-issues
-2. **Smart detection**: Identifies which tasks already have sub-issues
-3. **Maintains numbering**: Continues sequence in tracking table
-4. **Updates all references**: PR body, Closes statements, progress count

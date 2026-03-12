@@ -140,11 +140,3 @@ This will:
 4. Show a preview of changes
 5. Update the PR body after confirmation
 
-## Notes
-
-1. **Never auto-update**: Always show preview and ask for confirmation
-2. **Preserve formatting**: Keep all other sections of the PR body intact
-3. **Add timestamps**: Optionally add "Last updated: [date]" to the PR
-4. **Handle edge cases**:
-   - Sub-issue not found → mark as "❓ Unknown"
-   - PR body format changed → warn user and show raw update

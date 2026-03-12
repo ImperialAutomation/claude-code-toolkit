@@ -7,9 +7,7 @@ user-invocable: true
 
 # Finish - INTERACTIVE COMMAND
 
-**CRITICAL: This command MUST run in FOREGROUND mode with BLOCKING user confirmation**
-**DO NOT run in background - MUST wait for user input at Step 4**
-**MUST use ~/.claude/bin/git-find-base-branch for base branch detection**
+**MUST wait for user confirmation at Step 4. MUST use ~/.claude/bin/git-find-base-branch for base branch detection.**
 
 Complete the workflow for a finished issue: commit changes (including pre-commit hook modifications), close the issue, merge to base branch, and clean up.
 
@@ -30,28 +28,10 @@ The user provides: `$ARGUMENTS`
 ## Examples
 
 ```bash
-/finish              # Auto-detect issue + auto-detect base branch (FULLY AUTOMATIC)
+/finish              # Auto-detect issue + auto-detect base branch
 /finish 33           # Use issue 33 + auto-detect base branch
-/finish 33 auto      # Explicitly use issue 33 + auto-detect base branch
 /finish 33 master    # Use issue 33 + force merge into master
-/finish auto develop # Auto-detect issue + force merge into develop
 ```
-
-## What This Command Does
-
-1. Get the current branch name
-2. Auto-detect issue number from branch name if not provided
-3. Determine base branch based on parameter
-4. **Show resolved parameters and ask for confirmation**
-5. Run validation suite before proceeding
-6. Add all changes and commit with graceful pre-commit hook handling
-7. Push the current branch to origin
-8. Close the GitHub issue using gh CLI
-9. Switch to the base branch and pull latest
-10. Merge the issue branch (with --no-ff for merge commit)
-11. Push the merged changes
-12. Delete the local and remote issue branch
-13. Confirm completion
 
 ## Implementation Steps
 
@@ -71,16 +51,10 @@ The user provides: `$ARGUMENTS`
 - If base_branch parameter is provided (not 'auto') → Use that specific value
 - **NEVER use fallback to 'master'** - always use the script result
 
-**Step 4:** **MANDATORY STOP - INTERACTIVE CONFIRMATION**
-**EXECUTION MUST PAUSE HERE FOR USER INPUT - DO NOT CONTINUE AUTOMATICALLY**
-- Display resolved parameters:
-  - Current branch: [branch_name]
-  - Issue number: [issue_number]
-  - Base branch: [base_branch] ← MUST be result from ~/.claude/bin/git-find-base-branch
+**Step 4: STOP — Ask for confirmation**
+- Display: current branch, issue number, base branch
 - Ask: "Proceed with finishing issue #[issue_number]? (y/N)"
-- **STOP EXECUTION and wait for user response**
-- **DO NOT PROCEED to Step 5 until user confirms**
-- Exit if user doesn't confirm with 'y' or 'Y'
+- Wait for user response. Exit if not confirmed.
 
 **Step 5:** Verification gate (MANDATORY — no shortcuts):
 - Run the full test suite fresh — do not rely on earlier runs
@@ -129,11 +103,3 @@ The user provides: `$ARGUMENTS`
 
 **Step 13:** Show success message with summary
 
-## Important Notes
-
-- Always use the auto-detected or provided base branch
-- Ensure GitHub CLI (gh) is authenticated
-- The command handles pre-commit hook file modifications automatically
-- Validation must pass before issue completion
-- Stop if any step fails and report the error
-- Show progress for each step with emoji indicators

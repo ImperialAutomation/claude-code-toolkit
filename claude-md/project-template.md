@@ -33,6 +33,14 @@
 
 <!-- If applicable: naming conventions, migration workflow, ORM patterns, etc. -->
 
+## Frontend Standards
+
+<!-- If applicable, uncomment and adjust:
+- Loading indicators only after >500ms delay (debounce to prevent flickering)
+- All user-facing text via translation keys (`t('key')`), never hardcoded strings
+- When using an API client with baseURL: use relative URLs (prevent double prefixes)
+-->
+
 ## Project-Specific Patterns
 
 <!-- Conventions unique to this project, e.g.:

@@ -13,18 +13,6 @@ Ensure all sub-issues referenced in a tracking PR are included in the "Closes #X
 
 The user provides a PR number: `$ARGUMENTS`
 
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file with `--body-file`
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- Use Write to create new files — NEVER use `mkdir` via Bash (Write auto-creates parent directories)
-- Use `git rm` to delete files — NEVER use `rm` via Bash
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`) — NEVER use `for` loops or chained `&&` commands to repeat `gh` calls
-
 ## Workflow
 
 ### Step 1: Fetch PR Body
@@ -202,16 +190,3 @@ Found 3 issues not in Closes statements:
 Add "Closes #724, #725, #726" to PR? (y/n)
 ```
 
-## Automatic Integration
-
-This skill can be called automatically by:
-- `/bug` - after creating a bug issue
-- `/update-tracking` - as part of the update process
-- `/decompose` - when creating initial sub-issues
-
-## Safety
-
-1. **Preview first**: Always show what will change before updating
-2. **Don't remove**: Never remove existing Closes statements
-3. **Preserve order**: Add new statements at the end of the Closes block
-4. **Backup body**: Show command to restore if needed

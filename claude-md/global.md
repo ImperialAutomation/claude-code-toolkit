@@ -42,9 +42,6 @@
 
 ## Code Quality
 
-- Before using model attributes, verify they exist (grep/search)
-- Before importing classes, verify they exist
-- Follow existing patterns in the codebase — read before writing
 - If ANY verification fails, STOP and reassess
 - DRY: check if similar logic already exists before implementing; create shared functions instead of duplicating
 - No magic strings/numbers: use constants, enums, or configuration for all business logic values
@@ -56,15 +53,14 @@
 - Include usage guidance and critical warnings
 - No historical changelogs in code documentation
 
-## Frontend Standards
-
-- Loading indicators only after >500ms delay (debounce to prevent flickering)
-- All user-facing text via translation keys (`t('key')`), never hardcoded strings
-- When using an API client with baseURL: use relative URLs (prevent double prefixes)
-
 ## Claude Code Workarounds
 
 - ALWAYS prefer native tools (Read, Write, Edit, Grep, Glob) over Bash equivalents. Bash is ONLY for actual shell operations (git, docker, npm, etc.) — never for file reading, writing, searching, or editing.
+  - Use Glob to find files — not `find` or `ls`
+  - Use Grep to search file contents — not `grep` or `rg`
+  - Use Read to read files — not `cat`, `head`, or `tail`
+  - Use Write to create new files (auto-creates parent directories) — not `mkdir` + Bash
+  - Use `git rm` to delete files — not `rm`
 - Bash tool: always save API responses to a file first, then read the file. Use `~/.claude/bin/gh-save.sh /tmp/output.json <gh-args>` to save `gh` output (shell redirects like `>` trigger permission prompts).
 - Never use command substitution with pipes for API data
 - Never write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc). These don't match permission patterns like `Bash(git *)`. Instead: use the Write tool to write to `/tmp/`, then reference the file in Bash (e.g., `git commit -F /tmp/commit-msg`, `gh issue create --body-file /tmp/issue-body.md`).

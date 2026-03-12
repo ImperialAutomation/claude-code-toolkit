@@ -243,5 +243,3 @@ List of all files created or changed, with a brief description of each change.
 - ALWAYS read the project's `CLAUDE.md` before making changes — it contains deployment-specific details
 - When the infra-maintainer's plan seems incomplete or risky, push back and ask for clarification
 - Prefer small, focused PRs over large multi-concern changes
-- Document non-obvious decisions in PR descriptions and code comments
-- Use `docker compose` (with space), never `docker-compose` (with hyphen)

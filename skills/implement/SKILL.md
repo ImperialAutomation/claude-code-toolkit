@@ -13,21 +13,7 @@ Implement GitHub issue with automated workflow.
 
 The user provides an issue number: `$ARGUMENTS`
 
-FOLLOW ALL STEPS STRICTLY. NO SHORTCUTS. MUST use ~/.claude/bin/git-find-base-branch for base branch detection for the PR.
-
-## Tool Rules
-
-- Use Glob to find files — NEVER use `find` or `ls` via Bash
-- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
-- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
-- Bash is for `gh` commands, `git` commands, running tests, and `~/.claude/bin/` scripts only
-- NEVER write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc) — use the Write tool to write to `/tmp/`, then reference the file
-- NEVER use `python3 -c`, `sed`, or `awk` for file modifications — use Grep to find occurrences, then Edit to replace them
-- Use Write to create new files — NEVER use `mkdir` via Bash (Write auto-creates parent directories)
-- Use `git rm` to delete files — NEVER use `rm` via Bash
-- For batch operations on multiple issues, ALWAYS use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`) — NEVER use `for` loops or chained `&&` commands to repeat `gh` calls
-
-Follow the Test Quality Policy and Anti-Patterns from CLAUDE.md throughout all phases.
+MUST use ~/.claude/bin/git-find-base-branch for base branch detection for the PR.
 
 ## Phase 1: Discovery & Planning
 
