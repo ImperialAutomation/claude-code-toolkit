@@ -82,11 +82,13 @@ The user provides: `$ARGUMENTS`
 - **DO NOT PROCEED to Step 5 until user confirms**
 - Exit if user doesn't confirm with 'y' or 'Y'
 
-**Step 5:** Run validation suite:
+**Step 5:** Verification gate (MANDATORY — no shortcuts):
+- Run the full test suite fresh — do not rely on earlier runs
+- Show actual test output — no "tests pass" claims without evidence
 - Check for validation command: `npm run validate:all`, `make validate`, etc.
-- Execute if available
-- Exit with error if validation fails
-- Resolve any problems before continuing
+- Execute if available and show output
+- If ANY test or validation fails: fix at root cause, re-run, show output again
+- Exit with error if verification fails — do not proceed to commit
 
 **Step 6:** Stage and commit with pre-commit hook handling:
 - Run `git add .`

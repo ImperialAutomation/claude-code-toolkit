@@ -51,7 +51,12 @@ Ask focused questions to fill the gaps. Cover:
 - **Dependencies**: Does this require other work to be done first?
 - **Size**: Is this one PR or should it be split?
 
-Ask 2-4 questions per round. Iterate until the issue is sharp enough to implement or decompose.
+**Interaction style:**
+- Ask ONE question at a time — don't overwhelm with a wall of questions
+- When feasible, offer 2-3 concrete options instead of open-ended questions
+- Validate understanding incrementally before moving on
+
+Iterate until the issue is sharp enough to implement or decompose.
 
 ## Phase 3: Propose Updated Issue
 

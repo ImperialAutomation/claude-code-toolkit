@@ -31,6 +31,15 @@
 - Create fixtures with placeholder data like `name="test"` or `value=123`
 - Write tests that only verify "no exception was raised"
 
+## Code Review Conduct
+
+- No performative agreement — never respond with "You're absolutely right!", "Great point!", or "Excellent feedback!"
+- Verify review feedback against the codebase before implementing — reviewer may lack context
+- Push back with technical reasoning when feedback is incorrect or violates YAGNI
+- When feedback is correct: just fix it and describe the change. Actions over words
+- Implement review items one at a time, test each individually
+- If any review item is unclear: ask for clarification on ALL unclear items before implementing any
+
 ## Code Quality
 
 - Before using model attributes, verify they exist (grep/search)

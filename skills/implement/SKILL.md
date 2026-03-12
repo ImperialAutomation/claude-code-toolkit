@@ -38,67 +38,87 @@ Follow the Test Quality Policy and Anti-Patterns from CLAUDE.md throughout all p
    * Check what attributes/methods ACTUALLY exist on models you'll use
    * Find existing patterns for similar functionality (grep/search)
    * NEVER assume a model has an attribute - READ the model first
-3. Create detailed implementation plan showing:
+3. Create detailed implementation plan as **numbered steps of max 5 minutes each**:
    * Issue requirements understanding
    * Existing code patterns you found and will follow
    * Files to modify/create
-   * Test strategy: what scenarios to test, what to mock (and why), what to test through the full stack
-   * Todo list with explicit reference to steps in phases 2-4 below
+   * Per step: what test to write, what code to implement, what to verify
+   * Each step must be self-contained: one test + one piece of functionality + one commit
+   * Steps must be ordered so each builds on the previous commit
 
 STOP HERE and ask for confirmation before proceeding to implementation.
 
-## Phase 2: Branch & Implementation
+## Phase 2: Branch & TDD Implementation
 
 1. Create and checkout branch: `issue-$ARGUMENTS-<descriptive-label>`
 2. Before writing new code, verify your assumptions:
    * If using model attributes, confirm they exist: `grep "attribute_name" models.py`
    * If importing classes, confirm they exist: `python -c "from module import Class"`
    * If ANY verification fails, STOP and reassess your approach
-3. Implement all changes following the plan and existing patterns
-4. Implement tests following the Test Quality Policy from CLAUDE.md
 
-## Phase 3: Test Review & Verification (MANDATORY)
+### Execute each plan step using the TDD cycle:
 
-DO NOT SKIP THIS PHASE. DO NOT PROCEED WITHOUT GREEN TESTS.
+**For each step in the plan, follow this exact sequence:**
 
-### Step 1: Self-review before running tests
+1. **RED — Write a failing test first**
+   * Write the minimal test that demonstrates the desired behavior
+   * Run the test — it MUST fail
+   * If it passes immediately, the test proves nothing — rewrite it
+   * Show the failing output
 
-Before running anything, critically review your own test code:
-* Are you testing implementation details or actual behavior?
-* Would these tests still pass if the feature is subtly broken?
-* Are your mocks hiding the exact bugs you should be catching?
-* Do your fixtures represent realistic data or lazy placeholders?
+2. **GREEN — Write the simplest code to pass**
+   * Implement only what's needed to make the test pass
+   * Run the test — it MUST pass now
+   * Show the passing output
 
-If you find weaknesses, fix them BEFORE running the tests.
+3. **REFACTOR — Clean up, then commit**
+   * Remove duplication, improve naming if needed
+   * Run tests again to confirm nothing broke
+   * Commit with a descriptive message for this step
 
-### Step 2: Run tests and SHOW THE OUTPUT
+4. **Move on — Focus shifts to the next step**
+   * Do not revisit completed steps unless a later test breaks them
+   * Each commit is a checkpoint — previous context can be released
+
+**When TDD doesn't apply** (config files, migrations, static assets):
+* Implement the change, verify it works, commit. Skip red/green.
+
+### Self-review between steps
+
+After every 2-3 steps, briefly check:
+* Are tests testing real behavior or just that code runs without errors?
+* Are mocks hiding bugs? (only mock external services)
+* Do fixtures use realistic data?
+
+Fix weaknesses immediately before continuing.
+
+## Phase 3: Final Verification (MANDATORY)
+
+DO NOT SKIP THIS PHASE. NO COMPLETION CLAIMS WITHOUT FRESH EVIDENCE.
+
+### Step 1: Run the full test suite
 
 ```bash
 pytest tests/path/to/your_test.py -v
 ```
 
-* Paste the actual pytest output in your response
-* If you see ANY error (ImportError, AttributeError, assertion failures), STOP
+* Run ALL tests fresh — do not rely on earlier green runs
+* Paste the actual output in your response
+* If ANY test fails, fix at root cause and re-run
 
-### Step 3: Fix failures at the root cause
-
-If tests fail:
-* Read the error message carefully
-* Fix the root cause (not just the symptom)
-* Re-run tests and show output again
-* Repeat until ALL tests pass
-
-### Step 4: Run project validation
+### Step 2: Run project validation
 
 * Check for: `npm run validate:all`, `make validate`, `./validate.sh`
-* If validation command exists, run it
+* If validation command exists, run it and show output
 * If backend schemas were modified, ensure OpenAPI is regenerated
-* Paste the actual output (or summary if long)
 * Fix any errors before proceeding
 
-### Step 5: Commit changes
+### Step 3: Verify claims with evidence
 
-Commit with descriptive message summarizing what was implemented and tested.
+Before proceeding to PR creation:
+* Every claim ("works", "tested", "complete") must have matching test output
+* No "should work", "probably fine", or "seems correct" — only proven facts
+* If you cannot prove a claim, go back and add the missing test
 
 ## Phase 4: PR Creation
 
