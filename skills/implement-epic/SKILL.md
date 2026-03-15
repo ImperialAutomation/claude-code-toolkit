@@ -26,9 +26,11 @@ This skill runs autonomously — no confirmation stops between sub-issues.
 Main session (orchestrator):
 ├── Phase 0: Setup — parse epic, determine waves, create feature branch + tracking PR
 ├── Wave 1:
-│   ├── Task agent → implement issue #A (own context window)
-│   │   └── returns: { status: "success", pr: 42 } or { status: "failed", error: "..." }
-│   ├── Task agent → implement issue #B (own context window)
+│   ├── Classify issue #A → "implement" or "audit"
+│   ├── If implement: Task agent → write code, test, PR, merge into feature branch
+│   │   └── returns: SUCCESS (pr: 42) or FAILED (error)
+│   ├── If audit: Task agent → scan codebase, run scripts, post report as issue comment
+│   │   └── returns: AUDIT_COMPLETE (findings, recommendation) or FAILED (error)
 │   ├── Handle results: update tracking PR
 │   └── (repeat for all issues in wave)
 ├── Wave 2-N: same pattern
@@ -129,19 +131,35 @@ git checkout <feature_branch>
 git pull origin <feature_branch>
 ```
 
-#### Step 2: Fetch issue details
+#### Step 2: Fetch issue details and classify
 
 ```bash
 ~/.claude/bin/gh-save.sh /tmp/sub-issue-<N>.json issue view <N> --json title,body,labels
 ```
 
-Use the Read tool to read `/tmp/sub-issue-<N>.json`. Store the issue title and body — you need this for the sub-agent prompt.
+Use the Read tool to read `/tmp/sub-issue-<N>.json`. Store the issue title, body, and labels.
+
+**Classify the issue as `audit` or `implement`:**
+
+An issue is an **audit** issue if ANY of these match:
+- Title contains: "review", "audit", "scan", "check", "verify", "assessment"
+- Labels include: `security` combined with words like "review" or "audit" in the title
+- Body focuses on verification/scanning rather than code changes (checklist of things to check, not things to build)
+- The issue explicitly says "no code changes" or "document findings"
+
+An issue is an **implement** issue if it requires writing/changing application code (adding middleware, creating endpoints, modifying configuration, etc.).
+
+**When in doubt:** classify as `implement` — it's better to write code and discover it's an audit than to only audit when code was needed.
 
 #### Step 3: Spawn sub-agent via Task tool
 
-Use the Task tool with `subagent_type: "general-purpose"` to implement the sub-issue. The sub-agent gets its own context window and full tool access.
+Use the Task tool with `subagent_type: "general-purpose"`. The sub-agent gets its own context window and full tool access.
 
-**The prompt must include everything the sub-agent needs** (it has no access to the main session's context):
+**The prompt depends on the issue classification.**
+
+---
+
+##### Step 3A: Prompt for `implement` issues
 
 ```
 Implement GitHub issue #<N> for epic #$ARGUMENTS.
@@ -203,9 +221,110 @@ ATTEMPTS: <what was tried>
 LAST_ERROR_OUTPUT: <relevant error output>
 ```
 
+---
+
+##### Step 3B: Prompt for `audit` issues
+
+Audit issues do NOT produce code or PRs. They scan the codebase and post a report as a comment on the issue.
+
+```
+Perform a security audit for GitHub issue #<N> (part of epic #$ARGUMENTS).
+
+## Issue
+Title: <title>
+Body: <full issue body>
+
+## Project Context
+<project_context from Phase 0 Step 4 — CLAUDE.md contents, tech stack, test commands>
+
+## Audit Instructions
+
+You are performing a security AUDIT — your output is a structured report, NOT code changes.
+
+1. Read the issue body carefully to understand which security domain to review.
+2. Determine which domain this issue covers. Use the mapping below:
+
+   - "dependency" / "dependencies" / "npm audit" / "pip-audit" → Run: `~/.claude/bin/deps-audit.sh`
+   - "authentication" / "authorization" / "JWT" / "auth" → Review auth code: Glob for `**/auth/**`, read security.py, dependencies.py, permissions.py
+   - "input validation" / "OWASP" / "XSS" / "SQL injection" → Search for injection patterns: raw SQL, dangerouslySetInnerHTML, subprocess, eval, user-controlled URLs
+   - "file upload" / "photo" / "image" → Review upload handlers: Glob for `**/upload*`, `**/photo*`, check MIME validation, size limits, processing
+   - "security headers" / "HTTP headers" / "CSP" / "HSTS" → Run: `~/.claude/bin/security-headers-check.sh <target-url-if-known>` and review middleware config
+   - "rate limit" / "throttle" / "brute force" → Search for rate limiting: Grep for `rate_limit`, `throttle`, `slowapi`, `RateLimiter`. Map which endpoints are protected
+   - "database" / "SQL" / "mass assignment" → Review ORM usage, check for raw SQL, verify sensitive fields excluded from responses
+   - "infrastructure" / "secrets" / "Docker" / "session" / "cookie" → Run: `~/.claude/bin/secret-scan.sh` + `~/.claude/bin/env-audit.sh` + `~/.claude/bin/docker-audit.sh`
+   - "pentest" / "ZAP" / "penetration" → Run: `~/.claude/bin/owasp-zap-scan.sh <target-url>` (only if a target URL is available, otherwise note it requires a running target)
+
+3. Perform the domain-specific audit:
+   - Run applicable `~/.claude/bin/` scripts
+   - Use Glob, Grep, Read to systematically review relevant code
+   - For each finding, record: severity (CRITICAL/HIGH/MEDIUM/LOW/INFO), file:line, description, remediation
+
+4. Generate the audit report in this format:
+
+```markdown
+## Security Audit Report: <domain>
+
+**Issue:** #<N>
+**Date:** <today>
+**Auditor:** Claude Code (automated)
+
+### Executive Summary
+<1-3 sentences: overall assessment>
+
+### Findings
+
+| # | Severity | Finding | File | Remediation |
+|---|----------|---------|------|-------------|
+| 1 | HIGH | ... | path:line | ... |
+
+### Detailed Findings
+<per finding: description, evidence, fix>
+
+### Verified Controls
+<what was checked and found secure — audit trail>
+
+### Recommendation
+<PASS / PASS WITH WARNINGS / FAIL>
+```
+
+5. Post the report as an issue comment:
+   - Write report to `/tmp/security-audit-report-<N>.md` using the Write tool
+   - Post: `gh issue comment <N> --body-file /tmp/security-audit-report-<N>.md`
+
+## Tool Rules
+- Use Glob to find files — NEVER use `find` or `ls` via Bash
+- Use Grep to search file contents — NEVER use `grep` or `rg` via Bash
+- Use Read to read files — NEVER use `cat`, `head`, or `tail` via Bash
+- Bash is for `gh` commands, `git` commands, `~/.claude/bin/` scripts only
+- NEVER write files via Bash — use the Write tool to write to `/tmp/`, then reference the file
+
+## Response Format
+
+When done, respond with EXACTLY one of these formats:
+
+AUDIT_COMPLETE:
+FINDINGS: <number of findings>
+CRITICAL: <number of critical findings>
+RECOMMENDATION: <PASS / PASS WITH WARNINGS / FAIL>
+SUMMARY: <one-line summary>
+
+FAILED:
+ERROR: <description of what went wrong>
+ATTEMPTS: <what was tried>
+LAST_ERROR_OUTPUT: <relevant error output>
+```
+
 #### Step 4: Handle sub-agent result
 
 Parse the sub-agent's response:
+
+**On audit complete** (response contains `AUDIT_COMPLETE`):
+- Extract findings count, critical count, recommendation, and summary
+- Record: issue #N → 🔍 Audited (<recommendation>)
+- If recommendation is PASS: mark as ✅ in tracking PR
+- If recommendation is PASS WITH WARNINGS: mark as ⚠️ in tracking PR
+- If recommendation is FAIL: mark as ❌ in tracking PR, create follow-up issue for critical findings
+- No PR is created for audit issues — the report is posted as an issue comment by the sub-agent
 
 **On success** (response contains `SUCCESS`):
 - Extract PR number and summary
@@ -276,14 +395,17 @@ Display a final report:
 ## Epic #$ARGUMENTS — Implementation Complete
 
 ### Results
-| # | Issue | Status | PR |
-|---|-------|--------|-----|
-| 1 | #XX — Title | ✅ Merged | #YY |
-| 2 | #XX — Title | ❌ Failed → Bug #ZZ | - |
-| 3 | #XX — Title | ⏭️ Skipped (depends on #XX) | - |
+| # | Issue | Type | Status | PR/Report |
+|---|-------|------|--------|-----------|
+| 1 | #XX — Title | impl | ✅ Merged | #YY |
+| 2 | #XX — Title | audit | 🔍 PASS | comment |
+| 3 | #XX — Title | audit | ⚠️ WARNINGS | comment |
+| 4 | #XX — Title | impl | ❌ Failed → Bug #ZZ | - |
+| 5 | #XX — Title | impl | ⏭️ Skipped (depends on #XX) | - |
 
 ### Statistics
-- ✅ Completed: X of Y
+- ✅ Implemented: X of Y
+- 🔍 Audited: X (PASS: X, WARNINGS: X, FAIL: X)
 - ❌ Failed: X (bug issues created: #AA, #BB)
 - ⏭️ Skipped: X
 

@@ -106,6 +106,14 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `batch-pr-for-issues.sh` | `batch-pr-for-issues.sh <repo> <issues...>` | Find merged/open PRs linked to issues |
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
+| `i18n-audit.py` | `i18n-audit.py [project-dir]` | Audit i18n translation keys (missing, unused, cross-locale) |
+| `env-audit.sh` | `env-audit.sh [project-dir]` | Audit .env vs .env.example sync, empty values, secrets in git |
+| `deps-audit.sh` | `deps-audit.sh [project-dir]` | Audit npm/pip dependencies for known vulnerabilities |
+| `docker-audit.sh` | `docker-audit.sh [project-dir]` | Audit Docker config (unpinned images, health checks, secrets) |
+| `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/) |
+| `secret-scan.sh` | `secret-scan.sh [project-dir]` | Scan codebase for hardcoded secrets, API keys, tokens |
+| `security-headers-check.sh` | `security-headers-check.sh <url>` | Check HTTP security headers (CSP, HSTS, X-Frame-Options, etc.) |
+| `owasp-zap-scan.sh` | `owasp-zap-scan.sh <url>` | OWASP ZAP baseline scan via Docker (requires running target) |
 
 These scripts are already allowed in the global settings (`~/.claude/settings.json`) installed by the toolkit.
 
@@ -124,7 +132,15 @@ claude-code-toolkit/
 │   ├── git-cleanup-merged-branch.sh ← cleanup after PR merge
 │   ├── batch-pr-for-issues.sh ← find merged/open PRs linked to issues
 │   ├── find-tracking-pr.sh   ← find tracking PR for a parent issue
-│   └── extract-issue-from-branch.sh ← extract issue number from branch name
+│   ├── extract-issue-from-branch.sh ← extract issue number from branch name
+│   ├── i18n-audit.py              ← audit i18n translation keys across a project
+│   ├── env-audit.sh               ← audit .env vs .env.example sync
+│   ├── deps-audit.sh              ← audit npm/pip dependencies for vulnerabilities
+│   ├── docker-audit.sh            ← audit Docker config for common issues
+│   ├── project-test.sh            ← run pytest with automatic venv detection
+│   ├── secret-scan.sh             ← scan for hardcoded secrets and API keys
+│   ├── security-headers-check.sh  ← check HTTP security headers
+│   └── owasp-zap-scan.sh          ← OWASP ZAP baseline security scan
 ├── skills/                    ← skill definitions (procedures)
 │   ├── refine/
 │   ├── implement/
@@ -135,6 +151,9 @@ claude-code-toolkit/
 │   ├── extend/
 │   ├── finish/
 │   ├── help-issues/
+│   ├── audit/
+│   ├── security-audit/
+│   ├── debug/
 │   ├── ss/
 │   ├── sync-closes/
 │   └── update-tracking/
@@ -200,6 +219,9 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 | `/sync-closes` | `/sync-closes <pr>` | Sync all Closes statements in tracking PR |
 | `/cleanup` | `/cleanup` | Clean up after merging a PR (checkout base, delete branch) |
 | `/help-issues` | `/help-issues` | Show quick reference for issue management |
+| `/audit` | `/audit [i18n\|env\|deps\|docker\|all]` | Run project audits (i18n, env, deps, docker) |
+| `/security-audit` | `/security-audit [domain\|issue]` | OWASP-guided security code review per domain |
+| `/debug` | `/debug <description>` | Systematic debugging — find root cause before fixes |
 | `/ss` | `/ss [number]` | Find recent screenshots |
 
 ---

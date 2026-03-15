@@ -7,6 +7,27 @@
 - Commit messages in English, concise and descriptive
 - `docker compose` (with space), never `docker-compose` (with hyphen)
 
+## Running Tests (CRITICAL — permissions)
+
+Claude Code permissies matchen op het EERSTE woord van Bash-commando's.
+Geketende commando's als `cd X && source venv && pytest` starten met `cd`, niet `pytest`.
+Dit triggert ALTIJD een permissieprompt, ook al is `Bash(pytest *)` allowed.
+
+VERPLICHT voor alle pytest-aanroepen:
+
+    ~/.claude/bin/project-test.sh [pytest-args...]
+
+Dit script:
+- Matcht `Bash(~/.claude/bin/*)` (altijd allowed, geen permissieprompt)
+- Detecteert en gebruikt automatisch project venv (.venv, backend/.venv, etc.)
+- Valideert dat je binnen ~/Projects/ draait
+
+NOOIT gebruiken:
+- `cd path && pytest ...` — eerste woord is `cd`, niet `pytest`
+- `source .venv/bin/activate && pytest ...` — eerste woord is `source`
+- `python -m pytest ...` (direct) — gebruik het wrapper script
+- `.venv/bin/pytest ...` (direct) — gebruik het wrapper script
+
 ## Test Quality Policy
 
 - Tests must verify real behavior through the full stack where possible
@@ -52,6 +73,19 @@
 - Focus on current purpose, not implementation history
 - Include usage guidance and critical warnings
 - No historical changelogs in code documentation
+
+## Available Utilities
+
+- **Running tests** (`~/.claude/bin/project-test.sh`): see "Running Tests" section above
+- **Project audits** (`/audit`): run one or all project audits from `~/.claude/bin/`:
+  - `i18n-audit.py` — missing/unused/inconsistent translation keys (auto-detects framework)
+  - `env-audit.sh` — .env vs .env.example sync, empty values, secrets tracked by git
+  - `deps-audit.sh` — npm/pip dependency vulnerability scanning
+  - `docker-audit.sh` — unpinned images, missing health checks, root users, hardcoded secrets
+- **Security audit** (`/security-audit`): OWASP-guided security code review per domain. Uses:
+  - `secret-scan.sh` — scan codebase for hardcoded secrets, API keys, tokens
+  - `security-headers-check.sh <url>` — check HTTP security headers (CSP, HSTS, etc.)
+  - `owasp-zap-scan.sh <url>` — OWASP ZAP baseline scan via Docker (requires running target)
 
 ## Claude Code Workarounds
 

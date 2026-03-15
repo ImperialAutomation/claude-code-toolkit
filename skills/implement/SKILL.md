@@ -85,7 +85,7 @@ DO NOT SKIP THIS PHASE. NO COMPLETION CLAIMS WITHOUT FRESH EVIDENCE.
 ### Step 1: Run the full test suite
 
 ```bash
-pytest tests/path/to/your_test.py -v
+~/.claude/bin/project-test.sh tests/path/to/your_test.py -v
 ```
 
 * Run ALL tests fresh — do not rely on earlier green runs
