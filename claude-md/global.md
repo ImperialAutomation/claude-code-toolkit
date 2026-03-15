@@ -9,30 +9,29 @@
 
 ## Bash Permissies (CRITICAL)
 
-Claude Code permissies matchen op het EERSTE woord van Bash-commando's.
-`cd X && python ...` matcht NIET op `Bash(python *)` — het eerste woord is `cd`.
+Twee regels die ALTIJD gelden:
 
-NOOIT `cd path &&` voor een commando zetten. Alternatieven:
-- Gebruik het volledige pad naar de binary: `/home/jan/Projects/PAM/backend/.venv/bin/python -c "..."`
-- Gebruik een `~/.claude/bin/` wrapper script (matcht altijd `Bash(~/.claude/bin/*)`)
-- Gebruik native tools waar mogelijk (Read ipv cat, Grep ipv grep)
+1. NOOIT `cd path &&` voor een commando zetten — permissies matchen op het EERSTE woord (`cd`), niet op het eigenlijke commando
+2. NOOIT absolute paden naar venv binaries gebruiken — `*` in permissiepatronen matcht NIET over `/` heen, dus `/home/.../venv/bin/python` matcht niet op `Bash(*/python *)`
 
-Dit geldt voor ALLE commando's, niet alleen pytest. Voorbeelden:
-- `cd X && python ...` → `/absolute/path/.venv/bin/python ...`
-- `cd X && pip install ...` → `/absolute/path/.venv/bin/pip install ...`
-- `cd X && npm run ...` → draai vanuit de juiste werkdirectory, niet via cd &&
-- `source .venv/bin/activate && ...` → gebruik het volledige pad naar de venv binary
+### Venv commando's
 
-### Pytest specifiek
+VERPLICHT `~/.claude/bin/` wrapper scripts gebruiken voor venv binaries:
 
-VERPLICHT voor alle pytest-aanroepen:
+    ~/.claude/bin/project-test.sh [pytest-args...]    # pytest
+    ~/.claude/bin/venv-run.sh python -c "..."          # python, pip, alembic, etc.
 
-    ~/.claude/bin/project-test.sh [pytest-args...]
+Deze scripts:
+- Matchen `Bash(~/.claude/bin/*)` (altijd allowed, geen permissieprompt)
+- Detecteren automatisch de project venv (.venv, backend/.venv, etc.)
+- Valideren dat je binnen ~/Projects/ draait
 
-Dit script:
-- Matcht `Bash(~/.claude/bin/*)` (altijd allowed, geen permissieprompt)
-- Detecteert en gebruikt automatisch project venv (.venv, backend/.venv, etc.)
-- Valideert dat je binnen ~/Projects/ draait
+### Wat NIET werkt (ook al lijkt het logisch)
+
+- `cd backend && python ...` — eerste woord is `cd`
+- `source .venv/bin/activate && python ...` — eerste woord is `source`
+- `/absolute/path/.venv/bin/python ...` — `*` matcht niet over `/`
+- `python -m pytest ...` — alleen als `python` in PATH zit EN `Bash(python *)` allowed is
 
 ## Test Quality Policy
 
@@ -82,7 +81,8 @@ Dit script:
 
 ## Available Utilities
 
-- **Running tests** (`~/.claude/bin/project-test.sh`): see "Running Tests" section above
+- **Running tests** (`~/.claude/bin/project-test.sh`): see "Bash Permissies" section above
+- **Venv commands** (`~/.claude/bin/venv-run.sh <cmd> [args]`): run any venv binary (python, pip, alembic, etc.)
 - **Project audits** (`/audit`): run one or all project audits from `~/.claude/bin/`:
   - `i18n-audit.py` — missing/unused/inconsistent translation keys (auto-detects framework)
   - `env-audit.sh` — .env vs .env.example sync, empty values, secrets tracked by git

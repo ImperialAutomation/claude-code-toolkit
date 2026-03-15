@@ -111,6 +111,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `deps-audit.sh` | `deps-audit.sh [project-dir]` | Audit npm/pip dependencies for known vulnerabilities |
 | `docker-audit.sh` | `docker-audit.sh [project-dir]` | Audit Docker config (unpinned images, health checks, secrets) |
 | `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/) |
+| `venv-run.sh` | `venv-run.sh <cmd> [args...]` | Run any venv binary (python, pip, alembic) with auto-detection |
 | `secret-scan.sh` | `secret-scan.sh [project-dir]` | Scan codebase for hardcoded secrets, API keys, tokens |
 | `security-headers-check.sh` | `security-headers-check.sh <url>` | Check HTTP security headers (CSP, HSTS, X-Frame-Options, etc.) |
 | `owasp-zap-scan.sh` | `owasp-zap-scan.sh <url>` | OWASP ZAP baseline scan via Docker (requires running target) |
@@ -138,6 +139,7 @@ claude-code-toolkit/
 │   ├── deps-audit.sh              ← audit npm/pip dependencies for vulnerabilities
 │   ├── docker-audit.sh            ← audit Docker config for common issues
 │   ├── project-test.sh            ← run pytest with automatic venv detection
+│   ├── venv-run.sh                ← run any venv binary (python, pip, alembic)
 │   ├── secret-scan.sh             ← scan for hardcoded secrets and API keys
 │   ├── security-headers-check.sh  ← check HTTP security headers
 │   └── owasp-zap-scan.sh          ← OWASP ZAP baseline security scan
