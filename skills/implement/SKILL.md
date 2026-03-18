@@ -82,13 +82,14 @@ Fix weaknesses immediately before continuing.
 
 DO NOT SKIP THIS PHASE. NO COMPLETION CLAIMS WITHOUT FRESH EVIDENCE.
 
-### Step 1: Run the full test suite
+### Step 1: Run targeted tests for your changes
 
 ```bash
 ~/.claude/bin/project-test.sh tests/path/to/your_test.py -v
 ```
 
-* Run ALL tests fresh — do not rely on earlier green runs
+* Run your feature's tests fresh — do not rely on earlier green runs
+* DO NOT run the entire test suite — that runs in CI after PR creation
 * Paste the actual output in your response
 * If ANY test fails, fix at root cause and re-run
 

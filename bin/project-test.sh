@@ -32,6 +32,15 @@ for arg in "$@"; do
   # Relative paths are fine — they resolve within PWD which is already validated
 done
 
+# Warn if no test path specified (likely unintentional full suite run)
+has_path_arg=false
+for arg in "$@"; do
+  [[ "$arg" != -* ]] && has_path_arg=true && break
+done
+if [[ "$has_path_arg" == false ]]; then
+  echo "[project-test.sh] WARNING: No test path specified — running full suite. Use a specific path for faster runs." >&2
+fi
+
 # Auto-detect venv and use its pytest directly (no activation needed)
 PYTEST_CMD=""
 for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv; do

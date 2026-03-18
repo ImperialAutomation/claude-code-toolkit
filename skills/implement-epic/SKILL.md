@@ -182,7 +182,9 @@ Body: <full issue body>
 2. Read the codebase: use Glob, Grep, Read to understand relevant files
 3. Implement the changes following the project policies above
 4. Write tests following the Test Quality Policy
-5. Run tests: <specific test command from CLAUDE.md>
+5. Run ONLY the tests relevant to your changes — NEVER the full test suite:
+   `~/.claude/bin/project-test.sh tests/unit/test_<relevant>/ -v`
+   The full suite and project validation run after all sub-issues are done — not here.
 6. If tests fail: fix and retry (up to 3 attempts total)
 7. If tests pass:
    - Commit with a descriptive message (use Write to /tmp/commit-msg.txt, then `git commit -F /tmp/commit-msg.txt`)
@@ -383,11 +385,22 @@ gh pr edit <tracking_pr> --body-file /tmp/tracking-pr-update.md
 
 **CRITICAL: NEVER merge the tracking PR. NEVER close the parent issue. NEVER push to main or develop directly. The tracking PR stays as a draft for the user to review and merge manually.**
 
-### Step 1: Sync Closes statements
+### Step 1: Run project validation
+
+Checkout the feature branch and run the project validation suite:
+
+```bash
+git checkout <feature_branch>
+npm run validate:all
+```
+
+If validation fails, fix issues and commit directly to the feature branch.
+
+### Step 2: Sync Closes statements
 
 Ensure all completed sub-issue numbers are in the tracking PR body as `Closes #<N>` statements. Failed and skipped issues should NOT have Closes statements.
 
-### Step 2: Show summary
+### Step 3: Show summary
 
 Display a final report:
 
