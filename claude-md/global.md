@@ -9,16 +9,10 @@
 
 ## Bash Permissies (CRITICAL)
 
-Drie regels die ALTIJD gelden:
+Twee regels die ALTIJD gelden:
 
 1. NOOIT `cd path &&` voor een commando zetten — permissies matchen op het EERSTE woord (`cd`), niet op het eigenlijke commando
 2. NOOIT absolute paden naar venv binaries gebruiken — `*` in permissiepatronen matcht NIET over `/` heen, dus `/home/.../venv/bin/python` matcht niet op `Bash(*/python *)`
-3. NOOIT shell redirects (`>`, `>>`, `2>`, `2>/dev/null`), for-loops, of `&&` chains gebruiken — dit triggert permissie-prompts. Gebruik in plaats daarvan:
-   - `gh` output opslaan: `~/.claude/bin/gh-save.sh /tmp/output.json <gh-args>`
-   - Batch `gh` operations: `~/.claude/bin/batch-issue-status.sh <issue-numbers...>` of `~/.claude/bin/batch-issue-view.sh <issue-numbers...>`
-   - Bestanden schrijven: Write tool → referentie in Bash
-   - Git commits: `~/.claude/bin/git-commit.sh "message"`
-   - Push + PR: `~/.claude/bin/git-push-pr-merge.sh --base <branch> --title "..." --body-file /tmp/pr-body.md`
 
 ### Venv commando's
 
@@ -38,11 +32,6 @@ Deze scripts:
 - `source .venv/bin/activate && python ...` — eerste woord is `source`
 - `/absolute/path/.venv/bin/python ...` — `*` matcht niet over `/`
 - `python -m pytest ...` — alleen als `python` in PATH zit EN `Bash(python *)` allowed is
-- `gh issue view 123 --json ... > /tmp/file.json` — shell redirect triggert permissie
-- `git commit -m "$(cat <<'EOF' ... EOF)"` — heredoc triggert permissie
-- `command 2>/dev/null` — stderr redirect triggert permissie
-- `for i in 1 2 3; do gh ...; done` — for-loop, eerste woord is `for` niet `gh`
-- `cmd1 && cmd2` als chain — permissie matcht alleen op eerste woord van de hele string
 
 ## Test Quality Policy
 
