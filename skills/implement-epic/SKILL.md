@@ -27,10 +27,10 @@ Main session (orchestrator):
 ├── Phase 0: Setup — parse epic, determine waves, create feature branch + tracking PR
 ├── Wave 1:
 │   ├── Classify issue #A → "implement" or "audit"
-│   ├── If implement: Task agent → write code, test, PR, merge into feature branch
-│   │   └── returns: SUCCESS (pr: 42) or FAILED (error)
-│   ├── If audit: Task agent → scan codebase, run scripts, post report as issue comment
-│   │   └── returns: AUDIT_COMPLETE (findings, recommendation) or FAILED (error)
+│   ├── Spawn background Task agent (run_in_background: true)
+│   ├── Poll progress every 30-45s via /tmp/epic-progress-<N>.txt
+│   │   └── Report phase + test results to user in real-time
+│   ├── On completion: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
 │   ├── Handle results: update tracking PR
 │   └── (repeat for all issues in wave)
 ├── Wave 2-N: same pattern
@@ -39,7 +39,8 @@ Main session (orchestrator):
 
 The main session NEVER implements code itself. It only:
 - Parses the epic and determines execution order
-- Spawns Task agents for each sub-issue
+- Spawns background Task agents for each sub-issue
+- **Monitors progress via `/tmp/epic-progress-<N>.txt` and reports to user**
 - Handles results (success/failure/skip)
 - Updates the tracking PR
 - Creates bug issues on failure
@@ -70,14 +71,17 @@ Group sub-issues into waves based on dependencies:
 
 Issues within the same wave are implemented sequentially (each needs the branch state from the previous).
 
-### Step 4: Read project context
+### Step 4: Prepare project context for sub-agents
 
-Read all CLAUDE.md files in the project (root, frontend, backend — whatever exists) and collect:
-- Tech stack and project structure
-- Test commands and validation commands
-- Code quality policies
+Copy all CLAUDE.md files to `/tmp/` so sub-agents can lazy-load them (avoids embedding 20-30 KB of identical context in every sub-agent prompt):
 
-Store this as `project_context` — you will pass it to each sub-agent.
+```bash
+cp CLAUDE.md /tmp/epic-claude-root.md
+cp frontend/CLAUDE.md /tmp/epic-claude-frontend.md 2>/dev/null || true
+cp backend/app/CLAUDE.md /tmp/epic-claude-backend.md 2>/dev/null || true
+```
+
+Also read the root CLAUDE.md yourself to extract the **one-line tech stack summary** and **test/validation commands** — store these as `project_summary` (max 5 lines). This small summary goes into every sub-agent prompt; the full CLAUDE.md files are read by the sub-agent on demand.
 
 ### Step 5: Check/create feature branch
 
@@ -153,7 +157,7 @@ An issue is an **implement** issue if it requires writing/changing application c
 
 #### Step 3: Spawn sub-agent via Task tool
 
-Use the Task tool with `subagent_type: "general-purpose"`. The sub-agent gets its own context window and full tool access.
+Use the Task tool with `subagent_type: "general-purpose"` and `run_in_background: true`. The sub-agent gets its own context window and full tool access.
 
 **The prompt depends on the issue classification.**
 
@@ -169,7 +173,13 @@ Title: <title>
 Body: <full issue body>
 
 ## Project Context
-<project_context from Phase 0 Step 4 — CLAUDE.md contents, tech stack, test commands>
+<project_summary — max 5 lines: tech stack, test command, validation command>
+
+Project policies are in these files — read them BEFORE writing code:
+- /tmp/epic-claude-root.md (project overview, naming conventions, dev commands)
+- /tmp/epic-claude-frontend.md (frontend architecture — read if modifying frontend)
+- /tmp/epic-claude-backend.md (backend architecture — read if modifying backend)
+Read only the files relevant to your issue. Do NOT skip this step.
 
 ## Branch Setup
 - Feature branch: <feature_branch>
@@ -202,6 +212,27 @@ Body: <full issue body>
 - Use Write/Edit for file creation and modification — not Bash (echo, cat, sed, awk)
 - Bash is for: git, gh, npm, docker, and `~/.claude/bin/` scripts only
 
+## Progress Reporting
+
+Write your current phase to `/tmp/epic-progress-<N>.txt` using the Write tool at each milestone.
+Format (one line per field, only PHASE is required):
+
+PHASE: <milestone-name>
+DETAIL: <optional context>
+TESTS: <passed>/<total> passed, <failed> failed
+
+Milestones to report (update the file BEFORE starting each phase):
+- READING_CODEBASE — when you start exploring files. DETAIL: which directories/files
+- WRITING_TESTS — when you start writing test code. DETAIL: number of test classes/cases
+- RUNNING_TESTS_RED — after running tests that should fail. TESTS: 0/8 passed, 8 failed
+- IMPLEMENTING — when writing production code. DETAIL: which files you're modifying
+- RUNNING_TESTS_GREEN — after running tests that should pass. TESTS: 8/8 passed, 0 failed
+- COMMITTING — when staging and committing. DETAIL: number of files staged
+- CREATING_PR — when pushing and creating PR
+- MERGING_PR — after merging the PR. DETAIL: PR number
+
+This is critical for the orchestrator to track and report your progress to the user.
+
 ## Response Format
 
 When done, respond with EXACTLY one of these formats:
@@ -209,6 +240,9 @@ When done, respond with EXACTLY one of these formats:
 SUCCESS:
 PR_NUMBER: <number>
 SUMMARY: <one-line description of what was implemented>
+FILES_CHANGED: <count of files added or modified>
+TESTS_WRITTEN: <count of test functions written>
+TESTS_PASSED: <passed>/<total>
 
 FAILED:
 ERROR: <description of what went wrong>
@@ -230,7 +264,12 @@ Title: <title>
 Body: <full issue body>
 
 ## Project Context
-<project_context from Phase 0 Step 4 — CLAUDE.md contents, tech stack, test commands>
+<project_summary — max 5 lines: tech stack, test command, validation command>
+
+Project policies are in these files — read them BEFORE starting your audit:
+- /tmp/epic-claude-root.md (project overview, naming conventions)
+- /tmp/epic-claude-backend.md (backend architecture, security patterns)
+Read only the files relevant to your audit domain. Do NOT skip this step.
 
 ## Audit Instructions
 
@@ -291,6 +330,23 @@ You are performing a security AUDIT — your output is a structured report, NOT 
 - Use Write/Edit for file creation and modification — not Bash (echo, cat, sed, awk)
 - Bash is for: git, gh, `~/.claude/bin/` scripts only
 
+## Progress Reporting
+
+Write your current phase to `/tmp/epic-progress-<N>.txt` using the Write tool at each milestone.
+Format (one line per field, only PHASE is required):
+
+PHASE: <milestone-name>
+DETAIL: <optional context>
+
+Milestones to report (update the file BEFORE starting each phase):
+- SCANNING_CODEBASE — when you start reviewing code. DETAIL: which directories
+- RUNNING_AUDIT_SCRIPTS — when running audit scripts. DETAIL: which script
+- ANALYZING_RESULTS — when processing results. DETAIL: findings count so far
+- WRITING_REPORT — when writing the report. DETAIL: total findings and critical count
+- POSTING_REPORT — when posting the comment
+
+This is critical for the orchestrator to track and report your progress to the user.
+
 ## Response Format
 
 When done, respond with EXACTLY one of these formats:
@@ -307,6 +363,49 @@ ATTEMPTS: <what was tried>
 LAST_ERROR_OUTPUT: <relevant error output>
 ```
 
+#### Step 3C: Monitor sub-agent progress
+
+After spawning the background sub-agent:
+
+1. Store the `task_id` from the Task tool response
+2. **Poll every 30-45 seconds** until the agent completes:
+   a. Read `/tmp/epic-progress-<N>.txt` (ignore if file doesn't exist yet — agent is still starting)
+   b. Parse the `PHASE:`, `DETAIL:`, and `TESTS:` fields
+   c. **Report to the user** with a human-readable status message:
+      ```
+      ⏳ #<N> (<title>): <human-readable phase>
+      ```
+      - If TESTS line is present, append: `— X/Y passed, Z failed`
+      - If DETAIL line is present, append in parentheses: `(modifying auth_service.py)`
+   d. Call `TaskOutput` with `block: false, timeout: 1000` to check if the agent is done
+   e. If not completed → continue polling (next iteration ~30-45s later)
+   f. If completed → extract the result text and proceed to Step 4
+
+3. **Phase display mapping** (use these human-readable labels):
+
+   | Progress file value | Display to user |
+   |---|---|
+   | READING_CODEBASE | Analyzing codebase |
+   | WRITING_TESTS | Writing tests |
+   | RUNNING_TESTS_RED | Running tests (RED phase) |
+   | IMPLEMENTING | Writing implementation |
+   | RUNNING_TESTS_GREEN | Running tests |
+   | REFACTORING | Refactoring |
+   | COMMITTING | Committing changes |
+   | CREATING_PR | Creating pull request |
+   | MERGING_PR | Merging PR |
+   | SCANNING_CODEBASE | Scanning codebase |
+   | RUNNING_AUDIT_SCRIPTS | Running audit scripts |
+   | ANALYZING_RESULTS | Analyzing results |
+   | WRITING_REPORT | Writing report |
+   | POSTING_REPORT | Posting report |
+   | DONE | Complete |
+
+4. **On completion**, report the final result to the user before proceeding:
+   - For implement: `✅ #<N> — <summary> | PR #<pr> | <files> files | <tests_passed>/<tests_total> tests`
+   - For audit: `🔍 #<N> — <summary> | <findings> findings, <critical> critical | <recommendation>`
+   - For failure: `❌ #<N> — Failed: <error summary>`
+
 #### Step 4: Handle sub-agent result
 
 Parse the sub-agent's response:
@@ -320,7 +419,7 @@ Parse the sub-agent's response:
 - No PR is created for audit issues — the report is posted as an issue comment by the sub-agent
 
 **On success** (response contains `SUCCESS`):
-- Extract PR number and summary
+- Extract PR number, summary, files changed, tests written, and tests passed
 - Record: issue #N → ✅ Complete, PR #X
 
 **On failure** (response contains `FAILED`):
@@ -401,9 +500,9 @@ Display a final report:
 ### Results
 | # | Issue | Type | Status | PR/Report |
 |---|-------|------|--------|-----------|
-| 1 | #XX — Title | impl | ✅ Merged | #YY |
-| 2 | #XX — Title | audit | 🔍 PASS | comment |
-| 3 | #XX — Title | audit | ⚠️ WARNINGS | comment |
+| 1 | #XX — Title | impl | ✅ Merged | PR #YY — 4 files, 12/12 tests |
+| 2 | #XX — Title | audit | 🔍 PASS | 3 findings, 0 critical |
+| 3 | #XX — Title | audit | ⚠️ WARNINGS | 5 findings, 1 critical |
 | 4 | #XX — Title | impl | ❌ Failed → Bug #ZZ | - |
 | 5 | #XX — Title | impl | ⏭️ Skipped (depends on #XX) | - |
 
