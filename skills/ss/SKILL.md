@@ -25,18 +25,21 @@ The user provides: `$ARGUMENTS`
 
 ## Implementation
 
-Use the Glob tool to find screenshots:
-```
-pattern: "*.*"
-path: "~/Pictures/Screenshots"
+**Do NOT use Glob** — it sorts by filename, not by modification time.
+
+Instead, use Bash to get the N most recent files:
+```bash
+ls -t ~/Pictures/Screenshots/*.png | head -[n]
 ```
 
-Glob returns files sorted by modification time (newest first). Take the first `[n]` results, where `[n]` is the number from `$ARGUMENTS` or 5 if not provided.
+Then use the Read tool to display each screenshot image.
 
 ## Output
 
-Show for each file:
-- File path
-- Date modified
+1. Run the `ls -t` command to get the N newest file paths
+2. Use the Read tool to display each screenshot image
+3. Show for each file: file path and the date from the filename
 
-**IMPORTANT:** Only search ~/Pictures/Screenshots - do not search other directories like Desktop, Downloads, or Pictures root.
+**IMPORTANT:**
+- Only search ~/Pictures/Screenshots - do not search other directories like Desktop, Downloads, or Pictures root
+- `ls -t` sorts by actual modification time, which is the correct sort order for finding recent screenshots
