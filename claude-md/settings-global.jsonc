@@ -41,19 +41,38 @@
 
       // ── Git & GitHub ──────────────────────────────────────────
       // Core workflow tools. Destructive git operations (force push,
-      // reset --hard) are blocked in the deny list below.
+      // reset --hard) are caught by the block-destructive hook.
       "Bash(git *)",
       "Bash(gh *)",
 
+      // ── Docker ────────────────────────────────────────────────
+      "Bash(docker *)",
+
+      // ── Node.js ───────────────────────────────────────────────
+      "Bash(npm *)",
+      "Bash(npx *)",
+
+      // ── Python ────────────────────────────────────────────────
+      // Direct python/ruff/uv invocations. For venv binaries, prefer
+      // ~/.claude/bin/venv-run.sh (auto-detects venv).
+      "Bash(python *)",
+      "Bash(*/python *)",
+      "Bash(ruff *)",
+      "Bash(*/ruff *)",
+      "Bash(uv *)",
+      "Bash(*/uv *)",
+      "Bash(source *)",
+
       // ── Toolkit ───────────────────────────────────────────────
-      // Helper scripts from the toolkit's bin/ directory.
+      // Helper scripts and hooks from the toolkit's bin/ directory.
       "Bash(~/.claude/bin/*)",
 
       // ── System ────────────────────────────────────────────────
       "Bash(xdg-open *)",
       "Read(~/Pictures/Screenshots/**)",
+      "Read(~/.claude/**)",
 
-      // ── Temp files ──────────────────────────────────────────────
+      // ── Temp files ────────────────────────────────────────────
       // Allow writing/editing temp files for commit messages, issue
       // bodies, and other intermediary files.
       "Write(/tmp/*)",
@@ -61,11 +80,42 @@
     ],
     "deny": [
       // ── Destructive operations ────────────────────────────────
-      // These can cause irreversible damage. Claude will warn and
-      // ask for confirmation if these are ever needed.
+      // Hard deny — Claude will warn and ask for confirmation.
+      // The block-destructive hook provides additional pattern-based
+      // protection (force push, reset --hard, DROP TABLE, etc.).
       "Bash(rm -rf /)",
       "Bash(rm -rf /*)",
       "Bash(rm -rf ~)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  },
+  "alwaysThinkingEnabled": true,
+
+  // ── Hooks ───────────────────────────────────────────────────────
+  // Pre-tool hooks run BEFORE a tool executes. They work in ALL
+  // permission modes, including bypass-permissions.
+  //
+  // auto-approve: approves safe compound commands (redirects, pipes,
+  //   && chains, for loops) that permission matching would block.
+  // block-destructive: catches dangerous patterns (force push,
+  //   rm -rf, DROP TABLE, etc.). Exit code 2 = block.
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-auto-approve-bash.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-block-destructive.sh"
+          }
+        ]
+      }
     ]
   }
 }

@@ -99,31 +99,65 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 **Why?** Claude Code permissions match on the **first word** of a Bash command. An inline loop like `for issue in 15 16 17; do gh issue view $issue ...; done` gets blocked because the first word is `for`, not `gh`. By wrapping batch operations in scripts, permissions can match on the script path (`~/.claude/bin/*`).
 
+### Issue & PR management
+
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `batch-issue-view.sh` | `batch-issue-view.sh [--output FILE] <repo> <issues...>` | Fetch full issue details as JSON array |
 | `batch-issue-status.sh` | `batch-issue-status.sh <repo> <issues...>` | Fetch issue number/state/closed as JSON array |
-| `git-find-base-branch` | `git-find-base-branch` | Detect the base branch of the current branch |
-| `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `batch-pr-for-issues.sh` | `batch-pr-for-issues.sh <repo> <issues...>` | Find merged/open PRs linked to issues |
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
+| `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
+| `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
+
+### Git utilities
+
+| Script | Usage | Description |
+|--------|-------|-------------|
+| `git-find-base-branch` | `git-find-base-branch` | Detect the base branch of the current branch |
+| `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
+
+### Project audits
+
+| Script | Usage | Description |
+|--------|-------|-------------|
 | `i18n-audit.py` | `i18n-audit.py [project-dir]` | Audit i18n translation keys (missing, unused, cross-locale) |
 | `env-audit.sh` | `env-audit.sh [project-dir]` | Audit .env vs .env.example sync, empty values, secrets in git |
 | `deps-audit.sh` | `deps-audit.sh [project-dir]` | Audit npm/pip dependencies for known vulnerabilities |
 | `docker-audit.sh` | `docker-audit.sh [project-dir]` | Audit Docker config (unpinned images, health checks, secrets) |
-| `docker-health-check.sh` | `docker-health-check.sh [project-dir] [--timeout S] [--filter PREFIX]` | Runtime Docker container health verification (status, restarts, error logs) |
-| `smoke-test.sh` | `smoke-test.sh [base-url] [--health-token TOKEN]` | API endpoint smoke testing with auto-discovery |
-| `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/) |
-| `venv-run.sh` | `venv-run.sh <cmd> [args...]` | Run any venv binary (python, pip, alembic) with auto-detection |
+
+### Security
+
+| Script | Usage | Description |
+|--------|-------|-------------|
 | `secret-scan.sh` | `secret-scan.sh [project-dir]` | Scan codebase for hardcoded secrets, API keys, tokens |
 | `security-headers-check.sh` | `security-headers-check.sh <url>` | Check HTTP security headers (CSP, HSTS, X-Frame-Options, etc.) |
 | `owasp-zap-scan.sh` | `owasp-zap-scan.sh <url>` | OWASP ZAP baseline scan via Docker (requires running target) |
-| `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
-| `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
+
+### Runtime verification
+
+| Script | Usage | Description |
+|--------|-------|-------------|
+| `docker-health-check.sh` | `docker-health-check.sh [project-dir] [--timeout S] [--filter PREFIX]` | Runtime Docker container health verification (status, restarts, error logs) |
+| `smoke-test.sh` | `smoke-test.sh [base-url] [--health-token TOKEN]` | API endpoint smoke testing with auto-discovery |
+
+### Development tools
+
+| Script | Usage | Description |
+|--------|-------|-------------|
+| `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/) |
+| `venv-run.sh` | `venv-run.sh <cmd> [args...]` | Run any venv binary (python, pip, alembic) with auto-detection |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
 
-These scripts are already allowed in the global settings (`~/.claude/settings.json`) installed by the toolkit.
+### Hooks
+
+| Script | Usage | Description |
+|--------|-------|-------------|
+| `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Auto-approve safe compound commands (redirects, pipes, && chains, for loops) |
+| `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, DROP TABLE, etc.) |
+
+All scripts are already allowed in the global settings (`~/.claude/settings.json`) installed by the toolkit.
 
 ## Repository Structure
 
@@ -154,7 +188,9 @@ claude-code-toolkit/
 │   ├── owasp-zap-scan.sh          ← OWASP ZAP baseline security scan
 │   ├── gh-issues-export.sh        ← export GitHub issues to JSON file
 │   ├── gh-save.sh                 ← save gh command output to file
-│   └── sync-toolkit.sh            ← sync toolkit from configured git sources
+│   ├── sync-toolkit.sh            ← sync toolkit from configured git sources
+│   ├── hook-auto-approve-bash.sh  ← PreToolUse hook: auto-approve safe compound commands
+│   └── hook-block-destructive.sh  ← PreToolUse hook: block destructive commands
 ├── skills/                    ← skill definitions (procedures)
 │   ├── refine/
 │   ├── implement/
@@ -198,10 +234,27 @@ Copied to `~/.claude/settings.json` by install.sh. Pre-configures permissions so
 - **File operations** — Write, Edit, MultiEdit (always needed)
 - **Shell utilities** — cat, grep, find, ls, etc. (read-only, low risk)
 - **File management** — mkdir, cp, mv, chmod (project scaffolding)
-- **Git & GitHub** — git, gh (with destructive operations denied)
+- **Git & GitHub** — git, gh (with destructive operations caught by hook)
+- **Docker** — docker commands
+- **Node.js** — npm, npx
+- **Python** — python, ruff, uv, source
 - **Toolkit** — helper scripts from `~/.claude/bin/`
 
 This is a copy (not symlink) because Claude Code writes to it when you approve permissions during a session.
+
+### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
+
+The global settings include two `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
+
+1. **`hook-auto-approve-bash.sh`** — Auto-approves safe compound commands that permission matching would otherwise block (shell redirects to `/tmp/`, pipes to `jq`/`head`/`tail`, `&&` chains of allowed commands, `for` loops around `gh`/`git`). This solves the first-word matching problem for complex commands.
+
+2. **`hook-block-destructive.sh`** — Blocks destructive patterns: `rm -rf /`, `git push --force`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `git clean -f`, `dd if=... of=/dev/`, and more. When blocked, Claude sees the reason and adjusts its approach.
+
+To use bypass-permissions mode with these safety nets:
+
+```bash
+claude --dangerously-skip-permissions -p "your task here"
+```
 
 ### Global CLAUDE.md (`claude-md/global.md`)
 
@@ -229,6 +282,18 @@ Copy to a project root as `CLAUDE.md` and fill in:
 Copy to `.claude/settings.json` in your project. Contains commented-out permissions for common tools (Docker, Python, Node, project scripts) and safe deny-defaults for destructive git operations. Uncomment what applies to your project.
 
 Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.json` — don't repeat them in project settings.
+
+### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
+
+The global settings include a `PreToolUse` hook that blocks destructive Bash commands. This hook runs **in all permission modes**, including bypass-permissions — making it a safety net for autonomous operation.
+
+**Blocked patterns:** `rm -rf /`, `git push --force`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `git clean -f`, `dd if=... of=/dev/`, and more. See `bin/hook-block-destructive.sh` for the full list.
+
+When a command is blocked, Claude sees the reason and adjusts its approach. To use bypass-permissions mode with this safety net:
+
+```bash
+claude --dangerously-skip-permissions -p "your task here"
+```
 
 ## All Skills
 
