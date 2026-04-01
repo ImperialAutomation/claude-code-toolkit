@@ -40,6 +40,8 @@ Ask focused questions to fill the gaps. Cover:
 **Interaction style:**
 - Ask ONE question at a time — don't overwhelm with a wall of questions
 - When feasible, offer 2-3 concrete options instead of open-ended questions
+- When offering options, present each with a table showing its key characteristics and trade-offs (columns: Aspect/Behavior | Pros | Cons). This helps the user compare options on concrete dimensions rather than abstract labels
+- If you have a recommendation, state it explicitly with a brief rationale
 - Validate understanding incrementally before moving on
 
 Iterate until the issue is sharp enough to implement or decompose.
