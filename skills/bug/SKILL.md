@@ -1,21 +1,21 @@
 ---
 name: bug
-description: Create a bug sub-issue and add it to the tracking PR
-argument-hint: "<bug title>" | <parent> "<title>" | add #issue [#issue...] [to #parent]
+description: Create a bug sub-issue interactively or with a title, or add existing issues to a tracking PR
+argument-hint: "[\"<bug title>\"] | [<parent> \"<title>\"] | [add #issue [to #parent]]"
 user-invocable: true
 ---
 
 # Bug Sub-Issue Skill
 
-Create a bug issue linked to a parent issue and automatically add it to the tracking PR.
+Create a bug issue with intelligent context gathering, or add existing bug issues to a tracking PR.
 
 ## Input
 
 The user provides: `$ARGUMENTS`
 
-**Two modes of operation:**
+**Three modes of operation:**
 
-### Mode 1: Add existing bug issues to tracking PR (NEW)
+### Mode 1: Add existing bug issues to tracking PR
 - `add #<issue> [#<issue>...] [to #<parent>]`
 
 **Examples:**
@@ -25,8 +25,8 @@ The user provides: `$ARGUMENTS`
 /bug add #1042 #1043           # Add multiple existing bug issues at once
 ```
 
-### Mode 2: Create new bug issue (original behavior)
-- `"<bug title>"` - Auto-detect parent from branch (DEFAULT)
+### Mode 2: Create new bug issue with title
+- `"<bug title>"` - Auto-detect parent from branch
 - `<parent-issue> "<bug title>"` - Explicit parent override
 
 **Examples:**
@@ -35,7 +35,15 @@ The user provides: `$ARGUMENTS`
 /bug 724 "Webhook signature fails in test mode"   # Explicit parent #724
 ```
 
-**Disambiguation:** If `$ARGUMENTS` starts with `add` → Mode 1. Otherwise → Mode 2.
+### Mode 3: Interactive bug report (no arguments)
+- No arguments → interactive mode with context gathering
+
+**Examples:**
+```bash
+/bug                            # Interactive mode: gather context, write issue
+```
+
+**Disambiguation:** `add` → Mode 1. No arguments → Mode 3. Anything else → Mode 2.
 
 ## Workflow
 
@@ -155,7 +163,161 @@ mutation {
 
 ---
 
-### Mode 2: Create New Bug Issue (Original)
+### Mode 3: Interactive Bug Report
+
+Use this when no arguments are provided. Gathers context interactively and writes a well-structured issue.
+
+#### Step I1: Detect Parent (optional)
+
+Try to detect parent from the current branch:
+```bash
+PARENT_ISSUE=$(~/.claude/bin/extract-issue-from-branch.sh)
+```
+
+- If found: display "Detected parent: #N" and fetch issue title for context
+- If not found: continue without parent — the issue will be standalone (no tracking PR updates)
+
+#### Step I2: Auto-context (silent, before asking anything)
+
+Gather context automatically to enrich the bug report:
+
+1. **Recent git activity:**
+   ```bash
+   git log --oneline -10
+   git diff --stat
+   ```
+2. **Branch context:** current branch name, uncommitted changes
+3. **Test failures:** check for recent test output in `/tmp/` (e.g., pytest output files)
+4. **Sentry:** if the project CLAUDE.md references Sentry and MCP tools (`mcp__sentry__*`) are available, fetch recent unresolved issues for the project
+
+Store this context internally — do NOT display it to the user yet.
+
+#### Step I3: Open prompt — let the user dump everything
+
+Ask with AskUserQuestion (use an option that allows free text):
+
+> "Beschrijf de bug. Je kunt hier alles kwijt: beschrijving, log output, foutmeldingen, bestandspaden, screenshots — alles door elkaar. Ik sorteer het wel uit."
+
+The user can dump everything at once in any order:
+- Error messages / stack traces / console logs
+- Description of what went wrong
+- File paths that are relevant
+- Screenshots (if mentioned or pasted)
+- Reproduction steps
+- All at once, in any order
+
+#### Step I4: Parse and classify the input
+
+Analyze the user's dump and classify:
+- **Description**: free text about the problem
+- **Logs/errors**: stack traces, console output, error messages (look for patterns: `Traceback`, `Error:`, `at line`, `TypeError`, `500`, etc.)
+- **File references**: paths to files → read them with the Read tool and extract relevant fragments
+- **Repro steps**: if the user described steps to reproduce
+- **Severity clues**: words like "crash", "data loss", "blocks" → Critical/High; "wrong color", "typo" → Low
+
+#### Step I5: Follow-up questions (only for what's missing)
+
+Only ask about information that was NOT in the dump. Use AskUserQuestion to ask multiple missing items at once (max 4 questions per call).
+
+Possible follow-up questions (only if missing):
+- **Severity**: "Hoe ernstig is deze bug?" → Critical (blocks work) / High (important) / Medium / Low
+- **Repro steps**: "Kun je beschrijven hoe je de bug kunt reproduceren?" (only if not already in dump)
+- **Expected behavior**: "Wat had er moeten gebeuren?" (only if unclear from context)
+- **Title**: "Wil je een specifieke title, of genereer ik er een?" → Generate for me (Recommended) / Custom title
+
+If the dump is already complete enough (description + evidence + severity inferable from context), skip follow-up questions and go directly to Step I6.
+
+#### Step I6: Write issue body
+
+Combine all user input + auto-context into a structured issue body:
+
+```markdown
+## Bug Description
+<Rewritten description based on user input + auto-context>
+
+## Steps to Reproduce
+1. ...
+2. ...
+3. ...
+
+## Expected Behavior
+<Derived from description>
+
+## Actual Behavior
+<Derived from description>
+
+## Evidence
+<Relevant code fragments, log output, error messages — from step I3>
+<If file references were provided: include relevant snippets>
+
+## Context
+- Branch: <current-branch>
+- Recent changes: <summary of git log>
+- Discovered while working on: #<parent-issue> (if available)
+- Severity: <chosen or inferred severity>
+```
+
+#### Step I7: Review before creation
+
+Show the generated issue (title + body) to the user.
+
+Ask with AskUserQuestion: "Ziet dit er goed uit?"
+- **Aanmaken (Recommended)**: proceed to Step I8
+- **Aanpassen**: ask what needs to change, adjust, show again
+- **Annuleren**: abort without creating
+
+#### Step I8: Create + link
+
+1. Write body to `/tmp/bug-issue.md` using the Write tool
+2. Determine title format:
+   - If parent found: `🐛 [Parent #XXX] Bug: <title>`
+   - If standalone: `🐛 Bug: <title>`
+3. Create the issue:
+   ```bash
+   gh issue create --title "<title>" --label "bug" --body-file /tmp/bug-issue.md
+   ```
+4. If severity is Critical or High: add extra label
+   ```bash
+   gh issue edit [new-issue] --add-label "priority: high"
+   ```
+5. **If parent found:**
+   - Link as GitHub sub-issue (same GraphQL as Mode 2, Step 6)
+   - Find and update tracking PR (same as Mode 2, Step 7)
+6. **If standalone (no parent):**
+   - Only create the issue, no tracking PR updates
+   - Report: "Standalone bug issue — niet gekoppeld aan een epic"
+
+#### Step I9: Summary
+
+**If linked to parent:**
+```markdown
+## Bug Issue Created
+
+✅ Created: #[new-issue-number] - 🐛 Bug: [title]
+✅ Parent: #[parent-issue]
+✅ Added to tracking PR #[pr-number]
+✅ Will auto-close when PR merges
+
+### Quick Links
+- Bug issue: [url]
+- Parent issue: #[parent-issue]
+- Tracking PR: #[pr-number]
+```
+
+**If standalone:**
+```markdown
+## Bug Issue Created
+
+✅ Created: #[new-issue-number] - 🐛 Bug: [title]
+ℹ️ Standalone issue — not linked to an epic
+
+### Quick Links
+- Bug issue: [url]
+```
+
+---
+
+### Mode 2: Create New Bug Issue (with title)
 
 ### Step 1: Parse Arguments and Detect Parent Issue
 
