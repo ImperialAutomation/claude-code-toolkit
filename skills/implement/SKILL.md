@@ -28,7 +28,14 @@ MUST use ~/.claude/bin/git-find-base-branch for base branch detection for the PR
    * Check what attributes/methods ACTUALLY exist on models you'll use
    * Find existing patterns for similar functionality (grep/search)
    * NEVER assume a model has an attribute - READ the model first
-4. Create detailed implementation plan as **numbered steps of max 5 minutes each**:
+4. **Parse acceptance criteria** from the issue body:
+   * Look for checkbox patterns: `- [ ]` / `- [x]`
+   * Look for numbered lists under an "Acceptance Criteria" heading
+   * Fallback: bullet points under an AC heading
+   * If no AC found: warn "No acceptance criteria found — consider running `/refine` first"
+   * Store the AC list for verification in Phase 3
+
+5. Create detailed implementation plan as **numbered steps of max 5 minutes each**:
    * Issue requirements understanding
    * Existing code patterns you found and will follow
    * Files to modify/create
@@ -115,6 +122,45 @@ Check the project's CLAUDE.md for an **Integration Verification** section. If it
 4. If the CLAUDE.md has no Integration Verification section, skip this step
 
 This step ensures that Docker containers still start, migrations are applied, and API health checks pass after implementation — but only when relevant files were changed.
+
+### Step 2c: Acceptance criteria verification
+
+**Skip if no AC were parsed in Phase 1.**
+
+For each acceptance criterion from Phase 1, find evidence that it is satisfied:
+
+1. Search for a test that explicitly verifies this criterion (by name, assertion, or test docstring)
+2. If no test found, check if the implementation clearly satisfies it (e.g., a config change, a UI element)
+
+Generate an AC verification table:
+
+| # | Criterion | Evidence | Status |
+|---|-----------|----------|--------|
+| 1 | User can reset password | `test_password_reset_flow` (PASS) | VERIFIED |
+| 2 | Reset link expires after 24h | `test_expired_token` (PASS) | VERIFIED |
+| 3 | Email uses branded template | No test, visual check needed | UNVERIFIED |
+
+For UNVERIFIED items:
+- If testable: write a test, run it, update the table
+- If not testable (visual, manual): flag for manual review in PR body
+
+### Step 2d: Self-review (max 2 iterations)
+
+Run the `/review` analysis (Phases 2-4: automated checks, structural review, test coverage mapping) on the current branch diff:
+
+```bash
+git diff $(git merge-base HEAD <base-branch>)..HEAD
+```
+
+1. If findings with severity > INFO are found:
+   - Fix the issues automatically
+   - Re-run the targeted tests from Step 1 to catch regressions
+   - Run the review analysis again
+2. **Max 2 fix iterations.** If findings remain after 2 iterations:
+   - Include them in the PR body under a "Known Issues" section
+   - Do not continue fixing — proceed to Step 3
+
+This prevents infinite fix loops while still catching obvious issues before PR creation.
 
 ### Step 3: Verify claims with evidence
 

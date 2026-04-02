@@ -155,6 +155,12 @@ An issue is an **implement** issue if it requires writing/changing application c
 
 **When in doubt:** classify as `implement` — it's better to write code and discover it's an audit than to only audit when code was needed.
 
+#### Step 2b: Detect auth impact
+
+Scan the issue body for auth-related keywords: `status`, `UserStatus`, `role`, `permission`, `auth`, `login`, `PENDING`, `SUSPENDED`, `DELETED`, `BLOCKED`, `INACTIVE`.
+
+If any keywords are found, mark the issue as `auth_impact: true`. This flag is used in Step 3A to inject an additional auth impact check into the sub-agent prompt.
+
 #### Step 3: Spawn sub-agent via Task tool
 
 Use the Task tool with `subagent_type: "general-purpose"` and `run_in_background: true`. The sub-agent gets its own context window and full tool access.
@@ -201,6 +207,14 @@ Read only the files relevant to your issue. Do NOT skip this step.
    - Write PR body to /tmp/pr-body.md using the Write tool, then push + PR + merge in one command:
      `~/.claude/bin/git-push-pr-merge.sh --base <feature_branch> --title "<title>" --body-file /tmp/pr-body.md`
    - This script pushes, creates the PR, merges it, and returns to the feature branch automatically
+
+## Auth Impact Check (only include if auth_impact is true)
+This issue changes user status/role/auth fields. BEFORE writing tests:
+1. Read auth/dependencies.py (or equivalent auth guard file)
+2. Check which statuses/roles the guard currently allows
+3. Determine: should the NEW status pass the guard or be blocked?
+4. Write a test that verifies this explicitly
+5. If the new status SHOULD pass but the guard blocks it: note this in the PR body as a required follow-up
 
 ## HARD BOUNDARIES
 - Your PR target is the FEATURE BRANCH (`<feature_branch>`) — NEVER target `main` or `develop`
@@ -512,6 +526,35 @@ If containers are down or unhealthy:
 - If migrations are pending: run the project's migrate command, then re-check
 
 Skip any check that is not applicable (no compose file, no running containers, no alembic).
+
+### Step 2b: Cross-cutting auth verification (conditional)
+
+**Only runs if any sub-issue was marked `auth_impact: true` in Phase 1-N.**
+
+This step catches integration issues that fall between sub-issues — particularly when new user statuses or roles are introduced but existing auth guards don't account for them.
+
+1. Search the feature branch diff for new statuses/roles:
+   ```bash
+   git diff main..HEAD
+   ```
+   Look for: enum additions (Python `class ...Status`, `ALTER TYPE ADD VALUE`), new role constants, new permission levels.
+
+2. For each new status/role found:
+   - Identify the auth guard (e.g., `get_current_active_user`, `dependencies.py`, `auth middleware`)
+   - Check if the guard explicitly handles the new status
+   - Write a targeted test that:
+     a. Creates a user with the new status
+     b. Attempts to call `GET /auth/me` (or equivalent auth endpoint)
+     c. Asserts the expected behavior (allowed or blocked)
+
+3. Run only these targeted tests:
+   ```bash
+   ~/.claude/bin/project-test.sh tests/test_cross_cutting_auth.py -v
+   ```
+
+4. If tests fail: fix on the feature branch and commit. If the fix requires changes that conflict with a sub-issue's scope, create a follow-up issue instead.
+
+5. If no new statuses/roles are found in the diff: skip this step.
 
 ### Step 3: Full test suite
 

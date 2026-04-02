@@ -116,6 +116,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-post-edit-lint.sh"
+          }
+        ]
+      }
     ]
   }
 }
