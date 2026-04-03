@@ -70,13 +70,22 @@ Systematic code review of authentication and authorization:
    - Refresh token handling
    - Secret key source (must be from environment, not hardcoded)
 3. **Password handling:** Check hashing algorithm (bcrypt/argon2 required, no MD5/SHA1)
-4. **Permission system:** Read permission/role definitions. Check:
+4. **Default-deny posture:** Verify authorization defaults to deny:
+   - New endpoints must require explicit permission grants (not "allow all, then restrict")
+   - New roles start with zero permissions
+   - Missing auth decorator = blocked request, not open access
+5. **Permission system:** Read permission/role definitions. Check:
    - All protected endpoints use auth decorators
    - No endpoints accidentally public
    - Permission inheritance is correct (higher roles get lower permissions)
-5. **Privilege escalation:** Search for patterns where user input could influence authorization:
+6. **Object-level authorization (IDOR prevention):** For every resource endpoint, verify:
+   - Not just "can user access type X" but "can user access *this specific* resource"
+   - Ownership checks: `WHERE user_id = current_user.id`
+   - Test exists: "User A tries to access User B's resource" → must return 403/404
+7. **Privilege escalation:** Search for patterns where user input could influence authorization:
    - User ID from request body instead of token
    - Missing ownership checks on resources
+   - Role/permission fields in update schemas that should be read-only
 
 **Report sections:** Auth mechanism summary, findings, risk assessment.
 
@@ -84,7 +93,15 @@ Systematic code review of authentication and authorization:
 
 ### Domain: `input-validation`
 
-OWASP Top 10 focused review:
+OWASP Top 10 focused review. Verify defense-in-depth: input should be validated at multiple independent layers, so removing one layer does not compromise security.
+
+**Layer check (verify each layer is present):**
+- Layer 1: Type system / schema validation (shape, presence, bounds — e.g., Pydantic, Zod)
+- Layer 2: Character / format restrictions (whitelist allowed chars, reject unexpected patterns)
+- Layer 3: Explicit security pattern checks (path traversal `..`, null bytes, injection patterns)
+- Layer 4: Downstream sanitization (parameterized queries, shell-escaping, HTML-encoding)
+
+**Specific vulnerability checks:**
 
 1. **SQL Injection:**
    - Search for raw SQL: `Grep` for `text(`, `execute(`, `raw_connection`, `.raw(`, `f"SELECT`, `f"INSERT`, `f"UPDATE`, `f"DELETE`

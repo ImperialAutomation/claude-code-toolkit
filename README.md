@@ -117,6 +117,8 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `git-find-base-branch` | `git-find-base-branch` | Detect the base branch of the current branch |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
+| `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents) |
+| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, merge, return to base (for `/implement-epic`) |
 
 ### Project audits
 
@@ -149,6 +151,9 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/) |
 | `venv-run.sh` | `venv-run.sh <cmd> [args...]` | Run any venv binary (python, pip, alembic) with auto-detection |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
+| `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
+| `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
+| `release.sh` | `release.sh [major\|minor\|patch]` | Create a GitHub release for a WordPress plugin |
 
 ### Hooks
 
@@ -156,6 +161,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Auto-approve safe compound commands (redirects, pipes, && chains, for loops) |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, DROP TABLE, etc.) |
+| `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
 
 All scripts are already allowed in the global settings (`~/.claude/settings.json`) installed by the toolkit.
 
@@ -172,6 +178,8 @@ claude-code-toolkit/
 │   ├── batch-issue-status.sh  ← fetch issue status as JSON array
 │   ├── git-find-base-branch   ← detect base branch of current branch
 │   ├── git-cleanup-merged-branch.sh ← cleanup after PR merge
+│   ├── git-commit.sh               ← commit via temp file (sub-agent safe)
+│   ├── git-push-pr-merge.sh        ← push, PR, merge, return to base
 │   ├── batch-pr-for-issues.sh ← find merged/open PRs linked to issues
 │   ├── find-tracking-pr.sh   ← find tracking PR for a parent issue
 │   ├── extract-issue-from-branch.sh ← extract issue number from branch name
@@ -189,8 +197,12 @@ claude-code-toolkit/
 │   ├── gh-issues-export.sh        ← export GitHub issues to JSON file
 │   ├── gh-save.sh                 ← save gh command output to file
 │   ├── sync-toolkit.sh            ← sync toolkit from configured git sources
+│   ├── json-find-key.sh           ← search for keys in nested JSON files
+│   ├── odt2txt.sh                 ← convert ODT to plain text via pandoc
+│   ├── release.sh                 ← create GitHub release for WordPress plugin
 │   ├── hook-auto-approve-bash.sh  ← PreToolUse hook: auto-approve safe compound commands
-│   └── hook-block-destructive.sh  ← PreToolUse hook: block destructive commands
+│   ├── hook-block-destructive.sh  ← PreToolUse hook: block destructive commands
+│   └── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 ├── skills/                    ← skill definitions (procedures)
 │   ├── refine/
 │   ├── implement/
@@ -208,10 +220,17 @@ claude-code-toolkit/
 │   ├── sync-closes/
 │   ├── update-tracking/
 │   ├── verify/
+│   ├── review/
+│   ├── test/
+│   ├── pre-merge/
 │   ├── retro/
 │   ├── promote/
 │   └── sync-toolkit/
 ├── rules/                     ← contextual rules → ~/.claude/rules/
+│   ├── error-handling.md      ← error propagation, RFC 9457, boundary translation
+│   ├── api-design.md          ← HTTP status codes, Problem Details, pagination
+│   ├── data-integrity.md      ← transactions, constraints, idempotency, migrations
+│   ├── structured-logging.md  ← structured fields, severity levels, no secrets
 │   ├── testing.md             ← test quality policy (loads for test files only)
 │   ├── code-review.md         ← code review conduct
 │   └── documentation.md       ← documentation standards (loads for .md files only)
@@ -266,7 +285,21 @@ Symlinked to `~/.claude/CLAUDE.md`, applies to all projects. Contains only what'
 - **Available Utilities** — references to wrapper scripts and audit skills
 - **Claude Code Workarounds** — native tool preferences, file writing rules
 
-Contextual rules (test quality, code review conduct, documentation standards) live in `rules/` and load only when relevant files are being edited.
+Contextual rules live in `rules/` and load based on their frontmatter: some always (error handling, API design, data integrity, structured logging, code review), others only when relevant files are edited (testing, documentation).
+
+### Rules (`rules/`)
+
+Rules provide contextual policies that load based on frontmatter configuration. Always-loaded rules apply to every conversation; path-triggered rules load only when matching files are being edited.
+
+| Rule | Loads | What it enforces |
+|------|-------|------------------|
+| `error-handling.md` | Always | Never swallow errors, add context when propagating, translate at boundaries, RFC 9457 Problem Details |
+| `api-design.md` | Always | Standard HTTP status codes, RFC 9457 errors, cursor-based pagination, rate limiting headers |
+| `data-integrity.md` | Always | Transactions, DB constraints, idempotency, race condition prevention, expand-contract migrations |
+| `structured-logging.md` | Always | Structured key-value pairs, consistent field names, severity levels, never log secrets |
+| `code-review.md` | Always | No performative agreement, verify before implementing, push back when feedback is wrong |
+| `testing.md` | Test files | Real behavior over mocks, 5 test scenarios per feature, realistic fixtures |
+| `documentation.md` | .md files | Current purpose over history, usage guidance, no changelogs |
 
 ### Project Template (`claude-md/project-template.md`)
 
@@ -283,29 +316,17 @@ Copy to `.claude/settings.json` in your project. Contains commented-out permissi
 
 Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.json` — don't repeat them in project settings.
 
-### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
-
-The global settings include a `PreToolUse` hook that blocks destructive Bash commands. This hook runs **in all permission modes**, including bypass-permissions — making it a safety net for autonomous operation.
-
-**Blocked patterns:** `rm -rf /`, `git push --force`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `git clean -f`, `dd if=... of=/dev/`, and more. See `bin/hook-block-destructive.sh` for the full list.
-
-When a command is blocked, Claude sees the reason and adjusts its approach. To use bypass-permissions mode with this safety net:
-
-```bash
-claude --dangerously-skip-permissions -p "your task here"
-```
-
 ## All Skills
 
 | Skill | Syntax | Description |
 |-------|--------|-------------|
 | `/refine` | `/refine <issue>` | Refine a GitHub issue through interactive Q&A to sharpen scope and criteria |
 | `/decompose` | `/decompose <issue>` | Break down a large issue into sub-issues with a tracking PR |
-| `/extend` | `/extend <issue>` | Add more sub-issues to an existing tracking PR |
+| `/extend` | `/extend [issue]` or `/extend add #issue [to #parent]` | Add more sub-issues or link existing issues to a tracking PR |
 | `/implement` | `/implement <issue>` | Implement a GitHub issue with automated PR creation |
 | `/implement-epic` | `/implement-epic <parent-issue>` | Implement all sub-issues of an epic in dependency order |
 | `/finish` | `/finish [issue] [base]` | Commit, close issue, merge to base branch, cleanup |
-| `/bug` | `/bug "<title>"` | Create a bug sub-issue and add it to the tracking PR |
+| `/bug` | `/bug ["<title>"]` or `/bug add #issue [to #parent]` | Create a bug interactively or with a title, or add existing issues to tracking PR |
 | `/update-tracking` | `/update-tracking <pr>` | Update tracking PR with current sub-issue status |
 | `/sync-closes` | `/sync-closes <pr>` | Sync all Closes statements in tracking PR |
 | `/cleanup` | `/cleanup` | Clean up after merging a PR (checkout base, delete branch) |
@@ -317,6 +338,9 @@ claude --dangerously-skip-permissions -p "your task here"
 | `/retro` | `/retro [focus-area]` | End-of-session retrospective — capture knowledge as scripts, procedures, decisions, or skill proposals |
 | `/promote` | `/promote <script-or-procedure>` | Promote a project-local script or procedure to the shared toolkit |
 | `/verify` | `/verify [quick\|full\|browser]` | Runtime verification — containers, API health, migrations, browser smoke test |
+| `/review` | `/review [--staged\|--branch\|--file PATH]` | On-demand code review of current changes with automated checks |
+| `/test` | `/test [--all\|--affected]` | Smart test runner that scopes tests based on changed files |
+| `/pre-merge` | `/pre-merge` | Combined quality gate — orchestrates review, tests, verification, AC checks |
 | `/sync-toolkit` | `/sync-toolkit <pull\|status\|drift>` | Sync toolkit across devices from configured git sources |
 
 ---
@@ -325,11 +349,11 @@ claude --dangerously-skip-permissions -p "your task here"
 
 | Skill | Syntax | When to Use |
 |-------|--------|-------------|
-| `/refine` | `/refine <issue>` | Sharpen scope & acceptance criteria |
+| `/refine` | `/refine <issue>` | Sharpen scope & acceptance criteria (run on parent AND each sub-issue) |
 | `/decompose` | `/decompose <issue>` | Start: break down large issue |
 | `/implement-epic` | `/implement-epic <parent-issue>` | Auto-implement all sub-issues |
-| `/extend` | `/extend <issue>` | Later: add more sub-issues |
-| `/bug` | `/bug "<title>"` | Bug found during work |
+| `/extend` | `/extend [issue]` or `/extend add #issue` | Later: add more sub-issues or link existing |
+| `/bug` | `/bug ["<title>"]` or `/bug add #issue` | Bug found during work, or add existing issue |
 | `/update-tracking` | `/update-tracking <pr>` | Update status table |
 | `/sync-closes` | `/sync-closes <pr>` | Sync Closes statements |
 
@@ -346,11 +370,12 @@ flowchart TD
     subgraph phase1 [Phase 1: Decomposition]
         A -->|decompose| B[Draft PR]
         B --> C[Sub-issues]
+        C -->|refine each| C2[Refined sub-issues]
     end
 
     subgraph phase2 [Phase 2: Implementation]
-        C -->|manual| D{Work on sub-issue}
-        C -->|automated| AUTO[implement-epic]
+        C2 -->|manual| D{Work on sub-issue}
+        C2 -->|automated| AUTO[implement-epic]
         AUTO --> J
         D -->|Bug found| E[bug command]
         E --> F[Bug issue]
@@ -418,7 +443,7 @@ Configuration lives in `~/.claude/toolkit.yaml`. Add private repos there for pro
 
 ### 1. `/refine` - Refine Issue
 
-**When:** You have a rough issue that needs sharper scope and acceptance criteria before implementation or decomposition.
+**When:** You have a rough issue that needs sharper scope and acceptance criteria. Use on the parent issue before `/decompose`, then on each sub-issue after. Every refine pass makes the issue more concrete and catches gaps early.
 
 **What it does:**
 1. Reads the existing issue and explores the codebase for context
@@ -504,7 +529,7 @@ Create draft PR and sub-issues? (A/B/C)
 
 **Workflow position:**
 ```
-/refine → /decompose → /implement-epic → tracking PR (manual merge to develop)
+/refine → /decompose → /refine (per sub-issue) → /implement-epic → tracking PR (manual merge to develop)
 ```
 
 **Difference from /implement:**
@@ -531,8 +556,10 @@ Create draft PR and sub-issues? (A/B/C)
 
 **Syntax:**
 ```bash
-/extend 723        # Explicit issue number
-/extend            # Detect from branch
+/extend 723                   # Decompose new sub-issues for remaining tasks
+/extend                       # Detect parent from branch
+/extend add #1042 to #723     # Add existing issue to tracking PR
+/extend add #1042 #1043       # Add multiple issues (parent from branch)
 ```
 
 **Difference from /decompose:**
@@ -546,18 +573,20 @@ Create draft PR and sub-issues? (A/B/C)
 
 ### 5. `/bug` - Create Bug Issue
 
-**When:** You find a bug while working on a sub-issue.
+**When:** You find a bug while working on a sub-issue, or want to add an existing issue to a tracking PR.
 
 **What it does:**
-1. Detects parent issue from branch (or explicit)
-2. Creates bug issue with 🐛 prefix
-3. Adds to tracking PR
-4. Updates `Closes #XXX` statements
+1. Creates a bug sub-issue (interactively or with title) linked to the parent
+2. Or adds an existing issue to the tracking PR
+3. Updates `Closes #XXX` statements
 
 **Syntax:**
 ```bash
-/bug "Webhook signature fails"           # Parent from branch
-/bug 724 "Webhook signature fails"       # Explicit parent #724
+/bug                                     # Interactive mode — gathers context first
+/bug "Webhook signature fails"           # Create with title, parent from branch
+/bug 724 "Webhook signature fails"       # Create with explicit parent #724
+/bug add #1042                           # Add existing issue to tracking PR
+/bug add #1042 to #723                   # Add with explicit parent
 ```
 
 **Example:**
@@ -689,6 +718,20 @@ Overall: PASS
 # ✅ Progress: 0/3 (0%)
 ```
 
+### Step 1b: Refine each sub-issue
+
+```bash
+# Each sub-issue benefits from a refine pass — sharpens scope and catches gaps
+/refine 724
+/refine 725
+/refine 726
+
+# Output per issue:
+# Questions about edge cases, error handling, specific acceptance criteria...
+# [Q&A rounds]
+# ✅ Updated issue with concrete scope and testable criteria
+```
+
 ### Step 2: Implement all sub-issues (automated)
 
 ```bash
@@ -789,11 +832,12 @@ Overall: PASS
 
 ## Tips
 
-1. **Start small**: Decompose into 3-5 sub-issues first, extend later
-2. **Update regularly**: Run `/update-tracking` after each merge
-3. **Sync before merge**: Always `/sync-closes` before final merge
-4. **Branch naming**: Use `issue-XXX-description` for auto-detection
-5. **Inline bugs**: Fix small bugs in current branch, only create issues for larger bugs
+1. **Refine early, refine often**: Run `/refine` on the parent issue before decomposing, then on each sub-issue after. Every pass sharpens scope and catches gaps
+2. **Start small**: Decompose into 3-5 sub-issues first, extend later
+3. **Update regularly**: Run `/update-tracking` after each merge
+4. **Sync before merge**: Always `/sync-closes` before final merge
+5. **Branch naming**: Use `issue-XXX-description` for auto-detection
+6. **Inline bugs**: Fix small bugs in current branch, only create issues for larger bugs
 
 ---
 

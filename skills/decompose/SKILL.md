@@ -222,3 +222,19 @@ This will:
 3. Ask user for confirmation
 4. Create draft PR and optionally sub-issues
 5. Update parent issue with tracking table
+6. Suggest refining each sub-issue
+
+## Final Step: Suggest Refinement
+
+After all sub-issues are created, present the list with a recommendation:
+
+```
+Sub-issues created: #724, #725, #726
+
+Tip: run `/refine` on each sub-issue to sharpen scope and acceptance criteria
+before implementation. This catches gaps early and improves implementation quality.
+
+/refine 724
+/refine 725
+/refine 726
+```

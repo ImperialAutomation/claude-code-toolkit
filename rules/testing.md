@@ -12,6 +12,7 @@ paths: "**/*test*, **/tests/**, **/conftest.py, **/*.spec.*"
 - Fixtures must reflect realistic data, not minimal placeholders
 - Include edge cases in fixture data (empty strings, unicode, boundary values)
 - If a fixture represents a user, give it realistic attributes — not `name="test"`, `email="test@test.com"`
+- Test five scenarios per feature: happy path, validation errors, auth failures, downstream failures, edge cases
 - For every test, ask: "If someone subtly breaks this feature, will THIS test actually fail?"
 - For every test, ask: "Am I testing that the code works, or just that it runs without errors?"
 
