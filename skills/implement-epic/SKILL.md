@@ -195,7 +195,8 @@ Read only the files relevant to your issue. Do NOT skip this step.
 ## Instructions
 
 1. Create and checkout branch: `git checkout -b issue-<N>-<description>`
-2. Read the codebase: use Glob, Grep, Read to understand relevant files
+2. Read the codebase: use Glob, Grep, Read to understand relevant files.
+   **For E2E/Playwright tests:** also read the frontend components you are writing selectors for. Never guess heading text, aria-labels, CSS classes, or DOM structure — look them up in the React/Vue/Svelte source. Grep for the component name, read it, and extract the exact strings and attributes you need for locators.
 3. Implement the changes following the project policies above
 4. Write tests following the Test Quality Policy
 5. Run ONLY the tests relevant to your changes — NEVER the full test suite:
@@ -215,6 +216,13 @@ This issue changes user status/role/auth fields. BEFORE writing tests:
 3. Determine: should the NEW status pass the guard or be blocked?
 4. Write a test that verifies this explicitly
 5. If the new status SHOULD pass but the guard blocks it: note this in the PR body as a required follow-up
+
+## Playwright E2E Test Account Checklist (only for projects using Playwright)
+If this issue creates or modifies Playwright E2E tests that require test accounts, ensure ALL THREE files are in sync:
+1. `tests/e2e/fixtures/test-accounts.ts` — TS fixture with key, email, tier, storageState
+2. `playwright.config.ts` — project entry with testMatch and storageState path
+3. The Python seed script (e.g. `backend/app/scripts/seed_e2e_accounts.py`) — account with matching key, email, tier, and person data
+Missing any one of these three causes global-setup to fail with a login error at test runtime.
 
 ## HARD BOUNDARIES
 - Your PR target is the FEATURE BRANCH (`<feature_branch>`) — NEVER target `main` or `develop`
@@ -565,6 +573,18 @@ Run the full test suite (not scoped — this is the one place where the full sui
 ```
 
 If tests fail: attempt to fix on the feature branch, commit, and retry once.
+
+### Step 3b: Playwright E2E verification (only for projects using Playwright)
+
+**Only runs if any sub-issue in this epic created or modified Playwright E2E test files (`.spec.ts`).**
+
+1. **Verify seed account sync:** Compare all `key` values in `tests/e2e/fixtures/test-accounts.ts` against the keys in the Python seed script (e.g. `seed_e2e_accounts.py`). Any key present in TS but missing in Python = broken test suite. Fix before proceeding.
+
+2. **Run Playwright tests** — scope based on what changed:
+   - **Single spec changed:** `npx playwright test tests/e2e/<changed>.spec.ts`
+   - **Multiple specs or shared infrastructure changed** (test-accounts.ts, playwright.config.ts, global-setup, page objects used by multiple specs): `npx playwright test --workers=1`
+
+3. If tests fail: fix on the feature branch, commit, and retry once. If the failure is in a pre-existing test (not touched by this epic), report as WARNING and continue.
 
 ### Step 4: Browser smoke test (optional)
 
