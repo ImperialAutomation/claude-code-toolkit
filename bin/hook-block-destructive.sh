@@ -40,7 +40,6 @@ BLOCKED_PATTERNS=(
     "git reset.*--hard"
     "git checkout -- \\."
     "git clean.*-f"
-    "git branch.*-D"
     # Database destruction
     "DROP TABLE"
     "DROP DATABASE"
@@ -54,6 +53,18 @@ BLOCKED_PATTERNS=(
     "mkfs"
     "dd if=.* of=/dev/"
 )
+
+# Case-sensitive patterns: only block uppercase forms (e.g. -D force delete, not -d safe delete)
+CASE_SENSITIVE_PATTERNS=(
+    "git branch.*-D"
+)
+
+for pattern in "${CASE_SENSITIVE_PATTERNS[@]}"; do
+    if echo "$COMMAND" | grep -E "$pattern" > /dev/null 2>&1; then
+        echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$pattern'. Rephrase or ask the user for explicit permission." >&2
+        exit 2
+    fi
+done
 
 for pattern in "${BLOCKED_PATTERNS[@]}"; do
     if echo "$COMMAND" | grep -iE "$pattern" > /dev/null 2>&1; then
