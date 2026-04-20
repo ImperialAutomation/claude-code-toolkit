@@ -26,6 +26,22 @@ Deze scripts:
 - Detecteren automatisch de project venv (.venv, backend/.venv, etc.)
 - Valideren dat je binnen ~/Projects/ draait
 
+### Git commits
+
+ALTIJD `~/.claude/bin/git-commit.sh` — NOOIT raw `git commit`.
+
+**Kort** (single-line, geen body):
+```bash
+~/.claude/bin/git-commit.sh "feat: short description"
+```
+
+**Lang** (met body):
+1. `Read` tool op `/tmp/commit-msg.txt` (ook als het niet bestaat — fout is onschuldig, maakt Write mogelijk)
+2. `Write` tool: commit message naar `/tmp/commit-msg.txt`
+3. `~/.claude/bin/git-commit.sh --stdin < /tmp/commit-msg.txt`
+
+NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of Bash voor file-aanmaak.
+
 ### Wat NIET werkt (ook al lijkt het logisch)
 
 - `cd backend && python ...` — eerste woord is `cd`
