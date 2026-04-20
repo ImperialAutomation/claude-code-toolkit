@@ -27,14 +27,19 @@ Main session (orchestrator):
 ├── Phase 0: Setup — parse epic, determine waves, create feature branch + tracking PR
 ├── Wave 1:
 │   ├── Classify issue #A → "implement" or "audit"
-│   ├── Spawn background Task agent (run_in_background: true)
+│   ├── Spawn background agent (run_in_background: true)
 │   ├── Poll progress every 30-45s via /tmp/epic-progress-<N>.txt
 │   │   └── Report phase + test results to user in real-time
 │   ├── On completion: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
 │   ├── Handle results: update tracking PR
 │   └── (repeat for all issues in wave)
 ├── Wave 2-N: same pattern
-└── Phase Final: summary
+└── Phase Final: Verification (ALL via sub-agents)
+    ├── Agent: Validation & Test Suite
+    ├── Agent: Runtime & Smoke Test (containers, API, login)
+    ├── Agent: Cross-cutting Auth (conditional)
+    ├── Agent: E2E Smoke Test (conditional)
+    └── Orchestrator: collect results, sync Closes, show summary
 ```
 
 The main session NEVER implements code itself. It only:
@@ -499,9 +504,23 @@ gh pr edit <tracking_pr> --body-file /tmp/tracking-pr-update.md
 
 **CRITICAL: NEVER merge the tracking PR. NEVER close the parent issue. NEVER push to main or develop directly. The tracking PR stays as a draft for the user to review and merge manually.**
 
-### Step 1: Run project validation
+**CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after polling waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
 
-Checkout the feature branch and run the project validation suite:
+### Step 1: Spawn verification sub-agent — Validation & Tests
+
+Spawn a background agent:
+
+```
+## Task: Project Validation & Test Suite for Epic #<epic_number>
+
+You are verifying the feature branch `<feature_branch>` after all sub-issues have been merged.
+
+Project policies are in these files — read them BEFORE starting:
+- /tmp/epic-claude-root.md (project overview, dev commands)
+- /tmp/epic-claude-backend.md (backend architecture — if backend changes)
+- /tmp/epic-claude-frontend.md (frontend architecture — if frontend changes)
+
+### Step 1: Run project validation
 
 ```bash
 git checkout <feature_branch>
@@ -510,63 +529,9 @@ npm run validate:all
 
 If validation fails, fix issues and commit directly to the feature branch.
 
-### Step 2: Runtime verification
+### Step 2: Full test suite
 
-Check the project's CLAUDE.md for an **Integration Verification** section. If it exists, use its configuration. Otherwise, use auto-discovery.
-
-**Container health check:**
-```bash
-~/.claude/bin/docker-health-check.sh [project-dir] [--filter PREFIX] [--timeout SECS]
-```
-
-If containers are down or unhealthy:
-1. Run the project's rebuild command (from Integration Verification config) or `docker compose up -d`
-2. Wait 15 seconds, then re-run the health check
-3. After 1 failed retry: report the failure but continue to the next check
-
-**API smoke test:**
-```bash
-~/.claude/bin/smoke-test.sh [base-url] [--health-token TOKEN]
-```
-
-**Migration check (if alembic detected):**
-- Run `docker exec <api-container> alembic current` and compare with `alembic heads`
-- If migrations are pending: run the project's migrate command, then re-check
-
-Skip any check that is not applicable (no compose file, no running containers, no alembic).
-
-### Step 2b: Cross-cutting auth verification (conditional)
-
-**Only runs if any sub-issue was marked `auth_impact: true` in Phase 1-N.**
-
-This step catches integration issues that fall between sub-issues — particularly when new user statuses or roles are introduced but existing auth guards don't account for them.
-
-1. Search the feature branch diff for new statuses/roles:
-   ```bash
-   git diff main..HEAD
-   ```
-   Look for: enum additions (Python `class ...Status`, `ALTER TYPE ADD VALUE`), new role constants, new permission levels.
-
-2. For each new status/role found:
-   - Identify the auth guard (e.g., `get_current_active_user`, `dependencies.py`, `auth middleware`)
-   - Check if the guard explicitly handles the new status
-   - Write a targeted test that:
-     a. Creates a user with the new status
-     b. Attempts to call `GET /auth/me` (or equivalent auth endpoint)
-     c. Asserts the expected behavior (allowed or blocked)
-
-3. Run only these targeted tests:
-   ```bash
-   ~/.claude/bin/project-test.sh tests/test_cross_cutting_auth.py -v
-   ```
-
-4. If tests fail: fix on the feature branch and commit. If the fix requires changes that conflict with a sub-issue's scope, create a follow-up issue instead.
-
-5. If no new statuses/roles are found in the diff: skip this step.
-
-### Step 3: Full test suite
-
-Run the full test suite (not scoped — this is the one place where the full suite runs):
+Run the full backend test suite:
 
 ```bash
 ~/.claude/bin/project-test.sh
@@ -574,32 +539,203 @@ Run the full test suite (not scoped — this is the one place where the full sui
 
 If tests fail: attempt to fix on the feature branch, commit, and retry once.
 
-### Step 3b: Playwright E2E verification (only for projects using Playwright)
+### Step 3: Report
 
-**Only runs if any sub-issue in this epic created or modified Playwright E2E test files (`.spec.ts`).**
+Write progress to `/tmp/epic-verify-validation.txt`:
 
-1. **Verify seed account sync:** Compare all `key` values in `tests/e2e/fixtures/test-accounts.ts` against the keys in the Python seed script (e.g. `seed_e2e_accounts.py`). Any key present in TS but missing in Python = broken test suite. Fix before proceeding.
+PHASE: RUNNING_VALIDATION / RUNNING_TESTS / FIXING / DONE
+DETAIL: <what's happening>
 
-2. **Run Playwright tests** — scope based on what changed:
-   - **Single spec changed:** `npx playwright test tests/e2e/<changed>.spec.ts`
-   - **Multiple specs or shared infrastructure changed** (test-accounts.ts, playwright.config.ts, global-setup, page objects used by multiple specs): `npx playwright test --workers=1`
+## Response Format
 
-3. If tests fail: fix on the feature branch, commit, and retry once. If the failure is in a pre-existing test (not touched by this epic), report as WARNING and continue.
+VALIDATION_COMPLETE:
+VALIDATE_ALL: PASS/FAIL — <details>
+TEST_SUITE: PASS/FAIL — <passed>/<total> tests
+FIXES_COMMITTED: <number of fix commits, 0 if none>
 
-### Step 4: Browser smoke test (optional)
+FAILED:
+ERROR: <description>
+```
 
-**Only if Playwright MCP tools (`mcp__playwright__*`) are available.**
+### Step 2: Spawn verification sub-agent — Runtime & Smoke Test
 
-1. Navigate to the frontend URL (from Integration Verification config or try common ports: 3000, 5173, 8080)
-2. Take a screenshot with `mcp__playwright__browser_take_screenshot`
-3. Check `mcp__playwright__browser_console_messages` for errors
-4. Report results as WARNING only — do not block on browser test failures
+Spawn a background agent:
 
-### Step 5: Sync Closes statements
+```
+## Task: Runtime Verification & Smoke Test for Epic #<epic_number>
 
-Ensure all completed sub-issue numbers are in the tracking PR body as `Closes #<N>` statements. Failed and skipped issues should NOT have Closes statements.
+You are verifying that the application works at runtime after all sub-issues for epic #<epic_number> have been merged into `<feature_branch>`.
 
-### Step 6: Show summary
+Project policies are in these files — read them BEFORE starting:
+- /tmp/epic-claude-root.md (project overview, dev commands)
+
+### Step 1: Rebuild containers if dependencies changed
+
+Check if dependency files were modified:
+
+```bash
+git diff develop..<feature_branch> --name-only | grep -E "(package\.json|package-lock\.json|requirements\.txt|pyproject\.toml|uv\.lock)"
+```
+
+If any dependency file changed:
+- Frontend: `cd backend/docker && ./stop.sh && ./start.sh`
+- Backend only: `docker restart pam_api && sleep 15`
+Wait for containers to be healthy.
+
+### Step 2: Container health check
+
+```bash
+~/.claude/bin/docker-health-check.sh [project-dir] [--filter PREFIX] [--timeout SECS]
+```
+
+If containers are down or unhealthy:
+1. Run `cd backend/docker && ./stop.sh && ./start.sh`
+2. Wait 15 seconds, re-check
+3. After 1 failed retry: report failure but continue
+
+### Step 3: API smoke test
+
+```bash
+~/.claude/bin/smoke-test.sh [base-url] [--health-token TOKEN]
+```
+
+### Step 4: Migration check (if alembic detected)
+
+- Run `docker exec pam_api alembic current` and verify no errors
+- Check `docker logs pam_api --tail 20` for migration failures
+- If migrations failed: investigate and fix
+
+### Step 5: Login smoke test
+
+Use the project's API login script to verify a test account can log in:
+```bash
+./scripts/api-login.sh admin
+```
+If it fails with 502/500: the API is broken — investigate container logs.
+
+### Step 6: Report
+
+Write progress to `/tmp/epic-verify-runtime.txt`:
+
+PHASE: REBUILDING / HEALTH_CHECK / SMOKE_TEST / MIGRATION_CHECK / LOGIN_TEST / DONE
+DETAIL: <what's happening>
+
+## Response Format
+
+RUNTIME_COMPLETE:
+DEP_REBUILD: PASS/SKIP — <details>
+CONTAINERS: PASS/WARN/FAIL — <X/Y healthy>
+API_HEALTH: PASS/WARN/FAIL — <details>
+MIGRATIONS: PASS/WARN/FAIL — <current vs head>
+LOGIN_TEST: PASS/FAIL — <details>
+
+FAILED:
+ERROR: <description>
+```
+
+### Step 3: Spawn verification sub-agent — Cross-cutting auth (conditional)
+
+**Only spawn if any sub-issue was marked `auth_impact: true` in Phase 1-N.**
+
+```
+## Task: Cross-cutting Auth Verification for Epic #<epic_number>
+
+You are checking that new user statuses or roles introduced by epic #<epic_number> are properly handled by existing auth guards.
+
+### Step 1: Find new statuses/roles
+
+Search the feature branch diff for new statuses/roles:
+```bash
+git diff develop..<feature_branch>
+```
+Look for: enum additions (Python `class ...Status`, `ALTER TYPE ADD VALUE`), new role constants, new permission levels.
+
+### Step 2: Verify auth guards
+
+For each new status/role found:
+- Read the auth guard (e.g., `auth/dependencies.py`)
+- Check if the guard explicitly handles the new status
+- Write a targeted test that creates a user with the new status and verifies expected behavior
+
+### Step 3: Run tests
+
+```bash
+~/.claude/bin/project-test.sh <test-file> -v
+```
+
+If tests fail: fix on the feature branch and commit.
+If no new statuses/roles found: report SKIP.
+
+## Response Format
+
+AUTH_CHECK_COMPLETE:
+NEW_STATUSES: <list or "none found">
+RESULT: PASS/FAIL/SKIP — <details>
+```
+
+### Step 4: Spawn verification sub-agent — E2E Smoke Test (conditional)
+
+**Skip if the epic is a pure backend/infrastructure change with no user-facing effect.**
+
+```
+## Task: E2E Smoke Test for Epic #<epic_number>
+
+You are writing and running a minimal Playwright smoke test to verify that the UI changes from epic #<epic_number> work at runtime.
+
+Project policies are in these files — read them BEFORE starting:
+- /tmp/epic-claude-root.md (project overview)
+- /tmp/epic-claude-frontend.md (frontend architecture, testing patterns)
+
+### Step 1: Determine the epic's UI domain
+
+Based on the epic scope, classify what area was touched:
+
+| Epic domain | Auth needed? | What to test |
+|---|---|---|
+| Public pages (landing, pricing, legal) | No | Pages load, content renders |
+| Auth flow (login, register, password) | No | Forms render, validation works |
+| Profile/search/matching | Yes (test account) | Key pages load, data displays |
+| Admin panel | Yes (admin account) | Admin pages load, tables render |
+
+### Step 2: Write a targeted smoke test
+
+Create `tests/e2e/<epic-domain>-smoke.spec.ts`
+
+Read the actual frontend components you are writing selectors for — never guess headings, aria-labels, or DOM structure.
+
+Keep it minimal:
+- Each touched page/route loads without errors
+- Key content visible (headings, data)
+- No JavaScript console errors
+
+### Step 3: Run the smoke test
+
+```bash
+npx playwright test tests/e2e/<epic-domain>-smoke.spec.ts --project=<project-name>
+```
+
+If tests fail: fix and retry once.
+
+### Step 4: Commit the smoke test
+
+The smoke test is a permanent artefact — commit it to the feature branch.
+
+## Response Format
+
+E2E_COMPLETE:
+DOMAIN: <epic domain>
+TESTS: <passed>/<total>
+COMMITTED: true/false
+
+FAILED:
+ERROR: <description>
+```
+
+### Step 5: Collect results and show summary
+
+Wait for all verification sub-agents to complete (use `TaskOutput` with `block: true`). Parse each result.
+
+**Sync Closes statements:** Ensure all completed sub-issue numbers are in the tracking PR body as `Closes #<N>` statements. Failed and skipped issues should NOT have Closes statements.
 
 Display a final report:
 
@@ -618,11 +754,15 @@ Display a final report:
 ### Verification
 | Check | Status | Details |
 |-------|--------|---------|
+| Validation | PASS/FAIL | validate:all result |
+| Test Suite | PASS/FAIL | X/Y passed |
+| Dep Rebuild | PASS/SKIP | containers rebuilt for new deps |
 | Containers | PASS/WARN/FAIL/SKIP | X/Y healthy |
 | API Health | PASS/WARN/FAIL/SKIP | endpoints summary |
 | Migrations | PASS/WARN/FAIL/SKIP | current vs head |
-| Test Suite | PASS/FAIL | X/Y passed |
-| Browser | PASS/WARN/FAIL/SKIP | console errors, screenshot |
+| Login Test | PASS/FAIL/SKIP | admin login result |
+| Auth Check | PASS/FAIL/SKIP | cross-cutting auth |
+| E2E Smoke | PASS/WARN/FAIL/SKIP | X/Y passed |
 
 ### Statistics
 - ✅ Implemented: X of Y

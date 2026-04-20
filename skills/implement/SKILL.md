@@ -162,6 +162,30 @@ git diff $(git merge-base HEAD <base-branch>)..HEAD
 
 This prevents infinite fix loops while still catching obvious issues before PR creation.
 
+### Step 2e: API smoke test (if backend endpoints were added/modified)
+
+**Skip if no API endpoints were added or modified.**
+
+Unit tests with mocks do not catch model attribute errors, missing relationships, or enum serialization issues. A smoke test against the running API is mandatory.
+
+1. Restart the API container to pick up code changes: `docker restart pam_api && sleep 8`
+2. Ensure E2E accounts exist (`npm run db:seed:e2e` if needed), then login:
+   ```bash
+   ./scripts/api-login.sh premium
+   TOKEN=$(cat /tmp/pam-token.txt)
+   ```
+3. Call each new/modified endpoint with the token and verify:
+   - Response status is 2xx (not 500)
+   - Response JSON structure matches the schema
+   - Key fields are present and correctly named
+4. If the endpoint returns 500:
+   - Check `docker logs pam_api --tail 30` for the traceback
+   - Fix the root cause (usually a wrong model attribute or missing relationship)
+   - Re-run unit tests to confirm no regression
+   - Re-run the smoke test
+
+**If E2E accounts don't exist yet**, run `npm run db:seed:e2e` first.
+
 ### Step 3: Verify claims with evidence
 
 Before proceeding to PR creation:
