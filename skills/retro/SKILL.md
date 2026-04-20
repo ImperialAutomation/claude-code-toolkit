@@ -53,12 +53,31 @@ Assign each finding to exactly one category:
 | Utility script | Executable script in project `scripts/` directory | Project repo only |
 | Project pattern | Section in project CLAUDE.md under `## Project Patterns` | Project repo only |
 | Environment/config note | Section in project CLAUDE.md under `## Environment Notes` | Project repo only |
+| Claude Code tool behaviour | Memory file in `~/.claude/projects/*/memory/` | Memory only |
 | Toolkit candidate | All of the above PLUS a proposal file | Project repo + `~/.claude/toolkit-proposals/` |
 
 **Default is always project-local.** A finding is a toolkit candidate ONLY if it meets ALL of these criteria:
 - It is not tied to a specific project's URLs, endpoints, or data model
 - The underlying pattern (not the specific implementation) would be useful in at least one other project
 - It can be parameterised (base URL, credentials source, etc.)
+
+**Claude Code tool behaviour** includes: Bash permission workarounds, native tool quirks, permission patterns, sandbox limitations, tool output handling. These are NOT project-specific and belong in memory regardless of whether `docs/development/` exists.
+
+## Phase 2b: Determine Output Destination
+
+Before generating output, detect where operational findings should be written:
+
+**Check:** Does `docs/development/` exist in the current project root?
+
+**If `docs/development/` EXISTS:**
+- Project-specific operational findings (procedures, patterns, troubleshooting) → `docs/development/`
+- Claude Code tool behaviour → memory (always)
+- CLAUDE.md additions → still go to CLAUDE.md (architectural decisions, environment notes)
+- After creating a new file in `docs/development/`, update the project's root CLAUDE.md "Operational Guidelines" section with a link to the new file
+
+**If `docs/development/` does NOT exist:**
+- All findings → memory (current behaviour, unchanged)
+- CLAUDE.md additions → still go to CLAUDE.md
 
 ## Phase 3: Generate Output
 
@@ -77,10 +96,27 @@ Create in the project's `scripts/` directory. Requirements:
 - Error handling with clear messages
 - Referenced from CLAUDE.md
 
-### For auto-memory updates
+### For docs/development/ files (when directory exists)
 
-Also write findings to the project's auto-memory directory (`~/.claude/projects/*/memory/`). Determine the correct memory path from the current working directory.
+Write operational findings to `docs/development/` using the project's existing structure:
+- Troubleshooting procedures → `docs/development/troubleshooting/<topic>.md`
+- Development patterns → `docs/development/<topic>.md`
+- Backend-specific patterns → `docs/development/backend/<topic>.md`
+- Frontend-specific patterns → `docs/development/frontend/<topic>.md`
 
+Format: concise markdown with a `# Title`, a short explanation of **why** this matters, and a **How to apply** section. Match the style of existing files in the directory.
+
+After creating a new file, add a reference to the project's root CLAUDE.md under the "Operational Guidelines" section (or equivalent docs index). Follow the existing link format (e.g. `[topic-name](docs/development/topic-name.md)`).
+
+If a relevant file already exists in `docs/development/`, update it rather than creating a duplicate.
+
+### For auto-memory updates (Claude Code tool behaviour OR fallback)
+
+Write to the project's auto-memory directory (`~/.claude/projects/*/memory/`) when:
+1. The finding is about Claude Code tool behaviour (permissions, Bash workarounds, native tool quirks) — **always**, regardless of `docs/development/` existence
+2. `docs/development/` does NOT exist — **all** findings go here as fallback
+
+Steps:
 - Create topic-specific files for detailed findings (e.g. `auth-patterns.md`, `deployment-notes.md`, `debugging-db.md`)
 - Add a one-line link in `MEMORY.md` pointing to the topic file (e.g. `- See [auth-patterns.md](auth-patterns.md) for session auth flow`)
 - Keep `MEMORY.md` entries brief — it has a 200-line limit and is always loaded into context
@@ -103,8 +139,9 @@ Group output into sections:
 
 ### Project artefacts
 - CLAUDE.md: added/updated <section> with <description>
+- docs/development/<file>.md: <what was captured> (if docs/development/ exists)
 - scripts/<name>.sh: <what it does>
-- memory/<topic>.md: <what was captured>
+- memory/<topic>.md: <what was captured> (tool behaviour or fallback only)
 
 ### Toolkit candidates (if any)
 - <name>: <one-line description> → ~/.claude/toolkit-proposals/<name>.md
@@ -124,8 +161,9 @@ Artefacts:
 ## Rules
 
 - Never store credentials or secrets. Always reference environment variables.
-- Prefer updating existing procedures over creating duplicates. Check CLAUDE.md first.
+- Prefer updating existing procedures over creating duplicates. Check CLAUDE.md and `docs/development/` first.
 - Keep procedures concise. Future sessions need to scan them quickly.
 - If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.
 - When in doubt about toolkit candidacy, keep it project-local. Promote later via `/promote`.
+- Claude Code tool behaviour (permissions, Bash patterns, sandbox workarounds) ALWAYS goes to memory, never to `docs/development/`.
