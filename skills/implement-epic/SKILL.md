@@ -16,9 +16,9 @@ The user provides a parent issue number: `$ARGUMENTS`
 This skill runs autonomously — no confirmation stops between sub-issues.
 
 **HARD BOUNDARIES — NEVER cross these:**
-- NEVER merge the tracking PR (the user reviews and merges manually)
+- NEVER merge PRs into `develop` or `main` — those merges are always done by the user
 - NEVER close the parent issue (closing happens automatically when the tracking PR is merged)
-- Only merge sub-issue PRs into the **feature branch** — nothing else
+- Sub-issue PRs into the **feature branch** may be merged freely by sub-agents
 
 ## Architecture
 
@@ -502,7 +502,7 @@ gh pr edit <tracking_pr> --body-file /tmp/tracking-pr-update.md
 
 ## Phase Final: Verification & Wrap-up
 
-**CRITICAL: NEVER merge the tracking PR. NEVER close the parent issue. NEVER push to main or develop directly. The tracking PR stays as a draft for the user to review and merge manually.**
+**CRITICAL: NEVER merge PRs into `develop` or `main`. NEVER close the parent issue. NEVER push to `main` or `develop` directly. The tracking PR stays as a draft for the user to review and merge manually.**
 
 **CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after polling waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
 
