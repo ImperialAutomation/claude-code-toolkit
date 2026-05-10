@@ -36,14 +36,20 @@ approve() {
 # Pattern: Shell redirects to /tmp/ with allowed commands
 # e.g., gh issue view 123 --json ... > /tmp/file.json
 # e.g., gh issue list ... 2>/dev/null > /tmp/file.json
-if printf '%s' "$COMMAND" | grep -qP '^\s*(gh|git|npm|npx|docker)\s+.*[12]?>\s*/tmp/'; then
+if printf '%s' "$COMMAND" | grep -qP '^\s*(gh|git|npm|npx|docker|~/.claude/bin/\S+)\s+.*[12]?>\s*/tmp/'; then
     approve "Hook: shell redirect to /tmp with allowed command"
+fi
+
+# Pattern: Stdin redirect from /tmp/ with allowed commands
+# e.g., ~/.claude/bin/git-commit.sh --stdin < /tmp/commit-msg.txt
+if printf '%s' "$COMMAND" | grep -qP '^\s*(gh|git|npm|npx|docker|~/.claude/bin/\S+)\s+.*<\s*/tmp/'; then
+    approve "Hook: stdin redirect from /tmp with allowed command"
 fi
 
 # Pattern: Command with stderr suppression (2>/dev/null or 2>/tmp/...)
 # e.g., gh issue view 123 --json ... 2>/dev/null
 # e.g., some_cmd 2>/tmp/err.txt
-if printf '%s' "$COMMAND" | grep -qP '^\s*(gh|git|npm|npx|docker)\s+.*2>/'; then
+if printf '%s' "$COMMAND" | grep -qP '^\s*(gh|git|npm|npx|docker|~/.claude/bin/\S+)\s+.*2>/'; then
     approve "Hook: stderr redirect with allowed command"
 fi
 
