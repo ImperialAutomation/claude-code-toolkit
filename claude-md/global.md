@@ -38,7 +38,7 @@ ALTIJD `~/.claude/bin/git-commit.sh` — NOOIT raw `git commit`.
 **Lang** (met body):
 1. `Read` tool op `/tmp/commit-msg.txt` (ook als het niet bestaat — fout is onschuldig, maakt Write mogelijk)
 2. `Write` tool: commit message naar `/tmp/commit-msg.txt`
-3. `~/.claude/bin/git-commit.sh --stdin < /tmp/commit-msg.txt`
+3. `~/.claude/bin/git-commit.sh --file /tmp/commit-msg.txt`
 
 NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of Bash voor file-aanmaak.
 

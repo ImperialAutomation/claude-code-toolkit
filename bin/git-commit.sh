@@ -10,6 +10,7 @@
 #   echo "message" | git-commit.sh --stdin
 #
 # Options:
+#   --file F   Read commit message from file F
 #   --stdin    Read commit message from stdin
 #   --amend    Amend the previous commit (use with caution)
 
@@ -17,6 +18,7 @@ set -euo pipefail
 
 AMEND=""
 FROM_STDIN=""
+FROM_FILE=""
 MSG_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -24,6 +26,10 @@ while [[ $# -gt 0 ]]; do
         --stdin)
             FROM_STDIN=1
             shift
+            ;;
+        --file)
+            FROM_FILE="$2"
+            shift 2
             ;;
         --amend)
             AMEND="--amend"
@@ -35,6 +41,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --file: use the file directly, no temp file needed
+if [[ -n "$FROM_FILE" ]]; then
+    if [[ ! -s "$FROM_FILE" ]]; then
+        echo "Error: File '$FROM_FILE' does not exist or is empty." >&2
+        exit 1
+    fi
+    exec git commit $AMEND -F "$FROM_FILE"
+fi
 
 TMPFILE=$(mktemp /tmp/commit-msg-XXXXXX.txt)
 trap 'rm -f "$TMPFILE"' EXIT
