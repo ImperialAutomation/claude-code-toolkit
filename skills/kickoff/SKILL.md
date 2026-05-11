@@ -22,13 +22,13 @@ If no arguments provided, ask the user:
 
 ## Phase 1: Read Lessons Learned
 
-Read the lessons learned document:
+Search for a lessons learned document in this order (first match wins):
 
-```
-~/GoogleDrive/3_Resources/Werk/project-lessons-learned.md
-```
+1. `~/.claude/knowledge/project-lessons-learned.md`
 
-This is a growing document with concrete lessons from previous projects, categorized as:
+If not found, ask the user: "Do you have a lessons learned document? Provide the path, or run `/retro` on a completed project first."
+
+The document contains concrete lessons from previous projects, categorized as:
 - **B** — Business & Legal
 - **A** — Architecture & Design
 - **D** — Dependencies & Integraties

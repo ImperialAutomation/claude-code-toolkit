@@ -90,3 +90,6 @@ fi
 
 # Create toolkit-proposals directory
 mkdir -p ~/.claude/toolkit-proposals
+
+# Create knowledge directory (user-owned, not symlinked — for lessons learned, reference docs, etc.)
+mkdir -p ~/.claude/knowledge
