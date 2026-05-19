@@ -23,6 +23,7 @@ Perform a structured, OWASP-guided security code review for a specific security 
 - `database` — Database security review
 - `infrastructure` — Infrastructure, secrets, Docker, session security
 - `pentest` — OWASP ZAP baseline scan
+- `ci-cd` — CI/CD pipeline and GitHub Actions security review
 
 If a number is provided, fetch the issue and infer the domain from its title/body.
 
@@ -208,6 +209,56 @@ OWASP Top 10 focused review. Verify defense-in-depth: input should be validated 
    - Error handling — check if error responses leak internal details (stack traces, SQL queries)
 
 **Report sections:** Automated scan results, manual findings, remediation steps.
+
+---
+
+### Domain: `ci-cd`
+
+CI/CD pipeline security review focused on GitHub Actions supply chain attacks.
+
+1. **Find all workflows:**
+   - Glob for `.github/workflows/*.yml` and `.github/workflows/*.yaml`
+   - If none found, report "No CI/CD workflows present" and skip remaining checks
+
+2. **Pwn Request (CRITICAL):** For each workflow, check the trigger event:
+   - `pull_request_target` with access to secrets = **CRITICAL** in public repos (allows external PRs to steal secrets)
+   - `pull_request_target` that checks out PR head (`ref: ${{ github.event.pull_request.head.sha }}`) and runs untrusted code = **CRITICAL**
+   - `pull_request` is safe (forks don't get secret access)
+   - `push`, `workflow_run`, `workflow_dispatch`, `schedule` are safe (no external trigger)
+
+3. **Script injection:** Search all workflow files for untrusted input in `run:` blocks:
+   - `${{ github.event.pull_request.title }}` — attacker-controlled PR title injected into shell
+   - `${{ github.event.pull_request.body }}` — attacker-controlled PR body
+   - `${{ github.event.issue.title }}` — attacker-controlled issue title
+   - `${{ github.event.issue.body }}` — attacker-controlled issue body
+   - `${{ github.event.comment.body }}` — attacker-controlled comment
+   - `${{ github.head_ref }}` — attacker-controlled branch name
+   - Safe alternative: use environment variables (`env:`) or `actions/github-script` instead of shell interpolation
+
+4. **Third-party Actions pinning:** Check all `uses:` references:
+   - `uses: actions/checkout@v4` (mutable tag) = **MEDIUM** — could be replaced by compromised tag
+   - `uses: actions/checkout@<full-sha>` (pinned hash) = secure
+   - `uses: owner/action@main` (branch ref) = **HIGH** — tracks mutable branch
+   - First-party (`actions/*`) with version tags = acceptable risk
+   - Third-party with only version tags = **MEDIUM** — recommend pinning to SHA
+
+5. **Permissions audit:** For each workflow:
+   - Missing top-level `permissions:` = **MEDIUM** (defaults to broad read/write)
+   - `permissions: write-all` or `contents: write` where not needed = **MEDIUM**
+   - Check if each permission granted is actually used
+   - `id-token: write` should only be present for OIDC deployments (e.g., GitHub Pages, cloud providers)
+
+6. **Secret exposure patterns:**
+   - Secrets passed to steps that don't need them
+   - Secrets in `env:` at workflow level instead of step level (broader exposure)
+   - Secrets logged via `echo` or debug output
+   - SSH keys or tokens not cleaned up in `if: always()` steps
+
+7. **Repository visibility context:**
+   - Public repos: all checks above apply at full severity
+   - Private repos: Pwn Request and script injection are lower risk (no external contributors by default) but still flag as **LOW** — a compromised contributor account or future visibility change could expose them
+
+**Report sections:** Workflow inventory table (name, triggers, permissions, secrets used), findings by severity, third-party action inventory, remediation steps.
 
 ---
 
