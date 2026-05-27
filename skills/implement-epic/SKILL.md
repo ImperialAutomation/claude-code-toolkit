@@ -529,15 +529,31 @@ npm run validate:all
 
 If validation fails, fix issues and commit directly to the feature branch.
 
-### Step 2: Full test suite
+### Step 2: Scoped regression tests
 
-Run the full backend test suite:
+Do NOT run the full test suite — sub-agents already ran their relevant tests.
+Instead, run only test files related to files changed by the epic:
 
+1. Get changed source files (not tests):
 ```bash
-~/.claude/bin/project-test.sh
+git diff develop..<feature_branch> --name-only -- '*.py' '*.ts' '*.tsx' | grep -v test
 ```
 
-If tests fail: attempt to fix on the feature branch, commit, and retry once.
+2. For each changed source file, find related test files using Glob/Grep:
+   - `backend/app/services/foo_service.py` → `backend/tests/**/test_foo*`
+   - `backend/app/api/foo.py` → `backend/tests/**/test_foo*`
+   - `frontend/src/pages/FooPage.tsx` → `frontend/src/**/__tests__/Foo*`
+
+3. Run ONLY those test files with a generous timeout (tests may take minutes per file):
+```bash
+~/.claude/bin/project-test.sh <test-file-1> <test-file-2> ... -v
+```
+Use `timeout: 600000` (10 minutes) on the Bash call.
+
+4. **CRITICAL — test run management:**
+   - NEVER start a new test run if a previous one is still running or timed out. If Bash times out, the tests are still running in the background — do NOT launch another run (this causes parallel test suites competing for DB connections).
+   - If the Bash call times out: report WARN with "tests still running after timeout, likely too many test files scoped" and stop. Do NOT retry.
+   - If tests fail: check if failures are pre-existing (run same test on develop). Only fix regressions introduced by this epic.
 
 ### Step 3: Report
 
@@ -550,7 +566,7 @@ DETAIL: <what's happening>
 
 VALIDATION_COMPLETE:
 VALIDATE_ALL: PASS/FAIL — <details>
-TEST_SUITE: PASS/FAIL — <passed>/<total> tests
+TEST_SUITE: PASS/FAIL — <passed>/<total> tests (scoped to changed files)
 FIXES_COMMITTED: <number of fix commits, 0 if none>
 
 FAILED:
