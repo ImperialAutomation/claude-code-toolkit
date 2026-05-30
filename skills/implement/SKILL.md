@@ -15,6 +15,14 @@ The user provides an issue number: `$ARGUMENTS`
 
 MUST use ~/.claude/bin/git-find-base-branch for base branch detection for the PR.
 
+## Tool Rules
+
+- Use Glob/Grep/Read instead of Bash equivalents (find, grep, cat, head, tail)
+- Use Write/Edit for file creation and modification — not Bash (echo, cat, sed, awk)
+- Bash is for: git, gh, npm, npx, docker, python, ruff, uv, and `~/.claude/bin/` scripts only
+- For venv binaries (python, pytest, alembic, pip), use `~/.claude/bin/venv-run.sh <cmd>` or `~/.claude/bin/project-test.sh`
+- Never use `python3 -c` for file operations — use Read/Edit/Grep instead
+
 ## Phase 1: Discovery & Planning
 
 1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/issue-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels`, then use the Read tool to read it
@@ -90,113 +98,142 @@ After every 2-3 steps, briefly check:
 
 Fix weaknesses immediately before continuing.
 
-## Phase 3: Final Verification (MANDATORY)
+## Phase 3: Final Verification (MANDATORY — delegated to sub-agent)
 
 DO NOT SKIP THIS PHASE. NO COMPLETION CLAIMS WITHOUT FRESH EVIDENCE.
 
-### Step 1: Run targeted tests for your changes
+**Verification runs in a sub-agent with its own context window.** Test output, validation output, review findings, and smoke test logs pollute the orchestrator's context window heavily. Delegating to a sub-agent keeps the main session lightweight for the PR creation phase and avoids context degradation mid-implementation.
 
-```bash
-~/.claude/bin/project-test.sh tests/path/to/your_test.py -v
+The orchestrator (main session) only:
+- Spawns the verification sub-agent
+- Receives a structured summary
+- Decides whether to proceed to Phase 4 or fix issues
+
+### Step 1: Gather context for the sub-agent
+
+Before spawning, collect:
+- `base_branch` — from `~/.claude/bin/git-find-base-branch`
+- `acceptance_criteria` — the AC list parsed in Phase 1 (or "none" if not found)
+- `modified_files` — `git diff --name-only $(git merge-base HEAD <base-branch>)..HEAD`
+- `has_backend_endpoints` — true if any modified file matches `**/api/**`, `**/routes/**`, `**/endpoints/**`
+- `has_schema_changes` — true if any modified file matches `**/schemas/**`, `**/models/**`, `**/migrations/**`
+
+### Step 2: Spawn verification sub-agent
+
+Use the Task tool with `subagent_type: "general-purpose"` and the prompt below. Wait for completion (do NOT use `run_in_background: true` — Phase 4 depends on the result).
+
 ```
+## Task: Final verification for issue #$ARGUMENTS
 
-* Run your feature's tests fresh — do not rely on earlier green runs
-* DO NOT run the entire test suite — that runs in CI after PR creation
-* Paste the actual output in your response
-* If ANY test fails, fix at root cause and re-run
+Verify the implementation on the current branch is ready for PR creation.
+Run each step below and report results in the structured format at the end.
 
-### Step 2: Run project validation
+## Context
+- Issue: #$ARGUMENTS
+- Base branch: <base_branch>
+- Modified files: <modified_files>
+- Acceptance criteria: <acceptance_criteria or "none parsed">
+- Has backend endpoints: <true/false>
+- Has schema changes: <true/false>
 
-* Check for: `npm run validate:all`, `make validate`, `./validate.sh`
-* If validation command exists, run it and show output
-* If backend schemas were modified, ensure OpenAPI is regenerated
-* Fix any errors before proceeding
+Project policies — read these BEFORE verifying:
+- ./CLAUDE.md (project root)
+- ./frontend/CLAUDE.md (if frontend changes)
+- ./backend/app/CLAUDE.md or ./backend/CLAUDE.md (if backend changes)
 
-### Step 2b: Project integration verification (if defined)
+## Tool Rules
+- Use Glob/Grep/Read instead of Bash equivalents (find, grep, cat, head, tail)
+- Use Write/Edit for file creation and modification — not Bash (echo, cat, sed, awk)
+- Bash is for: git, gh, npm, npx, docker, python, ruff, uv, and `~/.claude/bin/` scripts only
+- For venv binaries, use `~/.claude/bin/venv-run.sh <cmd>` or `~/.claude/bin/project-test.sh`
 
-Check the project's CLAUDE.md for an **Integration Verification** section. If it exists and defines file patterns with verification steps:
+## Verification Steps
 
-1. Compare the files you modified against the trigger patterns
-2. If any modified files match a trigger pattern, run the verification steps defined in CLAUDE.md
-3. If no files match any trigger patterns, skip this step
-4. If the CLAUDE.md has no Integration Verification section, skip this step
+### Step A: Targeted tests
+Run ONLY tests relevant to the modified files — never the full suite:
+`~/.claude/bin/project-test.sh tests/path/to/your_test.py -v`
+If any test fails, fix at root cause and re-run.
 
-This step ensures that Docker containers still start, migrations are applied, and API health checks pass after implementation — but only when relevant files were changed.
+### Step B: Project validation
+Check for one of: `npm run validate:all`, `make validate`, `./validate.sh`.
+If found, run it. If backend schemas changed, ensure OpenAPI is regenerated.
+Fix any errors before proceeding.
 
-### Step 2c: Acceptance criteria verification
+### Step C: Integration verification (conditional)
+Check the project's CLAUDE.md for an **Integration Verification** section.
+If it exists AND modified files match a trigger pattern, run the defined steps.
+Otherwise skip.
 
-**Skip if no AC were parsed in Phase 1.**
-
-For each acceptance criterion from Phase 1, find evidence that it is satisfied:
-
-1. Search for a test that explicitly verifies this criterion (by name, assertion, or test docstring)
-2. If no test found, check if the implementation clearly satisfies it (e.g., a config change, a UI element)
-
-Generate an AC verification table:
+### Step D: Acceptance criteria verification (skip if AC = "none parsed")
+For each criterion, find evidence (test name, assertion, config/UI change).
+Produce a table:
 
 | # | Criterion | Evidence | Status |
 |---|-----------|----------|--------|
-| 1 | User can reset password | `test_password_reset_flow` (PASS) | VERIFIED |
-| 2 | Reset link expires after 24h | `test_expired_token` (PASS) | VERIFIED |
-| 3 | Email uses branded template | No test, visual check needed | UNVERIFIED |
 
-For UNVERIFIED items:
-- If testable: write a test, run it, update the table
-- If not testable (visual, manual): flag for manual review in PR body
+For UNVERIFIED items: write a test if testable, else flag for manual review.
 
-### Step 2d: Self-review (max 2 iterations)
+### Step E: Self-review (max 2 fix iterations)
+Run the `/review` analysis on the branch diff:
+`git diff $(git merge-base HEAD <base-branch>)..HEAD`
 
-Run the `/review` analysis (Phases 2-4: automated checks, structural review, test coverage mapping) on the current branch diff:
+If findings with severity > INFO:
+- Fix automatically, re-run Step A, re-run review
+- Max 2 iterations — remaining findings go into the PR body as "Known Issues"
 
-```bash
-git diff $(git merge-base HEAD <base-branch>)..HEAD
+### Step F: API smoke test (skip if has_backend_endpoints = false)
+1. Restart API container: `docker restart pam_api && sleep 8`
+2. Seed E2E accounts if needed: `npm run db:seed:e2e`
+3. Login: `./scripts/api-login.sh premium` then read `/tmp/pam-token.txt`
+4. Call each new/modified endpoint, verify 2xx + correct JSON structure
+5. On 500: check `docker logs pam_api --tail 30`, fix root cause, re-run
+
+## Response Format
+
+When done, respond with EXACTLY this format:
+
+VERIFICATION_COMPLETE:
+TESTS: PASS/FAIL — <passed>/<total> tests (e.g., 12/12)
+VALIDATION: PASS/FAIL/SKIP — <validate command used or reason for skip>
+INTEGRATION: PASS/FAIL/SKIP — <what was verified or reason for skip>
+AC_VERIFIED: <verified count>/<total count> or SKIP — <one-line summary>
+REVIEW: PASS/WARN/FAIL — <iterations used, findings remaining>
+SMOKE_TEST: PASS/FAIL/SKIP — <endpoints tested or reason for skip>
+KNOWN_ISSUES: <list of remaining review findings, or "none">
+AC_UNVERIFIED: <list of UNVERIFIED criteria needing manual review, or "none">
+
+FAILED:
+ERROR: <description of what blocked verification>
+STEP: <which step failed>
+LAST_OUTPUT: <relevant error output>
 ```
 
-1. If findings with severity > INFO are found:
-   - Fix the issues automatically
-   - Re-run the targeted tests from Step 1 to catch regressions
-   - Run the review analysis again
-2. **Max 2 fix iterations.** If findings remain after 2 iterations:
-   - Include them in the PR body under a "Known Issues" section
-   - Do not continue fixing — proceed to Step 3
+### Step 3: Handle sub-agent result
 
-This prevents infinite fix loops while still catching obvious issues before PR creation.
+**On VERIFICATION_COMPLETE:**
+- If any of TESTS/VALIDATION/INTEGRATION/REVIEW/SMOKE_TEST is FAIL → fix the issue at root cause, then re-run Step 2 (spawn a fresh verification sub-agent — do NOT proceed to Phase 4 with failures)
+- If all are PASS/WARN/SKIP → store `KNOWN_ISSUES` and `AC_UNVERIFIED` for inclusion in the PR body, proceed to Phase 4
 
-### Step 2e: API smoke test (if backend endpoints were added/modified)
+**On FAILED:**
+- Investigate the error in the orchestrator (the sub-agent couldn't complete verification)
+- Fix and re-spawn
 
-**Skip if no API endpoints were added or modified.**
-
-Unit tests with mocks do not catch model attribute errors, missing relationships, or enum serialization issues. A smoke test against the running API is mandatory.
-
-1. Restart the API container to pick up code changes: `docker restart pam_api && sleep 8`
-2. Ensure E2E accounts exist (`npm run db:seed:e2e` if needed), then login:
-   ```bash
-   ./scripts/api-login.sh premium
-   TOKEN=$(cat /tmp/pam-token.txt)
-   ```
-3. Call each new/modified endpoint with the token and verify:
-   - Response status is 2xx (not 500)
-   - Response JSON structure matches the schema
-   - Key fields are present and correctly named
-4. If the endpoint returns 500:
-   - Check `docker logs pam_api --tail 30` for the traceback
-   - Fix the root cause (usually a wrong model attribute or missing relationship)
-   - Re-run unit tests to confirm no regression
-   - Re-run the smoke test
-
-**If E2E accounts don't exist yet**, run `npm run db:seed:e2e` first.
-
-### Step 3: Verify claims with evidence
+### Step 4: Verify claims with evidence
 
 Before proceeding to PR creation:
-* Every claim ("works", "tested", "complete") must have matching test output
-* No "should work", "probably fine", or "seems correct" — only proven facts
-* If you cannot prove a claim, go back and add the missing test
+* The sub-agent's structured response IS your evidence — no "should work" or "probably fine"
+* If any claim in the response is unsupported (e.g., TESTS: PASS without numbers), re-spawn the sub-agent
 
 ## Phase 4: PR Creation
 
 1. Determine base branch: `~/.claude/bin/git-find-base-branch`
-2. Write PR body to `/tmp/pr-body.md` using the Write tool (include `Closes #$ARGUMENTS` + implementation summary + test checklist). If SENTRY_ISSUES were found in Phase 1, add a "Sentry" section: `## Sentry\nResolves: PAM-BACKEND-G, PAM-BACKEND-H`
+2. Write PR body to `/tmp/pr-body.md` using the Write tool. Include:
+   - `Closes #$ARGUMENTS`
+   - Implementation summary
+   - Test checklist (test counts from the verification sub-agent's TESTS line)
+   - If `KNOWN_ISSUES` from Phase 3 is not "none": add a `## Known Issues` section listing them
+   - If `AC_UNVERIFIED` from Phase 3 is not "none": add a `## Manual Review Needed` section listing the UNVERIFIED criteria
+   - If SENTRY_ISSUES were found in Phase 1, add a `## Sentry` section: `Resolves: PAM-BACKEND-G, PAM-BACKEND-H`
 3. Push + create PR in one command:
    `~/.claude/bin/git-push-pr-merge.sh --base <base-branch> --title "<concise description>" --body-file /tmp/pr-body.md --no-merge`
 4. Return PR URL for review
