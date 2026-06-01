@@ -36,10 +36,10 @@ BLOCKED_PATTERNS=(
     "rm -rf \\$HOME"
     # Git destructive operations
     "git push.*--force"
-    "git push.*-f[^i]"
+    "git push.* -f( |$)"
     "git reset.*--hard"
     "git checkout -- \\."
-    "git clean.*-f"
+    "git clean.* -f( |$)"
     # Database destruction
     "DROP TABLE"
     "DROP DATABASE"
@@ -58,6 +58,20 @@ BLOCKED_PATTERNS=(
 CASE_SENSITIVE_PATTERNS=(
     "git branch.*-D"
 )
+
+# Guard: never auto-merge a PR into a protected base branch.
+# Blocks git-push-pr-merge.sh targeting develop/master/main UNLESS --no-merge is set.
+# Epic sub-issue PRs (--base <feature_branch>) are unaffected; only the shared
+# integration branches are protected. The agent must leave those PRs for the user
+# to review and merge manually. See implement / implement-epic skill rules.
+if echo "$COMMAND" | grep -qE 'git-push-pr-merge\.sh'; then
+    if echo "$COMMAND" | grep -qE -- '--base[= ]+(develop|master|main)([[:space:]]|$)'; then
+        if ! echo "$COMMAND" | grep -qE -- '--no-merge'; then
+            echo "BLOCKED by hook-block-destructive.sh: refusing to auto-merge a PR into a protected base branch (develop/master/main). This repo has no server-side branch protection (private/free tier), so merges to integration branches are the user's call. Re-run with --no-merge to open the PR for review, or ask the user to merge it." >&2
+            exit 2
+        fi
+    fi
+fi
 
 for pattern in "${CASE_SENSITIVE_PATTERNS[@]}"; do
     if echo "$COMMAND" | grep -E "$pattern" > /dev/null 2>&1; then
