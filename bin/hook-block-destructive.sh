@@ -73,6 +73,23 @@ if echo "$COMMAND" | grep -qE 'git-push-pr-merge\.sh'; then
     fi
 fi
 
+# Guard: never run a raw `git merge` while ON a protected base branch.
+# Merging INTO feature/epic branches is fine (that is the normal sync direction,
+# e.g. develop -> epic branch). But a merge whose TARGET is develop/master/main
+# must go through a reviewed PR the user merges manually — this repo has no
+# server-side branch protection (private/free tier). A static permission pattern
+# can't see the current branch, so the check lives here. The sanctioned wrapper
+# git-merge-branch.sh enforces the same rule; this catches raw `git merge` too.
+if echo "$COMMAND" | grep -qE '(^|[;&|[:space:]])git[[:space:]]+merge([[:space:]]|$)'; then
+    CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true)
+    case "$CURRENT_BRANCH" in
+        develop|master|main)
+            echo "BLOCKED by hook-block-destructive.sh: refusing 'git merge' while on protected branch '$CURRENT_BRANCH'. Merges INTO develop/master/main must go through a reviewed PR the user merges manually. To sync changes the other way (e.g. develop into a feature/epic branch), checkout that branch first — git-merge-branch.sh <source> does this with the same guard." >&2
+            exit 2
+            ;;
+    esac
+fi
+
 for pattern in "${CASE_SENSITIVE_PATTERNS[@]}"; do
     if echo "$COMMAND" | grep -E "$pattern" > /dev/null 2>&1; then
         echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$pattern'. Rephrase or ask the user for explicit permission." >&2
