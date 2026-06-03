@@ -80,7 +80,15 @@ fi
 # server-side branch protection (private/free tier). A static permission pattern
 # can't see the current branch, so the check lives here. The sanctioned wrapper
 # git-merge-branch.sh enforces the same rule; this catches raw `git merge` too.
-if echo "$COMMAND" | grep -qE '(^|[;&|[:space:]])git[[:space:]]+merge([[:space:]]|$)'; then
+#
+# Only match `git merge` when it STARTS a command segment — at line start or
+# right after a separator (; && || | & newline). This avoids false positives
+# where the substring "git merge" appears inside a quoted argument, e.g. a
+# commit message (git-commit.sh "feat: block raw git merge ...") or an echo.
+# We can't fully parse the shell, but anchoring to segment boundaries kills the
+# common cases. A leading-whitespace-after-separator allowance keeps it matching
+# `... && git merge ...`. Note `--no-edit` etc. are still caught (trailing \b).
+if echo "$COMMAND" | grep -qE '(^|[;&|]|&&|\|\|)[[:space:]]*git[[:space:]]+merge([[:space:]]|$)'; then
     CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true)
     case "$CURRENT_BRANCH" in
         develop|master|main)
