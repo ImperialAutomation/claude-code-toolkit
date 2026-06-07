@@ -98,6 +98,34 @@ if echo "$COMMAND" | grep -qE '(^|[;&|]|&&|\|\|)[[:space:]]*git[[:space:]]+merge
     esac
 fi
 
+# Guard: never merge a PR into a protected base branch via raw `gh pr merge`.
+# Mirrors the git-push-pr-merge.sh guard above, but for the bare gh CLI, which
+# carries no --base (the PR already knows its base). We resolve the PR's base via
+# the API: an explicit PR number/URL as the gh arg, else the PR for the current
+# branch. Merges into a feature/epic base stay allowed (epic flow); only
+# develop/master/main are the user's call to merge manually. On any lookup
+# failure we fail closed (block) — a merge command we can't classify is exactly
+# the one to stop. Only matches `gh pr merge` at a command-segment boundary, so
+# the substring inside a quoted arg (commit message, echo) is not caught.
+if echo "$COMMAND" | grep -qE '(^|[;&|]|&&|\|\|)[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+    # Extract an explicit PR ref (number or URL) following `gh pr merge`, if any.
+    PR_REF=$(echo "$COMMAND" | grep -oE 'gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+[^[:space:]]+' | awk '{print $4}' || true)
+    case "$PR_REF" in
+        -*) PR_REF="" ;;  # a flag, not a PR ref → fall back to current branch
+    esac
+    PR_BASE=$(gh pr view ${PR_REF:+"$PR_REF"} --json baseRefName --jq '.baseRefName' 2>/dev/null || true)
+    if [ -z "$PR_BASE" ]; then
+        echo "BLOCKED by hook-block-destructive.sh: refusing 'gh pr merge' — could not resolve the PR's base branch to verify it isn't a protected one (develop/master/main). Merges into integration branches are the user's call; this repo has no server-side branch protection. Ask the user to merge it." >&2
+        exit 2
+    fi
+    case "$PR_BASE" in
+        develop|master|main)
+            echo "BLOCKED by hook-block-destructive.sh: refusing 'gh pr merge' into protected base branch '$PR_BASE'. Merges into develop/master/main must go through a PR the user reviews and merges manually (HIL). Leave the PR open for the user." >&2
+            exit 2
+            ;;
+    esac
+fi
+
 for pattern in "${CASE_SENSITIVE_PATTERNS[@]}"; do
     if echo "$COMMAND" | grep -E "$pattern" > /dev/null 2>&1; then
         echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$pattern'. Rephrase or ask the user for explicit permission." >&2
