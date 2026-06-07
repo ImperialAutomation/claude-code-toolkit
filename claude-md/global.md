@@ -42,6 +42,10 @@ ALTIJD `~/.claude/bin/git-commit.sh` — NOOIT raw `git commit`.
 
 NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of Bash voor file-aanmaak.
 
+### Git branches
+
+Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug>` een korte kebab-case samenvatting van de issue-titel is. Bijv. issue #3 "Per-feature code discipline" → `issue-3-code-discipline`. Zo is elke branch traceerbaar naar zijn issue. Branches zonder issue (los experiment) mogen afwijken.
+
 ### Wat NIET werkt (ook al lijkt het logisch)
 
 - `cd backend && python ...` — eerste woord is `cd`
@@ -55,7 +59,7 @@ NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of
 - DRY: check if similar logic already exists before implementing; create shared functions instead of duplicating
 - SOLID: single responsibility per class/module, open for extension but closed for modification, depend on abstractions not concretions. Apply pragmatically — don't over-engineer for hypothetical future requirements
 - No magic strings/numbers: use constants, enums, or configuration for all business logic values
-- Remove obsolete code always. Never keep old files "just in case"
+- Remove obsolete code always. Never keep old files "just in case" — a replacement removes the old version in the same PR (no dead parallel paths)
 - Always read a model/class file before assuming its attributes
 - Never skip validation because "it should work"
 - Never commit code that hasn't been tested
