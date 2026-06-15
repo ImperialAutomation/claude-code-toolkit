@@ -35,10 +35,10 @@ ALTIJD `~/.claude/bin/git-commit.sh` — NOOIT raw `git commit`.
 ~/.claude/bin/git-commit.sh "feat: short description"
 ```
 
-**Lang** (met body):
-1. `Read` tool op `/tmp/commit-msg.txt` (ook als het niet bestaat — fout is onschuldig, maakt Write mogelijk)
-2. `Write` tool: commit message naar `/tmp/commit-msg.txt`
-3. `~/.claude/bin/git-commit.sh --file /tmp/commit-msg.txt`
+**Lang** (met body) — gebruik een project+nr-specifieke bestandsnaam (zie "Tmp-bestandsnamen" hieronder). Voorbeeld voor een project in `~/Projects/Acme-Webshop`, issue #42:
+1. `Read` tool op `/tmp/acme-webshop-commit-msg-42.txt` (ook als het niet bestaat — fout is onschuldig, maakt Write mogelijk)
+2. `Write` tool: commit message naar `/tmp/acme-webshop-commit-msg-42.txt`
+3. `~/.claude/bin/git-commit.sh --file /tmp/acme-webshop-commit-msg-42.txt`
 
 NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of Bash voor file-aanmaak.
 
@@ -90,8 +90,9 @@ Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug
   - Use Read to read files — not `cat`, `head`, or `tail`
   - Use Write to create new files (auto-creates parent directories) — not `mkdir` + Bash
   - Use `git rm` to delete files — not `rm`
-- Bash tool: always save API responses to a file first, then read the file. Use `~/.claude/bin/gh-save.sh /tmp/output.json <gh-args>` to save `gh` output (shell redirects like `>` trigger permission prompts).
+- Bash tool: always save API responses to a file first, then read the file. Use `~/.claude/bin/gh-save.sh /tmp/<project>-<purpose>-<nr>.json <gh-args>` to save `gh` output (shell redirects like `>` trigger permission prompts).
 - Never use command substitution with pipes for API data
-- Never write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc). These don't match permission patterns like `Bash(git *)`. Instead: use the Write tool to write to `/tmp/`, then reference the file in Bash (e.g., `git commit -F /tmp/commit-msg`, `gh issue create --body-file /tmp/issue-body.md`).
+- Never write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc). These don't match permission patterns like `Bash(git *)`. Instead: use the Write tool to write to `/tmp/` with a project+nr-specific name (see "Tmp-bestandsnamen"), then reference the file in Bash (e.g., `git commit -F /tmp/acme-webshop-commit-msg-42.txt`, `gh issue create --body-file /tmp/acme-webshop-issue-body-42.md`).
+- **Tmp-bestandsnamen: ALTIJD uniek per project + taak.** NOOIT generieke namen als `/tmp/commit-msg.txt` of `/tmp/pr-body.md` — er draaien vaak meerdere agents tegelijk, ook in verschillende projecten, en die overschrijven elkaars bestand. Schema: `/tmp/<project>-<doel>-<nr>.<ext>`, waarbij `<project>` de basename van de working directory is, lowercase, niet-alfanumerieke tekens vervangen door `-` (bv. `~/Projects/Acme-Webshop` → `acme-webshop`), en `<nr>` het issue- of PR-nummer. Voorbeelden: `/tmp/acme-webshop-commit-msg-42.txt`, `/tmp/acme-webshop-pr-body-42.md`, `/tmp/acme-webshop-issue-body-42.md`. Zonder issue/PR-nummer: gebruik een kort beschrijvend doel (`/tmp/acme-webshop-deploy-log.txt`).
 - Never use `python3 -c`, `sed`, or `awk` for file reading, writing, searching, or modifications. Use Grep/Read to find content, then Edit to replace. `python3 -c` is allowed for non-file operations (calculations, data transformations, etc.).
 - For batch operations on multiple issues, always use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`). Never use `for` loops or chained `&&` commands to repeat `gh` calls.
