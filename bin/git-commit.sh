@@ -13,12 +13,15 @@
 #   --file F   Read commit message from file F
 #   --stdin    Read commit message from stdin
 #   --amend    Amend the previous commit (use with caution)
+#   --repo D   Run git in repository directory D (avoids a leading `cd`, which
+#              would break the Bash(~/.claude/bin/*) permission match)
 
 set -euo pipefail
 
 AMEND=""
 FROM_STDIN=""
 FROM_FILE=""
+REPO_DIR=""
 MSG_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +34,10 @@ while [[ $# -gt 0 ]]; do
             FROM_FILE="$2"
             shift 2
             ;;
+        --repo)
+            REPO_DIR="$2"
+            shift 2
+            ;;
         --amend)
             AMEND="--amend"
             shift
@@ -41,6 +48,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Switch into the repository if requested, so the caller need not prefix the
+# command with `cd` (which would break the permission allow-match).
+if [[ -n "$REPO_DIR" ]]; then
+    cd "$REPO_DIR" || { echo "Error: cannot cd into repo '$REPO_DIR'." >&2; exit 1; }
+fi
 
 # --file: use the file directly, no temp file needed
 if [[ -n "$FROM_FILE" ]]; then
