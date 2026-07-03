@@ -1,20 +1,37 @@
 #!/bin/bash
-# Find the base branch by determining which branch has the most recent merge base
-# with the current branch. This identifies which branch the current branch was
-# most recently branched from.
+# Find the base branch a feature branch should target / was branched from.
+#
+# Strategy (in order):
+#   1. Prefer a known integration branch (develop > master > main) when it is an
+#      ancestor of the current branch. A feature branch cut from develop will
+#      have develop as an ancestor, so this returns the real integration target
+#      instead of some unrelated long-lived feature branch that happens to share
+#      a more recent merge base.
+#   2. Fallback: the ancestor branch with the most recent merge base with the
+#      current branch (original heuristic) — covers repos without a
+#      develop/master/main branch.
+#   3. Last resort: first existing develop/master/main, even if not an ancestor.
 
 current=$(git branch --show-current)
+
+# 1. Prefer a known integration branch that is an ancestor of current.
+#    Skip current itself so `develop` returns `master`, not `develop`.
+for branch in develop master main; do
+    [ "$branch" = "$current" ] && continue
+    git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null || continue
+    if git merge-base --is-ancestor "$branch" "$current" 2>/dev/null; then
+        echo "$branch"
+        exit 0
+    fi
+done
+
+# 2. Fallback: ancestor branch with the most recent merge base with current.
 best=""
 best_date=0
-
-# Check all local branches except current
 for branch in $(git for-each-ref --format='%(refname:short)' refs/heads/ | grep -v "^${current}$"); do
-    # Check if branch is ancestor of current
     if git merge-base --is-ancestor "$branch" "$current" 2>/dev/null; then
         merge_base=$(git merge-base "$branch" "$current")
         commit_date=$(git show -s --format=%ct "$merge_base")
-
-        # Track the branch with most recent merge base
         if [ "$commit_date" -gt "$best_date" ]; then
             best_date=$commit_date
             best=$branch
@@ -24,12 +41,14 @@ done
 
 if [ -n "$best" ]; then
     echo "$best"
-else
-    # Fallback to common defaults
-    for branch in develop master main; do
-        if git show-ref --verify --quiet refs/heads/$branch 2>/dev/null; then
-            echo "$branch"
-            exit 0
-        fi
-    done
+    exit 0
 fi
+
+# 3. Last resort: first existing default branch, even if not an ancestor.
+for branch in develop master main; do
+    [ "$branch" = "$current" ] && continue
+    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        echo "$branch"
+        exit 0
+    fi
+done
