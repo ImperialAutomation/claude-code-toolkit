@@ -139,14 +139,27 @@ Parent issue: #[parent-number]
 - [ ] Criterion 2
 
 ## Dependencies
-- Blocked by: [list or "None"]
-- Blocks: [list or "None"]
+- Blocked by: [POSITION-ref, e.g. §2 — see note below, or "None"]
+- Blocks: [POSITION-ref, e.g. §3 — see note below, or "None"]
 ```
+
+**CRITICAL — cross-references are POSITION placeholders, not issue numbers.**
+When you write a sub-issue body in this step, the real issue numbers of the OTHER
+sub-issues do not exist yet (`gh issue create` below is what mints them). Any
+`Blocked by` / `Blocks` reference to a sibling sub-issue is therefore only a
+*position* in the Step 2 table. **Never write `#2`/`#3` here** — a bare `#2` is a
+real, unrelated issue in the repo and will silently point at the wrong thing.
+Instead write the position with a non-`#` marker that is unambiguous to find and
+replace later — e.g. `§2` / `§3` (or `sub-2` / `sub-3`). Step 5e rewrites these
+into the real `#`-numbers once they are known.
 
 Then create the issue:
 ```bash
 gh issue create --title "[Parent #] Sub-issue: [Title]" --body-file /tmp/sub-issue-<n>.md
 ```
+
+**Record the mapping position → real number** as each `gh issue create` returns
+its URL/number (e.g. `§1 → #146`, `§2 → #147`, `§3 → #148`). Step 5e needs this.
 
 ### Step 5b: Link as Native GitHub Sub-Issues
 
@@ -198,6 +211,30 @@ Closes #[sub-issue-2]
 ```
 
 Also update the tracking table with the actual sub-issue numbers and titles.
+
+### Step 5e: Rewrite Cross-References to Real Issue Numbers
+
+The sub-issue bodies still contain the `§N` / `sub-N` position placeholders from
+Step 5 (in their `Dependencies` sections). Now that every sub-issue has a real
+number, replace each placeholder with the real `#`-number using the mapping you
+recorded in Step 5.
+
+For each sub-issue whose body contains a cross-reference:
+1. Edit its local `/tmp/sub-issue-<n>.md` — replace every `§K` / `sub-K` with the
+   real `#`-number for position K (e.g. `§2 → #147`, `§3 → #148`).
+2. Push the corrected body back:
+   ```bash
+   gh issue edit [real-number] --body-file /tmp/sub-issue-<n>.md
+   ```
+
+**Verify no placeholder survives.** After editing, grep the bodies for a leftover
+marker — a stray `§` or `sub-N` means a dependency still points nowhere, and a
+bare `#K` that was never rewritten silently points at the wrong (real) issue:
+```bash
+grep -nE '§[0-9]|sub-[0-9]' /tmp/sub-issue-*.md   # must return nothing
+```
+If any sub-issue's `Dependencies` still reads `#1`/`#2`/`#3` and those were meant
+as *positions*, they are wrong — rewrite them to the real numbers too.
 
 ### Step 6: Update Parent Issue
 
