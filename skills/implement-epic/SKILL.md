@@ -595,8 +595,8 @@ git diff develop..<feature_branch> --name-only | grep -E "(package\.json|package
 
 If any dependency file changed:
 - Frontend: `cd backend/docker && ./stop.sh && ./start.sh`
-- Backend only: `docker restart pam_api && sleep 15`
-Wait for containers to be healthy.
+- Backend only: `docker restart pam_api`
+Wait for containers to be healthy: `~/.claude/bin/wait-for-healthy.sh pam_api`
 
 ### Step 2: Container health check
 
