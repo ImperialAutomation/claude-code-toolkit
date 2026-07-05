@@ -263,5 +263,122 @@ check("e2e: empty command falls through with no stdout", not approved and code =
 approved, reason, code = run_hook("cat <<EOF\nrm -rf /\nEOF")
 check("e2e: heredoc body NOT approved, falls through cleanly", not approved and code == 0)
 
+# --- adversarial review regressions (issue #12 security note) ---
+
+check(
+    "adversarial: newline-separated unvetted command is NOT approved",
+    not hook.is_command_safe("true\ndocker run --privileged evil-image"),
+)
+
+check(
+    "adversarial: newline-separated command with an unallowlisted binary is NOT approved",
+    not hook.is_command_safe("true\ncurl http://evil.example/x"),
+)
+
+check(
+    "adversarial: newline before an allowlisted command still works when both sides are safe",
+    hook.is_command_safe("git status\ngit log"),
+)
+
+check(
+    "adversarial: quoted newline inside a token is not treated as a separator",
+    hook.is_command_safe('echo "line1\nline2"'),
+)
+
+check(
+    "adversarial: bare & background operator with unvetted second command is NOT approved",
+    not hook.is_command_safe("true & touch /tmp/PWNED_MARKER"),
+)
+
+check(
+    "adversarial: bare & with both sides safe still approves",
+    hook.is_command_safe("git status & git log"),
+)
+
+check(
+    "adversarial: git -c core.sshCommand=... is NOT approved",
+    not hook.is_command_safe('git -c core.sshCommand="touch /tmp/x" status'),
+)
+
+check(
+    "adversarial: git commit -c core.sshCommand=... carve-out does NOT bypass config check",
+    not hook.is_command_safe('git commit -c core.sshCommand="touch /tmp/x" -m hi'),
+)
+
+check(
+    "adversarial: git config core.fsmonitor=<cmd> is NOT approved",
+    not hook.is_command_safe('git config core.fsmonitor "/bin/sh -c id"'),
+)
+
+check(
+    "adversarial: git clone --upload-pack=<cmd> is NOT approved",
+    not hook.is_command_safe('git clone --upload-pack="touch /tmp/x" ssh://x/y'),
+)
+
+check(
+    "adversarial: git clone ext:: transport is NOT approved",
+    not hook.is_command_safe("git clone ext::sh -c 'touch /tmp/x' /tmp/out"),
+)
+
+check(
+    "adversarial: ordinary git commit (no -c) is still approved",
+    hook.is_command_safe('git commit -m "normal message"'),
+)
+
+check(
+    "adversarial: ordinary git status/log still approved",
+    hook.is_command_safe("git status && git log --oneline"),
+)
+
+check(
+    "adversarial: docker run -v /:/host (host-root bind mount) is NOT approved",
+    not hook.is_command_safe("docker run -v /:/host -it alpine chroot /host sh"),
+)
+
+check(
+    "adversarial: docker run --privileged is NOT approved",
+    not hook.is_command_safe("docker run --privileged -v /:/host alpine sh"),
+)
+
+check(
+    "adversarial: docker run --entrypoint override is NOT approved",
+    not hook.is_command_safe("docker run --entrypoint /bin/sh -v /:/host alpine"),
+)
+
+check(
+    "adversarial: ordinary docker ps/logs/build still approved",
+    hook.is_command_safe("docker ps -a && docker logs my_container"),
+)
+
+check(
+    "adversarial: docker run with a normal bind mount (not host root) still approved",
+    hook.is_command_safe("docker run -v /home/user/project:/app alpine ls /app"),
+)
+
+check(
+    "adversarial: find -exec is NOT approved",
+    not hook.is_command_safe('find / -name "*.ssh" -exec touch /tmp/x \\;'),
+)
+
+check(
+    "adversarial: find -delete is NOT approved",
+    not hook.is_command_safe("find /tmp -name '*.log' -delete"),
+)
+
+check(
+    "adversarial: ordinary find (no -exec) still approved",
+    hook.is_command_safe('find . -name "*.py"'),
+)
+
+check(
+    "adversarial: process substitution >(...) is NOT approved",
+    not hook.is_command_safe("echo test >(touch /tmp/PWNED_MARKER)"),
+)
+
+check(
+    "adversarial: process substitution <(...) is NOT approved",
+    not hook.is_command_safe("cat <(echo hi)"),
+)
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
