@@ -26,3 +26,11 @@ description: Data integrity rules for database operations and migrations
   4. Contract: drop old column in a separate migration, after all instances run new code
   - Never add `NOT NULL` without a default
   - Never drop + add replacement in the same migration
+- Closed value sets live in one source — if a fixed set of values already
+  exists as an enum/constant in code, that is the single source of truth.
+  Resolve options/validation live from it; never copy the values into a second
+  store (DB column, config row, seeded migration) where they silently drift
+  when the enum gains a member. A stored column for the value set is correct
+  only when there is NO backing enum (e.g. choices defined at runtime by an
+  admin). Enforce with a hook the second time this is violated (see
+  code-review rule) — a check that fails any migration seeding the duplicate.
