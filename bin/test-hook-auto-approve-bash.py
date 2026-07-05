@@ -219,6 +219,11 @@ check(
 )
 
 check(
+    "is_command_safe: path traversal escaping ~/.claude/bin/ is NOT recognized",
+    not hook.is_command_safe("~/.claude/bin/../../../etc/passwd"),
+)
+
+check(
     "is_command_safe: unparseable input (unterminated quote) is unsafe",
     not hook.is_command_safe("echo 'unterminated"),
 )

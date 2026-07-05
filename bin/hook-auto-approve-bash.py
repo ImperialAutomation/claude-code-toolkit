@@ -116,9 +116,14 @@ def strip_cd_prefix(segment_tokens):
 
 
 def _is_allowed_bin_token(token):
-    """True if `token` is a ~/.claude/bin/ script reference (any spelling)."""
-    expanded = os.path.expanduser(token)
-    return expanded.startswith(CLAUDE_BIN + os.sep)
+    """True if `token` is a ~/.claude/bin/ script reference (any spelling).
+
+    Normalizes with normpath (not just expanduser) so a traversal like
+    "~/.claude/bin/../../../etc/passwd" is resolved to its real target
+    before the prefix check, instead of matching on the raw string.
+    """
+    resolved = os.path.normpath(os.path.expanduser(token))
+    return resolved == CLAUDE_BIN or resolved.startswith(CLAUDE_BIN + os.sep)
 
 
 def is_segment_safe(segment_tokens):
