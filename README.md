@@ -118,7 +118,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents) |
-| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, merge, return to base (for `/implement-epic`) |
+| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, gate on required CI checks, merge, return to base (for `/implement-epic`) |
 
 ### Project audits
 
