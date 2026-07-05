@@ -114,7 +114,7 @@ The orchestrator (main session) only:
 Before spawning, collect:
 - `base_branch` — from `~/.claude/bin/git-find-base-branch`
 - `acceptance_criteria` — the AC list parsed in Phase 1 (or "none" if not found)
-- `modified_files` — `git diff --name-only $(git merge-base HEAD <base-branch>)..HEAD`
+- `modified_files` — `~/.claude/bin/git-diff-base.sh <base-branch>`
 - `has_backend_endpoints` — true if any modified file matches `**/api/**`, `**/routes/**`, `**/endpoints/**`
 - `has_schema_changes` — true if any modified file matches `**/schemas/**`, `**/models/**`, `**/migrations/**`
 
@@ -175,14 +175,14 @@ For UNVERIFIED items: write a test if testable, else flag for manual review.
 
 ### Step E: Self-review (max 2 fix iterations)
 Run the `/review` analysis on the branch diff:
-`git diff $(git merge-base HEAD <base-branch>)..HEAD`
+`~/.claude/bin/git-diff-base.sh --patch <base-branch>`
 
 If findings with severity > INFO:
 - Fix automatically, re-run Step A, re-run review
 - Max 2 iterations — remaining findings go into the PR body as "Known Issues"
 
 ### Step F: API smoke test (skip if has_backend_endpoints = false)
-1. Restart API container: `docker restart pam_api && sleep 8`
+1. Restart API container: `docker restart pam_api`, then wait for it to come back up: `~/.claude/bin/wait-for-healthy.sh pam_api`
 2. Seed E2E accounts if needed: `npm run db:seed:e2e`
 3. Login: `./scripts/api-login.sh premium` then read `/tmp/pam-token.txt`
 4. Call each new/modified endpoint, verify 2xx + correct JSON structure
