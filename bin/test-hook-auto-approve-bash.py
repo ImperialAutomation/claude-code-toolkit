@@ -223,6 +223,21 @@ check(
     not hook.is_command_safe("echo 'unterminated"),
 )
 
+check(
+    "is_command_safe: heredoc (<<) is never auto-approved",
+    not hook.is_command_safe("cat <<EOF\nsome content\nEOF"),
+)
+
+check(
+    "is_command_safe: here-string (<<<) is never auto-approved",
+    not hook.is_command_safe("gh api graphql <<< '{\"query\": \"x\"}'"),
+)
+
+check(
+    "is_command_safe: heredoc even on git commit is not exempted",
+    not hook.is_command_safe("git commit -F - <<EOF\nmsg\nEOF"),
+)
+
 # --- end-to-end via subprocess (real PreToolUse payload shape) ---
 
 approved, reason, code = run_hook("cd ~/Projects/acme-webshop && git status")
@@ -239,6 +254,9 @@ check("e2e: unparseable input NOT approved, falls through cleanly", not approved
 
 approved, reason, code = run_hook("")
 check("e2e: empty command falls through with no stdout", not approved and code == 0)
+
+approved, reason, code = run_hook("cat <<EOF\nrm -rf /\nEOF")
+check("e2e: heredoc body NOT approved, falls through cleanly", not approved and code == 0)
 
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

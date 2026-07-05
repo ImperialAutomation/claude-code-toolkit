@@ -82,6 +82,13 @@ def has_command_substitution(segment_tokens):
     return False
 
 
+def has_heredoc(segment_tokens):
+    """True if a segment uses << or <<< — shlex doesn't reject these (it
+    tokenizes the body as plain words), but a heredoc body can smuggle
+    arbitrary content into any command, so it is never auto-approved."""
+    return "<<" in segment_tokens or "<<<" in segment_tokens
+
+
 def strip_env_prefix(segment_tokens):
     """Drop leading VAR=value tokens (e.g. `FOO=bar git status` -> `git status`)."""
     i = 0
@@ -128,6 +135,9 @@ def is_segment_safe(segment_tokens):
 
     first = stripped[0]
     is_git_commit = first == "git" and len(stripped) > 1 and stripped[1] == "commit"
+
+    if has_heredoc(segment_tokens):
+        return False
 
     if has_command_substitution(segment_tokens) and not is_git_commit:
         return False
