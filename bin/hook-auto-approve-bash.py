@@ -108,6 +108,47 @@ def strip_cd_prefix(segment_tokens):
     return segment_tokens
 
 
+def _is_allowed_bin_token(token):
+    """True if `token` is a ~/.claude/bin/ script reference (any spelling)."""
+    expanded = os.path.expanduser(token)
+    return expanded.startswith(CLAUDE_BIN + os.sep)
+
+
+def is_segment_safe(segment_tokens):
+    """A segment is safe if, after stripping cd/env prefixes, its first
+    token is on ALLOWLIST or a ~/.claude/bin/ script — with no command
+    substitution anywhere in it (git commit is the sole carve-out, since
+    git-commit.sh already handles quoting/heredoc bodies safely)."""
+    if not segment_tokens:
+        return True
+
+    stripped = strip_env_prefix(strip_cd_prefix(segment_tokens))
+    if not stripped:
+        return True
+
+    first = stripped[0]
+    is_git_commit = first == "git" and len(stripped) > 1 and stripped[1] == "commit"
+
+    if has_command_substitution(segment_tokens) and not is_git_commit:
+        return False
+
+    if is_git_commit:
+        return True
+
+    return first in ALLOWLIST or _is_allowed_bin_token(first)
+
+
+def is_command_safe(command):
+    """True if every segment of `command` is safe. False (never raises)
+    on unparseable input — the caller falls through to the normal prompt."""
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    return all(is_segment_safe(segment) for segment in segments)
+
+
 def main():
     raw = sys.stdin.read()
     try:
@@ -118,6 +159,16 @@ def main():
     command = payload.get("tool_input", {}).get("command", "")
     if not command:
         return 0
+
+    if is_command_safe(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "Hook: all command segments allowlisted",
+            }
+        }
+        print(json.dumps(output))
 
     return 0
 
