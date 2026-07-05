@@ -93,6 +93,10 @@ case "$1 $2" in
                 fi
                 exit 0
                 ;;
+            malformed-json)
+                echo 'not valid json {{{'
+                exit 0
+                ;;
         esac
         ;;
     "pr merge")
@@ -257,6 +261,16 @@ run_case "transient error then pass" "$repo6" "ratelimit-then-pass" --ci-timeout
 assert_contains "transient error: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo6/last-output.txt")"
 assert_file_present "transient error: merge happened" "$repo6/merged"
 rm -rf "$repo6"
+
+# --- Scenario 6b: malformed JSON from gh -> fail closed, no merge, no crash ---
+repo6b=$(make_repo)
+make_fake_gh "$repo6b"
+echo "Test PR body" > "$repo6b/body.md"
+run_case "malformed json" "$repo6b" "malformed-json"
+assert_contains "malformed json: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo6b/last-output.txt")"
+assert_exit "malformed json: exit code" "1" "$(cat "$repo6b/last-exit.txt")"
+assert_file_absent "malformed json: no merge" "$repo6b/merged"
+rm -rf "$repo6b"
 
 # --- Scenario 7: --no-ci-wait skips the gate even with failing checks ---
 repo7=$(make_repo)

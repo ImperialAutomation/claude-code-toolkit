@@ -116,14 +116,16 @@ echo "Created PR #$PR_NUMBER: $PR_URL"
 wait_for_ci_gate() {
     local elapsed=0
     local retried_transient=0
+    local stderr_file
+    stderr_file=$(mktemp)
+    trap 'rm -f "$stderr_file"' RETURN
 
     while true; do
         local checks_json
         local checks_exit=0
-        checks_json=$(gh pr checks "$PR_NUMBER" --required --json name,bucket 2>/tmp/ci-gate-stderr.$$) || checks_exit=$?
+        checks_json=$(gh pr checks "$PR_NUMBER" --required --json name,bucket 2>"$stderr_file") || checks_exit=$?
         local checks_stderr
-        checks_stderr=$(cat /tmp/ci-gate-stderr.$$ 2>/dev/null || true)
-        rm -f /tmp/ci-gate-stderr.$$
+        checks_stderr=$(cat "$stderr_file" 2>/dev/null || true)
 
         if [[ "$checks_exit" -ne 0 ]]; then
             if echo "$checks_stderr" | grep -qi "no checks reported"; then
@@ -141,15 +143,22 @@ wait_for_ci_gate() {
             return 1
         fi
 
+        local jq_exit=0
         local fail_names
-        fail_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | map(.name) | join(",")')
+        fail_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | map(.name) | join(",")') || jq_exit=$?
+        local pending_names
+        pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")') || jq_exit=$?
+
+        if [[ "$jq_exit" -ne 0 ]]; then
+            echo "CI_GATE: FAIL — unable to parse checks output from gh"
+            return 1
+        fi
+
         if [[ -n "$fail_names" ]]; then
             echo "CI_GATE: FAIL — $fail_names"
             return 1
         fi
 
-        local pending_names
-        pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")')
         if [[ -z "$pending_names" ]]; then
             echo "CI_GATE: PASS"
             return 0
