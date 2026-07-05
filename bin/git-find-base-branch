@@ -2,6 +2,10 @@
 # Find the base branch a feature branch should target / was branched from.
 #
 # Strategy (in order):
+#   0. If current itself is a known integration branch (develop/master/main),
+#      that IS the base — return it directly. Handles running the skill from
+#      develop itself, where master (being an ancestor of develop) would
+#      otherwise be picked by step 1.
 #   1. Prefer a known integration branch (develop > master > main) when it is an
 #      ancestor of the current branch. A feature branch cut from develop will
 #      have develop as an ancestor, so this returns the real integration target
@@ -14,8 +18,19 @@
 
 current=$(git branch --show-current)
 
+# 0. If we're already sitting on an integration branch, that IS the base —
+#    e.g. running from `develop` itself must return `develop`, not fall
+#    through to `master` just because master is an ancestor of develop.
+for branch in develop master main; do
+    if [ "$branch" = "$current" ]; then
+        echo "$branch"
+        exit 0
+    fi
+done
+
 # 1. Prefer a known integration branch that is an ancestor of current.
-#    Skip current itself so `develop` returns `master`, not `develop`.
+#    Skip current itself so a feature branch cut from develop returns
+#    `develop`, not itself.
 for branch in develop master main; do
     [ "$branch" = "$current" ] && continue
     git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null || continue
