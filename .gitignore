@@ -3,3 +3,5 @@
 claude-code-instructie-*.md
 *.code-workspace
 implement-retro-promote-sync.md
+__pycache__/
+*.pyc
