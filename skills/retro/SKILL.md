@@ -42,6 +42,28 @@ For each finding, summarise:
 
 If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 
+## Phase 1b: Permission Friction
+
+Run the friction scanner to surface allowlist gaps the conversation itself won't mention:
+
+```bash
+python3 ~/.claude/bin/permission-friction.py --days 30
+```
+
+(Or via venv: `~/.claude/bin/venv-run.sh python ~/.claude/bin/permission-friction.py --days 30`.)
+
+This scans the current project's transcripts and reports total Bash calls, an estimated prompted count, explicit denials, and the top prompt-causing patterns — grouped by command and the specific construct that defeated matching (no allow rule, unmatched chain segment, `cd`-prefix, command substitution, heredoc). No hardcoded allowlist: it derives rules live from the merged global + project + local `settings.json` files.
+
+**The rule: a pattern seen in >= 2 sessions is a candidate for enforcement, not documentation.** Per the code-review rule ("a convention violated more than once is a hook, not a docs line"), for each pattern the report flags as recurring (`sessions >= 2`), propose ONE concrete remedy in the retro summary:
+
+- **Allowlist rule** — a missing `Bash(cmd *)` entry that would cover the pattern outright (safe, read-only, or already-reviewed commands)
+- **`bin/` wrapper script** — for compound commands (`&&`, `;`, `|` chains) that keep defeating first-token matching; wrap the sequence so permissions match on the wrapper path instead
+- **Hook change** — for patterns already handled case-by-case by `hook-auto-approve-bash.py` logic elsewhere, extend that hook instead of adding narrow allowlist entries
+
+If the report finds no recurring patterns (all counts are 1, or `patterns` is empty), say so — do not invent a remedy for single-occurrence noise.
+
+For one-off, low-risk **read-only** allowlist gaps that don't recur, mention the built-in `/fewer-permission-prompts` skill as the quick path — it scans transcripts and proposes a prioritized allowlist addition directly, without going through a full retro.
+
 ## Phase 2: Classify Each Finding
 
 Assign each finding to exactly one category:
@@ -145,6 +167,9 @@ Group output into sections:
 
 ### Toolkit candidates (if any)
 - <name>: <one-line description> → ~/.claude/toolkit-proposals/<name>.md
+
+### Permission friction (if any recurring patterns found)
+- <pattern>: seen in N sessions → proposed remedy (allowlist rule / bin/ wrapper / hook change)
 ```
 
 **Wait for confirmation before making any changes.**
