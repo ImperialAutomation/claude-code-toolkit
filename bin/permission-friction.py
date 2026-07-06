@@ -167,3 +167,118 @@ def classify_command(command, allow_rules, deny_rules):
         return False, None
 
     return True, REASON_NO_RULE
+
+
+def _encode_project_dir(project_dir):
+    """Mirror Claude Code's transcript-directory naming: absolute path with
+    every "/" replaced by "-"."""
+    return str(Path(project_dir).resolve()).replace(os.sep, "-")
+
+
+def _transcript_dir_for(project_dir):
+    return PROJECTS_TRANSCRIPTS_DIR / _encode_project_dir(project_dir)
+
+
+def _parse_timestamp(value):
+    """Parse a transcript ISO-8601 timestamp ("...Z") to a comparable
+    value, or None if missing/malformed."""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _cutoff(days):
+    from datetime import datetime, timedelta, timezone
+
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def iter_transcript_events(project_dir, days=30):
+    """Yield (session_id, timestamp, message_content_list) for every
+    transcript line within the last `days` days that carries a message
+    with list-shaped content (tool_use/tool_result entries live there).
+
+    Silently yields nothing if the transcript directory doesn't exist or
+    contains no matching files — scanning transcripts is best-effort, not
+    a hard requirement.
+    """
+    transcript_dir = _transcript_dir_for(project_dir)
+    if not transcript_dir.is_dir():
+        return
+
+    cutoff = _cutoff(days)
+
+    for jsonl_path in sorted(transcript_dir.glob("*.jsonl")):
+        session_id = jsonl_path.stem
+        try:
+            lines = jsonl_path.read_text().splitlines()
+        except OSError:
+            continue
+
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            ts = _parse_timestamp(obj.get("timestamp"))
+            if ts is not None and ts < cutoff:
+                continue
+
+            message = obj.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+
+            yield session_id, ts, content
+
+
+def iter_denied_tool_use_ids(project_dir, days=30):
+    """Yield (session_id, tool_use_id) for every tool_result whose content
+    carries the explicit user-rejection marker. This is the only reliable
+    transcript signal for a denial — Claude Code does not log a distinct
+    event for "prompt shown and approved.\""""
+    for session_id, _ts, content in iter_transcript_events(project_dir, days):
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            block_content = block.get("content")
+            text = block_content if isinstance(block_content, str) else json.dumps(block_content)
+            if REJECTION_MARKER in text:
+                tool_use_id = block.get("tool_use_id")
+                if tool_use_id:
+                    yield session_id, tool_use_id
+
+
+def collect_bash_tool_uses(project_dir, days=30):
+    """Return a list of dicts {session_id, tool_use_id, command} for every
+    Bash tool_use in the scanned window, keyed so denials can be joined
+    back to the command that was denied."""
+    results = []
+    for session_id, _ts, content in iter_transcript_events(project_dir, days):
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == "Bash"
+            ):
+                command = block.get("input", {}).get("command")
+                tool_use_id = block.get("id")
+                if command:
+                    results.append(
+                        {
+                            "session_id": session_id,
+                            "tool_use_id": tool_use_id,
+                            "command": command,
+                        }
+                    )
+    return results

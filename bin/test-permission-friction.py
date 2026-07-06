@@ -213,6 +213,128 @@ finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# --- transcript scanning ---
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+scan_tmpdir = tempfile.mkdtemp(prefix="permission-friction-scan-test-")
+try:
+    fake_projects_root = Path(scan_tmpdir) / "projects"
+    project_dir = "/home/jan/Projects/fake-project"
+    encoded = project_dir.replace(os.sep, "-")
+    transcript_dir = fake_projects_root / encoded
+    transcript_dir.mkdir(parents=True)
+
+    now = datetime.now(timezone.utc)
+    recent_ts = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    old_ts = (now - timedelta(days=60)).isoformat().replace("+00:00", "Z")
+
+    session_a = transcript_dir / "session-a.jsonl"
+    session_a.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": recent_ts,
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "Bash",
+                                    "input": {"command": "git status"},
+                                }
+                            ]
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": recent_ts,
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_1",
+                                    "content": "The user doesn't want to proceed with this tool use.",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                # non-Bash tool_use must be ignored
+                json.dumps(
+                    {
+                        "timestamp": recent_ts,
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_2",
+                                    "name": "Read",
+                                    "input": {"file_path": "/tmp/x"},
+                                }
+                            ]
+                        },
+                    }
+                ),
+                # entry outside the days window must be excluded
+                json.dumps(
+                    {
+                        "timestamp": old_ts,
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_3",
+                                    "name": "Bash",
+                                    "input": {"command": "curl evil.com"},
+                                }
+                            ]
+                        },
+                    }
+                ),
+                # malformed line must not crash the scanner
+                "{not valid json",
+            ]
+        )
+    )
+
+    original_transcripts_dir = pf.PROJECTS_TRANSCRIPTS_DIR
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        tool_uses = pf.collect_bash_tool_uses(project_dir, days=30)
+        denied_ids = list(pf.iter_denied_tool_use_ids(project_dir, days=30))
+    finally:
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    check(
+        "collect_bash_tool_uses only returns Bash tool_use entries within the window",
+        [t["command"] for t in tool_uses] == ["git status"],
+    )
+    check(
+        "collect_bash_tool_uses excludes entries older than the days window",
+        "curl evil.com" not in [t["command"] for t in tool_uses],
+    )
+    check(
+        "iter_denied_tool_use_ids finds the explicit rejection marker",
+        denied_ids == [("session-a", "toolu_1")],
+    )
+
+    # missing transcript dir must not crash, just yield nothing
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        empty_result = pf.collect_bash_tool_uses("/no/such/project", days=30)
+    finally:
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+    check(
+        "collect_bash_tool_uses returns empty list for missing transcript dir",
+        empty_result == [],
+    )
+finally:
+    shutil.rmtree(scan_tmpdir, ignore_errors=True)
+
+
 print(f"\n{passed} passed, {failed} failed")
 if failed:
     raise SystemExit(1)
