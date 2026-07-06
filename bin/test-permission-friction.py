@@ -335,6 +335,119 @@ finally:
     shutil.rmtree(scan_tmpdir, ignore_errors=True)
 
 
+# --- analyze_friction end-to-end ---
+
+e2e_tmpdir = tempfile.mkdtemp(prefix="permission-friction-e2e-test-")
+try:
+    fake_home = Path(e2e_tmpdir) / "home"
+    fake_home.mkdir(parents=True)
+    (fake_home / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git *)"], "deny": []}})
+    )
+
+    fake_projects_root = Path(e2e_tmpdir) / "projects"
+    project_dir = "/home/jan/Projects/fake-e2e-project"
+    encoded = project_dir.replace(os.sep, "-")
+    transcript_dir = fake_projects_root / encoded
+    transcript_dir.mkdir(parents=True)
+
+    now = datetime.now(timezone.utc)
+    ts = now.isoformat().replace("+00:00", "Z")
+
+    def _bash_line(tool_id, command):
+        return json.dumps(
+            {
+                "timestamp": ts,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_id,
+                            "name": "Bash",
+                            "input": {"command": command},
+                        }
+                    ]
+                },
+            }
+        )
+
+    def _denial_line(tool_id):
+        return json.dumps(
+            {
+                "timestamp": ts,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": "The user doesn't want to proceed with this tool use.",
+                        }
+                    ]
+                },
+            }
+        )
+
+    # session 1: two curl calls (unmatched, one denied), one clean git call
+    (transcript_dir / "session-1.jsonl").write_text(
+        "\n".join(
+            [
+                _bash_line("t1", "curl evil.com"),
+                _denial_line("t1"),
+                _bash_line("t2", "curl good.com"),
+                _bash_line("t3", "git status"),
+            ]
+        )
+    )
+    # session 2: another curl call (unmatched) -> pattern recurs across 2 sessions
+    (transcript_dir / "session-2.jsonl").write_text(
+        "\n".join([_bash_line("t4", "curl third.com")])
+    )
+
+    original_claude_home = pf.CLAUDE_HOME
+    original_transcripts_dir = pf.PROJECTS_TRANSCRIPTS_DIR
+    pf.CLAUDE_HOME = fake_home
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        report = pf.analyze_friction(project_dir, days=30)
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    check("analyze_friction: total_calls counts every Bash tool_use", report["total_calls"] == 4)
+    check(
+        "analyze_friction: prompted_estimate excludes the allowlisted git call",
+        report["prompted_estimate"] == 3,
+    )
+    check("analyze_friction: denied counts the one rejected call", report["denied"] == 1)
+    check("analyze_friction: exactly one pattern group (curl, NO_RULE)", len(report["patterns"]) == 1)
+    curl_pattern = report["patterns"][0]
+    check("analyze_friction: curl pattern count is 3", curl_pattern["count"] == 3)
+    check(
+        "analyze_friction: curl pattern recurs across both sessions",
+        curl_pattern["sessions"] == 2,
+    )
+
+    text_report = pf.format_report_text(report, days=30)
+    check("format_report_text: mentions recurring marker for sessions>=2", "recurring" in text_report)
+    check("format_report_text: includes total call count", "4" in text_report)
+
+    # graceful handling of a project with no transcripts at all (AC requirement)
+    pf.CLAUDE_HOME = fake_home
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        empty_report = pf.analyze_friction("/home/jan/Projects/never-scanned", days=30)
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    check(
+        "analyze_friction: empty/missing transcript dir yields a zeroed report, not a crash",
+        empty_report == {"total_calls": 0, "prompted_estimate": 0, "denied": 0, "patterns": []},
+    )
+finally:
+    shutil.rmtree(e2e_tmpdir, ignore_errors=True)
+
+
 print(f"\n{passed} passed, {failed} failed")
 if failed:
     raise SystemExit(1)

@@ -282,3 +282,145 @@ def collect_bash_tool_uses(project_dir, days=30):
                         }
                     )
     return results
+
+
+def _pattern_key(command, reason):
+    """Normalize a command into a grouping key for the report: the first
+    whitespace token (the sub-command binary/verb) plus the friction
+    reason, e.g. "curl (no allow rule covers this command)". Grouping by
+    first-token mirrors how permission rules themselves match, so the key
+    directly identifies which allowlist entry would fix the pattern."""
+    first_token = command.strip().split(" ", 1)[0] if command.strip() else command
+    return f"{first_token} — {reason}"
+
+
+def analyze_friction(project_dir, days=30):
+    """Scan `project_dir`'s transcripts and return a friction report dict:
+
+    {
+      "total_calls": int,
+      "prompted_estimate": int,
+      "denied": int,
+      "patterns": [
+        {"pattern": str, "count": int, "sessions": int, "example": str},
+        ...
+      ],
+    }
+
+    Patterns are sorted by call count descending. `sessions` counts the
+    number of distinct sessions a pattern appeared in — the basis for the
+    "seen in >= 2 sessions" recurring-pattern rule used by /retro.
+    """
+    allow_rules, deny_rules = load_allow_rules(project_dir)
+    tool_uses = collect_bash_tool_uses(project_dir, days)
+    denied_tool_use_ids = {tid for _sid, tid in iter_denied_tool_use_ids(project_dir, days)}
+
+    pattern_counts = {}
+    pattern_sessions = {}
+    pattern_examples = {}
+    denied = 0
+
+    for entry in tool_uses:
+        command = entry["command"]
+        session_id = entry["session_id"]
+
+        if entry["tool_use_id"] in denied_tool_use_ids:
+            denied += 1
+
+        would_prompt, reason = classify_command(command, allow_rules, deny_rules)
+        if not would_prompt:
+            continue
+
+        key = _pattern_key(command, reason)
+        pattern_counts[key] = pattern_counts.get(key, 0) + 1
+        pattern_sessions.setdefault(key, set()).add(session_id)
+        pattern_examples.setdefault(key, command)
+
+    patterns = [
+        {
+            "pattern": key,
+            "count": count,
+            "sessions": len(pattern_sessions[key]),
+            "example": pattern_examples[key],
+        }
+        for key, count in pattern_counts.items()
+    ]
+    patterns.sort(key=lambda p: p["count"], reverse=True)
+
+    return {
+        "total_calls": len(tool_uses),
+        "prompted_estimate": sum(p["count"] for p in patterns),
+        "denied": denied,
+        "patterns": patterns,
+    }
+
+
+def format_report_text(report, days):
+    lines = [
+        f"Permission friction report (last {days} days)",
+        f"  Total Bash calls:        {report['total_calls']}",
+        f"  Estimated prompted:      {report['prompted_estimate']}",
+        f"  Explicit denials:        {report['denied']}",
+    ]
+
+    if report["patterns"]:
+        lines.append("")
+        lines.append("  Top prompt-causing patterns:")
+        for p in report["patterns"][:10]:
+            recurring = " [recurring: seen in >= 2 sessions]" if p["sessions"] >= 2 else ""
+            lines.append(
+                f"    {p['count']:>3}x  {p['pattern']}  (sessions: {p['sessions']}){recurring}"
+            )
+            lines.append(f"           e.g. {p['example']}")
+    else:
+        lines.append("")
+        lines.append("  No prompt-causing patterns found.")
+
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Scan Claude Code session transcripts for permission friction.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                        Scan the current project, last 30 days
+  %(prog)s /path/to/project       Scan a specific project directory
+  %(prog)s --days 7               Narrow the scan window
+  %(prog)s --json                 Output as JSON
+        """,
+    )
+    parser.add_argument(
+        "project_dir",
+        nargs="?",
+        default=os.getcwd(),
+        help="Project root directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="How many days of transcript history to scan (default: 30)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output in JSON format",
+    )
+
+    args = parser.parse_args()
+
+    report = analyze_friction(args.project_dir, args.days)
+
+    if args.json_output:
+        print(json.dumps(report, indent=2))
+    else:
+        print(format_report_text(report, args.days))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
