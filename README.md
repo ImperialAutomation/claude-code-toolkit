@@ -166,6 +166,12 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 All scripts are already allowed in the global settings (`~/.claude/settings.json`) installed by the toolkit.
 
+### Diagnostics
+
+| Script | Usage | Description |
+|--------|-------|-------------|
+| `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Used by `/retro`'s Permission Friction phase |
+
 ## Repository Structure
 
 ```
@@ -205,7 +211,9 @@ claude-code-toolkit/
 │   ├── hook-auto-approve-bash.py  ← real implementation: shlex-tokenized compound-command approval
 │   ├── test-hook-auto-approve-bash.py ← standalone tests for the above
 │   ├── hook-block-destructive.sh  ← PreToolUse hook: block destructive commands
-│   └── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
+│   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
+│   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
+│   └── test-permission-friction.py ← standalone tests for the above
 ├── skills/                    ← skill definitions (procedures)
 │   ├── refine/
 │   ├── implement/
