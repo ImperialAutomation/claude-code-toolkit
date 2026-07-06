@@ -236,6 +236,7 @@ Before proceeding to PR creation:
    - If SENTRY_ISSUES were found in Phase 1, add a `## Sentry` section: `Resolves: PAM-BACKEND-G, PAM-BACKEND-H`
 3. Push + create PR in one command:
    `~/.claude/bin/git-push-pr-merge.sh --base <base-branch> --title "<concise description>" --body-file /tmp/pr-body.md --no-merge`
+   `--no-merge` means the CI gate is skipped — the PR is left open for human review regardless of check status
 4. Return PR URL for review
 
 ## Phase 5: Epic Tracking Update (automatic, if applicable)

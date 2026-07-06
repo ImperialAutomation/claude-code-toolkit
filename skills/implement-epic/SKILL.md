@@ -212,7 +212,12 @@ Read only the files relevant to your issue. Do NOT skip this step.
    - Commit: `~/.claude/bin/git-commit.sh "concise descriptive message"`
    - Write PR body to /tmp/pr-body.md using the Write tool, then push + PR + merge in one command:
      `~/.claude/bin/git-push-pr-merge.sh --base <feature_branch> --title "<title>" --body-file /tmp/pr-body.md`
-   - This script pushes, creates the PR, merges it, and returns to the feature branch automatically
+   - This script pushes, creates the PR, waits for required CI checks, merges it, and returns to the feature branch automatically
+   - **If the script exits non-zero with `STATUS: CI_GATE_BLOCKED`:** the PR was left open — checks failed or timed out.
+     - Read the `CI_GATE: FAIL — <check names>` or `CI_GATE: TIMEOUT — <check names>` line to identify the failing/stuck checks
+     - Investigate the failure (`gh pr checks <PR_NUMBER>`, CI logs), fix at root cause, commit, push to the same branch
+     - Re-run `~/.claude/bin/git-push-pr-merge.sh` with the same arguments to re-trigger the gate
+     - Up to 3 fix-and-retry attempts; if still blocked, leave the PR open and report the blocker instead of forcing a merge
 
 ## Auth Impact Check (only include if auth_impact is true)
 This issue changes user status/role/auth fields. BEFORE writing tests:
