@@ -14,10 +14,12 @@ hardcoded allowlist, so it stays correct as the user's permissions evolve.
 """
 
 import argparse
+import fnmatch
 import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _HOOK_PATH = Path(__file__).parent / "hook-auto-approve-bash.py"
@@ -27,8 +29,6 @@ _spec.loader.exec_module(_hook)
 
 CLAUDE_HOME = Path(os.path.expanduser("~/.claude"))
 PROJECTS_TRANSCRIPTS_DIR = CLAUDE_HOME / "projects"
-
-SETTINGS_FILENAMES = ("settings.json", "settings.local.json")
 
 REJECTION_MARKER = "The user doesn't want to proceed with this tool use"
 
@@ -103,8 +103,6 @@ def matches_bash_rule(command, rule):
 
     if pattern.endswith(":*"):
         pattern = pattern[:-2] + " *"
-
-    import fnmatch
 
     return fnmatch.fnmatchcase(command, pattern)
 
@@ -185,16 +183,12 @@ def _parse_timestamp(value):
     if not value:
         return None
     try:
-        from datetime import datetime
-
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
 
 
 def _cutoff(days):
-    from datetime import datetime, timedelta, timezone
-
     return datetime.now(timezone.utc) - timedelta(days=days)
 
 
