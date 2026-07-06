@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+Standalone tests for permission-friction.py.
+
+Run directly: python3 bin/test-permission-friction.py
+Or via venv: ~/.claude/bin/venv-run.sh python bin/test-permission-friction.py
+"""
+
+import importlib.util
+import json
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
+SCRIPT_PATH = Path(__file__).parent / "permission-friction.py"
+
+spec = importlib.util.spec_from_file_location("permission_friction", SCRIPT_PATH)
+pf = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pf)
+
+passed = 0
+failed = 0
+
+
+def check(name, condition):
+    global passed, failed
+    if condition:
+        print(f"PASS: {name}")
+        passed += 1
+    else:
+        print(f"FAIL: {name}")
+        failed += 1
+
+
+# --- matches_bash_rule ---
+
+check(
+    "bare Bash matches everything",
+    pf.matches_bash_rule("rm -rf /tmp/x", "Bash"),
+)
+
+check(
+    "Bash(*) matches everything",
+    pf.matches_bash_rule("rm -rf /tmp/x", "Bash(*)"),
+)
+
+check(
+    "Bash(cmd *) matches with args",
+    pf.matches_bash_rule("git status", "Bash(git *)"),
+)
+
+check(
+    "Bash(cmd *) enforces word boundary",
+    not pf.matches_bash_rule("gitk", "Bash(git *)"),
+)
+
+check(
+    "Bash(cmd:*) colon shorthand equals space-star",
+    pf.matches_bash_rule("git commit -m foo", "Bash(git commit:*)"),
+)
+
+check(
+    "Bash(cmd:*) colon shorthand does not match unrelated subcommand",
+    not pf.matches_bash_rule("git status", "Bash(git commit:*)"),
+)
+
+check(
+    "Bash(cmd*) no-space matches without word boundary",
+    pf.matches_bash_rule("lsof -i", "Bash(ls*)"),
+)
+
+check(
+    "exact-string rule matches only that exact command",
+    pf.matches_bash_rule("npm run test", "Bash(npm run test)"),
+)
+
+check(
+    "exact-string rule rejects a superset command",
+    not pf.matches_bash_rule("npm run test -- --watch", "Bash(npm run test)"),
+)
+
+check(
+    "non-Bash rule never matches",
+    not pf.matches_bash_rule("git status", "Write"),
+)
+
+check(
+    "wildcard mid-pattern",
+    pf.matches_bash_rule("git checkout main", "Bash(git * main)"),
+)
+
+check(
+    "command_matches_any_rule true when one rule matches",
+    pf.command_matches_any_rule("git status", ["Write", "Bash(git *)"]),
+)
+
+check(
+    "command_matches_any_rule false when no rule matches",
+    not pf.command_matches_any_rule("curl evil.com", ["Bash(git *)", "Write"]),
+)
+
+
+# --- load_allow_rules ---
+
+tmpdir = tempfile.mkdtemp(prefix="permission-friction-test-")
+try:
+    fake_home = Path(tmpdir) / "home"
+    fake_project = Path(tmpdir) / "project"
+    (fake_home).mkdir(parents=True)
+    (fake_project / ".claude").mkdir(parents=True)
+
+    (fake_home / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git *)"], "deny": ["Bash(rm -rf /)"]}})
+    )
+    (fake_project / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(npm *)"]}})
+    )
+    (fake_project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(docker *)"]}})
+    )
+
+    original_claude_home = pf.CLAUDE_HOME
+    pf.CLAUDE_HOME = fake_home
+    try:
+        allow, deny = pf.load_allow_rules(str(fake_project))
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+
+    check(
+        "load_allow_rules unions allow rules across all three scopes",
+        set(allow) == {"Bash(git *)", "Bash(npm *)", "Bash(docker *)"},
+    )
+    check(
+        "load_allow_rules carries deny rules through",
+        deny == ["Bash(rm -rf /)"],
+    )
+
+    # missing project settings files entirely
+    empty_project = Path(tmpdir) / "empty-project"
+    empty_project.mkdir()
+    pf.CLAUDE_HOME = fake_home
+    try:
+        allow2, deny2 = pf.load_allow_rules(str(empty_project))
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+
+    check(
+        "load_allow_rules falls back to just global scope when project settings missing",
+        allow2 == ["Bash(git *)"] and deny2 == ["Bash(rm -rf /)"],
+    )
+
+    # malformed JSON file must not crash the loader
+    malformed_project = Path(tmpdir) / "malformed-project"
+    (malformed_project / ".claude").mkdir(parents=True)
+    (malformed_project / ".claude" / "settings.json").write_text("{not valid json")
+    pf.CLAUDE_HOME = fake_home
+    try:
+        allow3, deny3 = pf.load_allow_rules(str(malformed_project))
+        check("load_allow_rules tolerates malformed settings.json", allow3 == ["Bash(git *)"])
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+print(f"\n{passed} passed, {failed} failed")
+if failed:
+    raise SystemExit(1)
