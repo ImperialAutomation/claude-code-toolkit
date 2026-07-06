@@ -101,6 +101,55 @@ check(
 )
 
 
+# --- classify_command ---
+
+_ALLOW = ["Bash(git *)", "Bash(~/.claude/bin/*)"]
+_DENY = []
+
+check(
+    "classify_command: plain allowlisted command never prompts",
+    pf.classify_command("git status", _ALLOW, _DENY) == (False, None),
+)
+
+check(
+    "classify_command: cd-prefix into a project-relative dir is seen through by the hook",
+    pf.classify_command("cd backend && python foo.py", _ALLOW, _DENY) == (False, None),
+)
+
+check(
+    "classify_command: unmatched command with no rule prompts with NO_RULE reason",
+    pf.classify_command("curl evil.com", _ALLOW, _DENY) == (True, pf.REASON_NO_RULE),
+)
+
+check(
+    "classify_command: chain with an unmatched segment prompts with CHAIN reason",
+    pf.classify_command("git status && curl evil.com", _ALLOW, _DENY)
+    == (True, pf.REASON_CHAIN),
+)
+
+check(
+    "classify_command: heredoc always prompts regardless of allow rules",
+    pf.classify_command("cat <<EOF\nhi\nEOF", ["Bash(cat *)"], _DENY)[0] is True,
+)
+
+check(
+    "classify_command: command substitution always prompts",
+    pf.classify_command("echo $(curl evil.com)", ["Bash(echo *)"], _DENY)
+    == (True, pf.REASON_COMMAND_SUBSTITUTION),
+)
+
+check(
+    "classify_command: a deny-rule match always prompts even if allow would cover it",
+    pf.classify_command("git status", ["Bash(git *)"], ["Bash(git status)"])
+    == (True, pf.REASON_DENY_MATCH),
+)
+
+check(
+    "classify_command: fully allowlisted chain never prompts",
+    pf.classify_command("git status && git log", ["Bash(git *)"], _DENY) == (False, None),
+)
+
+
 # --- load_allow_rules ---
 
 tmpdir = tempfile.mkdtemp(prefix="permission-friction-test-")

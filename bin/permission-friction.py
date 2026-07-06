@@ -111,3 +111,59 @@ def matches_bash_rule(command, rule):
 
 def command_matches_any_rule(command, rules):
     return any(matches_bash_rule(command, rule) for rule in rules)
+
+
+# Friction reasons, most specific first — used both to explain a verdict
+# and to bucket "top prompt-causing patterns" in the report.
+REASON_DENY_MATCH = "matches a deny rule"
+REASON_HEREDOC = "heredoc (<<, <<<) defeats matching"
+REASON_PROCESS_SUBSTITUTION = "process substitution (<(...), >(...)) defeats matching"
+REASON_COMMAND_SUBSTITUTION = "command substitution ($(...), `...`) defeats matching"
+REASON_CD_PREFIX = "cd-prefix defeats first-token matching"
+REASON_CHAIN = "compound command (;/&&/||/|) has an unmatched segment"
+REASON_NO_RULE = "no allow rule covers this command"
+
+
+def classify_command(command, allow_rules, deny_rules):
+    """Classify whether `command` would trigger a permission prompt.
+
+    Returns (would_prompt: bool, reason: str | None). reason is None only
+    when the command would NOT prompt. Mirrors hook-auto-approve-bash.py's
+    own safety logic first — a command that hook would silently approve
+    never reaches a prompt in practice, regardless of raw rule coverage.
+    """
+    if command_matches_any_rule(command, deny_rules):
+        return True, REASON_DENY_MATCH
+
+    if _hook.is_command_safe(command):
+        return False, None
+
+    try:
+        segments = _hook.split_segments(command)
+    except ValueError:
+        return True, REASON_NO_RULE
+
+    if len(segments) > 1:
+        for segment_tokens in segments:
+            segment_command = " ".join(segment_tokens)
+            if not command_matches_any_rule(segment_command, allow_rules):
+                return True, REASON_CHAIN
+
+    segment_tokens = segments[0] if segments else []
+
+    if _hook.has_heredoc(segment_tokens):
+        return True, REASON_HEREDOC
+    if _hook.has_process_substitution(segment_tokens):
+        return True, REASON_PROCESS_SUBSTITUTION
+    if _hook.has_command_substitution(segment_tokens):
+        return True, REASON_COMMAND_SUBSTITUTION
+
+    stripped = _hook.strip_env_prefix(_hook.strip_cd_prefix(segment_tokens))
+    if stripped != _hook.strip_env_prefix(segment_tokens) and stripped and stripped != segment_tokens:
+        if not command_matches_any_rule(command, allow_rules):
+            return True, REASON_CD_PREFIX
+
+    if command_matches_any_rule(command, allow_rules):
+        return False, None
+
+    return True, REASON_NO_RULE
