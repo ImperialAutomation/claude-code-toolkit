@@ -31,6 +31,15 @@ This creates five symlinks and copies one file:
 
 The settings file is copied (not symlinked) because Claude Code writes to it when you approve permissions during a session. Restart Claude Code after installation.
 
+This repo is public, so it also ships a [pre-commit](https://pre-commit.com/) hook that scans staged changes for secrets with [gitleaks](https://github.com/gitleaks/gitleaks) before every commit. Install it once per clone:
+
+```bash
+pip install --user pre-commit
+pre-commit install
+```
+
+Without running `pre-commit install`, the hook is present in the repo but never fires — it must be installed per clone.
+
 Skills are auto-discovered from `~/.claude/skills/*/SKILL.md`. Agents are auto-discovered from `~/.claude/agents/*.md`.
 
 ### Project Template
@@ -136,6 +145,8 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `secret-scan.sh` | `secret-scan.sh [project-dir]` | Scan codebase for hardcoded secrets, API keys, tokens |
 | `security-headers-check.sh` | `security-headers-check.sh <url>` | Check HTTP security headers (CSP, HSTS, X-Frame-Options, etc.) |
 | `owasp-zap-scan.sh` | `owasp-zap-scan.sh <url>` | OWASP ZAP baseline scan via Docker (requires running target) |
+
+`secret-scan.sh` and the `gitleaks` pre-commit hook (see Installation) are intentionally separate tools, not a pattern list to keep in sync: `secret-scan.sh` is an on-demand audit invoked manually or via `/security-audit`, while `gitleaks` is a commit-time gate that blocks `git commit` outright when it finds a match.
 
 ### Runtime verification
 
