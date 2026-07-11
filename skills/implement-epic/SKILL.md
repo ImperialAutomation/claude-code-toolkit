@@ -25,14 +25,20 @@ This skill runs autonomously — no confirmation stops between sub-issues.
 ```
 Main session (orchestrator):
 ├── Phase 0: Setup — parse epic, determine waves, create feature branch + tracking PR
-├── Wave 1:
+├── Wave 1 (⚠️ ONE issue in flight at a time — see "Same-wave issues share one working tree" below):
 │   ├── Classify issue #A → "implement" or "audit"
-│   ├── Spawn background agent (run_in_background: true)
+│   ├── Spawn background agent (run_in_background: true) — do NOT spawn issue #B
+│   │   until #A has fully finished (merged/failed/skipped), even though both
+│   │   are in the same wave and `run_in_background: true` makes it *possible*
+│   │   to fire both at once
 │   ├── Poll progress every 30-45s via /tmp/epic-progress-<N>.txt
 │   │   └── Report phase + test results to user in real-time
 │   ├── On completion: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
+│   │   — if neither a result NOR a progress-file update arrives for an
+│   │   extended period, treat this as a possible silent death: see
+│   │   "Sub-agent Liveness & Recovery" below BEFORE re-spawning
 │   ├── Handle results: update tracking PR
-│   └── (repeat for all issues in wave)
+│   └── (repeat for all issues in wave, ONE AT A TIME)
 ├── Wave 2-N: same pattern
 └── Phase Final: Verification (ALL via sub-agents)
     ├── Agent: Validation & Test Suite
@@ -129,6 +135,35 @@ Then proceed immediately — no confirmation stop.
 
 Process each wave sequentially. Within each wave, process sub-issues sequentially.
 
+### Same-wave issues share one working tree — never spawn them in parallel
+
+All sub-agents for one epic operate on the **same local clone** (the feature
+branch's working directory), even when their target sub-issue is independent
+and has no logical dependency on its same-wave sibling. `run_in_background:
+true` only means the orchestrator doesn't block waiting for the agent — it
+does NOT give that agent an isolated filesystem. Two sub-agents racing
+`git checkout -b`, editing the same generated files (`app/models/__init__.py`,
+migration sequence numbers), or committing while the tree is mid-checkout by
+a sibling WILL corrupt each other's branches. This has happened repeatedly in
+practice: a commit landing on the wrong branch, a stray import/column leaking
+from one issue's uncommitted edit into another's, an alembic revision number
+collision.
+
+**Rule: spawn one sub-agent per wave, wait for it to fully resolve (merged,
+failed-and-bug-filed, or explicitly skipped) before spawning the next — even
+within the same wave, even when the two issues are logically independent.**
+This applies regardless of how many issues the wave logically permits in
+parallel; the wave grouping is about *dependency order*, not about spawn
+concurrency.
+
+If wall-clock time matters enough to accept the added setup cost, an
+alternative is **one git worktree per sub-agent** (`git worktree add
+<path> <sub-branch>`) instead of sharing the main clone — each agent then
+truly has its own filesystem and parallel spawns are safe. This is more
+complex to wire (worktree creation/cleanup, base-branch sync into each
+worktree) and is not the default; only reach for it if sequential wall-clock
+time is a demonstrated problem for a specific epic.
+
 ### Per sub-issue:
 
 #### Step 1: Prepare the feature branch
@@ -196,6 +231,15 @@ Read only the files relevant to your issue. Do NOT skip this step.
 - Feature branch: <feature_branch>
 - Create sub-branch: issue-<N>-<description>
 - Base your work on the feature branch (already checked out)
+- If this issue's body references another sub-issue's output (a column, a
+  function signature, a shared module) as already existing, verify that
+  assumption against the ACTUAL current state of the feature branch
+  (`git log <feature_branch> --oneline`, `Read`/`Grep` the real file) before
+  writing code or tests against it — a same-wave sibling's PR may not have
+  merged yet even if its issue number is mentioned as a dependency. If the
+  referenced thing genuinely isn't there yet, treat it as blocked and report
+  that in your FAILED response rather than writing tests that assert a
+  not-yet-true state.
 
 ## Instructions
 
@@ -265,9 +309,13 @@ Milestones to report (update the file BEFORE starting each phase):
 
 This is critical for the orchestrator to track and report your progress to the user.
 
+## Execute — do not describe or delegate
+
+You are the agent that does this work. There is no other agent for you to hand off to, wait for, or monitor. If any part of this prompt mentions other issues running in the background, other sub-agents, or the orchestrator's monitoring loop, that is context about the SURROUNDING system, not an instruction for you to adopt the same posture. Read the codebase, write the code, run the tests, commit, push, open the PR — actually perform every step below. Do not respond with a description of what you would do, a status update about "the agent" (there is no other agent — you ARE the agent), or a message implying you are waiting for something else to finish. A response that does not contain actual tool calls performing this issue's work is a failure to follow this prompt.
+
 ## Response Format
 
-When done, respond with EXACTLY one of these formats:
+Respond with EXACTLY one of these formats ONLY once you have actually completed (or genuinely exhausted attempts at) the implementation work above — not as a status update, not as an intermediate report, and never in place of doing the work:
 
 SUCCESS:
 PR_NUMBER: <number>
@@ -379,9 +427,13 @@ Milestones to report (update the file BEFORE starting each phase):
 
 This is critical for the orchestrator to track and report your progress to the user.
 
+## Execute — do not describe or delegate
+
+You are the agent that performs this audit. There is no other agent for you to hand off to, wait for, or monitor. If any part of this prompt mentions other issues running in the background or the orchestrator's monitoring loop, that is context about the SURROUNDING system, not an instruction for you to adopt the same posture. Actually scan the codebase, run the audit scripts, write the report, and post the comment — perform every step below. A response that does not contain actual tool calls performing this audit is a failure to follow this prompt.
+
 ## Response Format
 
-When done, respond with EXACTLY one of these formats:
+Respond with EXACTLY one of these formats ONLY once you have actually completed (or genuinely exhausted attempts at) the audit above — not as a status update and never in place of doing the work:
 
 AUDIT_COMPLETE:
 FINDINGS: <number of findings>
@@ -414,6 +466,31 @@ After spawning the background sub-agent:
    d. Call `TaskOutput` with `block: false, timeout: 1000` to check if the agent is done
    e. If not completed → continue polling (next iteration ~30-45s later)
    f. If completed → extract the result text and proceed to Step 4
+   g. **If the progress file hasn't advanced across 2-3 consecutive polls AND `TaskOutput` returns "No task found with ID"** → the sub-agent has died silently (a process-level failure, not a task-level FAILED response). Do not treat this the same as an active FAILED result. Follow "Sub-agent Liveness & Recovery" below before re-spawning anything.
+
+### Sub-agent Liveness & Recovery
+
+A sub-agent can die mid-task without ever sending a completion notification or writing a final progress line — the task ID simply stops resolving via `TaskOutput`. This is distinct from a `FAILED` response (which is an active, intentional report) and distinct from "still working, hasn't hit a milestone yet" (a fresh agent may take several minutes before its first progress-file write). Do not assume either of the other two cases — verify.
+
+**Also watch for a second, different failure signature:** a sub-agent that terminates after only 1-2 tool calls with a vague, self-referential, non-implementing response (e.g. "the agent is running in the background, I'll wait for it to complete") instead of actually doing the work or returning SUCCESS/FAILED. This is not a silent death — it sent a normal completion notification — but it is equally a non-result: no branch, no commits, no PR. Detect it the same way as a silent death (check `git log`/`git status` on the expected branch) since the response text alone is not trustworthy signal that real work happened.
+
+**When either signature is suspected, before concluding anything is lost:**
+
+1. Call `TaskOutput` with `block: false` on the task ID. If it errors with "No task found", the process is confirmed gone (not just slow).
+2. Check the expected sub-branch for real work, in this order:
+   - `git log <expected-sub-branch> --oneline -5` — did it commit? Compare against the feature branch tip to see if there are new commits.
+   - `git branch -a | grep <N>` — does a remote-tracking branch exist (was anything pushed)?
+   - `~/.claude/bin/gh-save.sh` + `gh pr list --search "<N> in:title"` — was a PR already opened?
+   - `git status --short` on the **currently checked-out branch** — same-wave sub-agents share one working tree (see above), so a dead agent's uncommitted work may be sitting on whatever branch happens to be checked out right now, not necessarily its own sub-branch.
+3. **Never discard uncommitted work found this way.** If real, relevant changes are sitting uncommitted:
+   - `git stash push -u -m "orphaned #<N> work from dead sub-agent: <short description>"` — never `git checkout --` or `git clean` a dead agent's edits.
+   - Note the stash reference so it can be referenced when re-spawning.
+4. If a sub-branch has zero commits (identical tip to the feature branch) and nothing was stashed for it, it is safe to delete (`git branch -d <sub-branch>`) before re-spawning — nothing is lost.
+5. **Re-spawn** with an explicit note in the prompt:
+   - State plainly that a previous attempt died and this is a fresh attempt.
+   - If a stash exists, point to it by name/message and say it MAY be inspected for reference (`git stash show -p stash@{N}`) but must not be blindly applied — treat it as unverified, not a starting point to resume from.
+   - If the second failure signature (confused non-response) was the trigger, add an explicit instruction to actually perform the implementation and not just describe or delegate it (see the hardened Response Format instruction below).
+6. After a sub-agent DOES complete successfully following a recovery, verify no stale duplicate files are left on the shared working tree from the dead attempt (`git status --short`) — diff any untracked leftovers against the new committed version; if byte-identical, they are safe to `git clean` away; if they differ, investigate before removing.
 
 3. **Phase display mapping** (use these human-readable labels):
 

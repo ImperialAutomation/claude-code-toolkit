@@ -29,6 +29,7 @@ ALLOWLIST = {
     "cat", "grep", "find", "head", "tail", "ls",
     "wc", "sort", "echo", "printf", "mkdir", "cp",
     "mv", "chmod", "tee", "python", "ruff", "uv",
+    "mypy", "pytest", "alembic",
     "source", "xdg-open", "sleep", "test", "true",
 }
 
@@ -36,6 +37,27 @@ ALLOWLIST = {
 # removed from _tokenize's punctuation_chars (see that docstring) — kept
 # here so a background operator glued to punctuation_chars again in the
 # future still splits correctly without needing to touch this set too.
+
+# Bare venv-tool names a project's own .venv/bin/<name> may invoke — matched
+# against the LAST path component so both "backend/.venv/bin/mypy" (relative,
+# post-cd-strip) and an absolute "/home/.../backend/.venv/bin/mypy" resolve
+# the same way. Deliberately the same set already trusted as bare ALLOWLIST
+# tokens (python/ruff/uv/mypy/pytest/alembic) — a .venv/bin/ prefix does not
+# change what the tool itself can do, only how it's invoked (CLAUDE.md's
+# documented "absolute venv paths don't match Bash(*/python *)" gap).
+_VENV_BIN_TOOLS = {"python", "ruff", "uv", "mypy", "pytest", "alembic"}
+
+
+def _is_venv_bin_token(token):
+    """True if `token` ends in .venv/bin/<trusted-tool>, any path prefix."""
+    normalized = token.replace(os.sep, "/")
+    parts = normalized.split("/")
+    if len(parts) < 3:
+        return False
+    tool, bin_dir, venv_dir = parts[-1], parts[-2], parts[-3]
+    return venv_dir == ".venv" and bin_dir == "bin" and tool in _VENV_BIN_TOOLS
+
+
 SEGMENT_SEPARATORS = {"&&", "||", ";", "|", "&", "\n"}
 
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -290,7 +312,11 @@ def is_segment_safe(segment_tokens):
     if is_git_commit:
         return not _has_denied_git_config_flag(stripped)
 
-    if first not in ALLOWLIST and not _is_allowed_bin_token(first):
+    if (
+        first not in ALLOWLIST
+        and not _is_allowed_bin_token(first)
+        and not _is_venv_bin_token(first)
+    ):
         return False
 
     if first == "git":

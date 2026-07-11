@@ -223,6 +223,47 @@ check(
     not hook.is_command_safe("~/.claude/bin/../../../etc/passwd"),
 )
 
+# --- _is_venv_bin_token / .venv/bin/<tool> recognition ---
+
+check(
+    "_is_venv_bin_token: relative backend/.venv/bin/mypy is recognized",
+    hook._is_venv_bin_token("backend/.venv/bin/mypy"),
+)
+
+check(
+    "_is_venv_bin_token: absolute .venv/bin/pytest is recognized",
+    hook._is_venv_bin_token("/home/jan/Projects/acme/backend/.venv/bin/pytest"),
+)
+
+check(
+    "_is_venv_bin_token: untrusted tool under .venv/bin/ is NOT recognized",
+    not hook._is_venv_bin_token("backend/.venv/bin/some-random-tool"),
+)
+
+check(
+    "_is_venv_bin_token: bin/ dir outside a .venv/ parent is NOT recognized",
+    not hook._is_venv_bin_token("backend/bin/mypy"),
+)
+
+check(
+    "is_command_safe: cd + absolute .venv/bin/mypy is approved",
+    hook.is_command_safe(
+        "cd ~/Projects/acme-webshop/backend && "
+        + os.path.expanduser("~/Projects/acme-webshop/backend/.venv/bin/mypy")
+        + " ."
+    ),
+)
+
+check(
+    "is_command_safe: cd + relative .venv/bin/ruff check is approved",
+    hook.is_command_safe("cd ~/Projects/acme-webshop/backend && .venv/bin/ruff check ."),
+)
+
+check(
+    "is_command_safe: cd + .venv/bin/pytest is approved",
+    hook.is_command_safe("cd ~/Projects/acme-webshop/backend && .venv/bin/pytest -v"),
+)
+
 check(
     "is_command_safe: unparseable input (unterminated quote) is unsafe",
     not hook.is_command_safe("echo 'unterminated"),
