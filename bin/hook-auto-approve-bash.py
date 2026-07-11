@@ -29,8 +29,34 @@ ALLOWLIST = {
     "cat", "grep", "find", "head", "tail", "ls",
     "wc", "sort", "echo", "printf", "mkdir", "cp",
     "mv", "chmod", "tee", "python", "ruff", "uv",
+    "mypy", "pytest", "alembic",
     "source", "xdg-open", "sleep", "test", "true",
 }
+
+# Bare "&" can never actually reach this set as its own token since & was
+# removed from _tokenize's punctuation_chars (see that docstring) — kept
+# here so a background operator glued to punctuation_chars again in the
+# future still splits correctly without needing to touch this set too.
+
+# Bare venv-tool names a project's own .venv/bin/<name> may invoke — matched
+# against the LAST path component so both "backend/.venv/bin/mypy" (relative,
+# post-cd-strip) and an absolute "/home/.../backend/.venv/bin/mypy" resolve
+# the same way. Deliberately the same set already trusted as bare ALLOWLIST
+# tokens (python/ruff/uv/mypy/pytest/alembic) — a .venv/bin/ prefix does not
+# change what the tool itself can do, only how it's invoked (CLAUDE.md's
+# documented "absolute venv paths don't match Bash(*/python *)" gap).
+_VENV_BIN_TOOLS = {"python", "ruff", "uv", "mypy", "pytest", "alembic"}
+
+
+def _is_venv_bin_token(token):
+    """True if `token` ends in .venv/bin/<trusted-tool>, any path prefix."""
+    normalized = token.replace(os.sep, "/")
+    parts = normalized.split("/")
+    if len(parts) < 3:
+        return False
+    tool, bin_dir, venv_dir = parts[-1], parts[-2], parts[-3]
+    return venv_dir == ".venv" and bin_dir == "bin" and tool in _VENV_BIN_TOOLS
+
 
 SEGMENT_SEPARATORS = {"&&", "||", ";", "|", "&", "\n"}
 
@@ -38,7 +64,7 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _tokenize(command):
-    """Tokenize `command` with &&, ||, ;, |, &, and newline as standalone
+    """Tokenize `command` with &&, ||, ;, |, and newline as standalone
     punctuation tokens.
 
     Raises ValueError on unparseable input (unbalanced quotes, etc.) — the
@@ -52,8 +78,23 @@ def _tokenize(command):
     approved. A newline still stays glued inside a quoted token (shlex's
     quote handling takes priority over punctuation splitting), so
     `echo "line1\nline2"` is unaffected — only a *bare* newline splits.
+
+    A bare `&` is deliberately EXCLUDED from punctuation_chars (unlike &&,
+    which stays split via the two-char punctuation run). Fd-redirects like
+    `2>&1` / `1>&2` are extremely common in agent-generated commands and
+    contain a glued `&` with no surrounding whitespace; shlex only splits
+    punctuation_chars at token boundaries, so keeping `&` out of that set
+    leaves `2>&1` as a single token while `&&` (whitespace-delimited on
+    both sides in practice) still tokenizes as its own two-char punctuation
+    run. The cost: a real background operator (`cmd &`) no longer acts as
+    a segment separator — it rides along as a trailing word in the same
+    segment instead of splitting into a new one. That is safe here: only
+    the segment's first token is ever checked against the allowlist, so an
+    inert trailing `&` token changes no safety decision, and any command
+    genuinely appended after it would need its own `&&`/`;`/`|` to run as
+    a separate statement, which still splits correctly.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="&|;\n")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|;\n")
     lexer.whitespace = " \t"
     lexer.whitespace_split = True
     return list(lexer)
@@ -124,6 +165,24 @@ def strip_env_prefix(segment_tokens):
     return segment_tokens[i:]
 
 
+def _strip_trailing_redirect_to_devnull(tokens):
+    """Drop a single trailing `2>/dev/null`-style redirect glued to `cd`.
+
+    `cd X 2>/dev/null; real-command ...` puts the redirect on the cd
+    itself, not on a following command — but shlex tokenizes it as a
+    plain word following the path, so after dropping `cd <dir>` the
+    segment would otherwise end with a lone `N>/dev/null` token that
+    looks like (and is treated as) the segment's first/only token. Only
+    strips a redirect to /dev/null specifically (the overwhelmingly
+    common "silence errors" idiom on a cd) — a redirect to a real file
+    is left in place, which keeps the segment unrecognized/unsafe rather
+    than silently approving an unreviewed file write.
+    """
+    if tokens and re.fullmatch(r"\d*>/dev/null", tokens[-1]):
+        return tokens[:-1]
+    return tokens
+
+
 def strip_cd_prefix(segment_tokens):
     """Drop a leading `cd <dir>` when <dir> resolves inside ~/Projects.
 
@@ -138,7 +197,7 @@ def strip_cd_prefix(segment_tokens):
 
     target = os.path.abspath(os.path.expanduser(segment_tokens[1]))
     if target == PROJECTS_ROOT or target.startswith(PROJECTS_ROOT + os.sep):
-        return segment_tokens[2:]
+        return _strip_trailing_redirect_to_devnull(segment_tokens[2:])
     return segment_tokens
 
 
@@ -253,7 +312,11 @@ def is_segment_safe(segment_tokens):
     if is_git_commit:
         return not _has_denied_git_config_flag(stripped)
 
-    if first not in ALLOWLIST and not _is_allowed_bin_token(first):
+    if (
+        first not in ALLOWLIST
+        and not _is_allowed_bin_token(first)
+        and not _is_venv_bin_token(first)
+    ):
         return False
 
     if first == "git":

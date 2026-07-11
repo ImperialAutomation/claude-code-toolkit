@@ -223,6 +223,47 @@ check(
     not hook.is_command_safe("~/.claude/bin/../../../etc/passwd"),
 )
 
+# --- _is_venv_bin_token / .venv/bin/<tool> recognition ---
+
+check(
+    "_is_venv_bin_token: relative backend/.venv/bin/mypy is recognized",
+    hook._is_venv_bin_token("backend/.venv/bin/mypy"),
+)
+
+check(
+    "_is_venv_bin_token: absolute .venv/bin/pytest is recognized",
+    hook._is_venv_bin_token("/home/jan/Projects/acme/backend/.venv/bin/pytest"),
+)
+
+check(
+    "_is_venv_bin_token: untrusted tool under .venv/bin/ is NOT recognized",
+    not hook._is_venv_bin_token("backend/.venv/bin/some-random-tool"),
+)
+
+check(
+    "_is_venv_bin_token: bin/ dir outside a .venv/ parent is NOT recognized",
+    not hook._is_venv_bin_token("backend/bin/mypy"),
+)
+
+check(
+    "is_command_safe: cd + absolute .venv/bin/mypy is approved",
+    hook.is_command_safe(
+        "cd ~/Projects/acme-webshop/backend && "
+        + os.path.expanduser("~/Projects/acme-webshop/backend/.venv/bin/mypy")
+        + " ."
+    ),
+)
+
+check(
+    "is_command_safe: cd + relative .venv/bin/ruff check is approved",
+    hook.is_command_safe("cd ~/Projects/acme-webshop/backend && .venv/bin/ruff check ."),
+)
+
+check(
+    "is_command_safe: cd + .venv/bin/pytest is approved",
+    hook.is_command_safe("cd ~/Projects/acme-webshop/backend && .venv/bin/pytest -v"),
+)
+
 check(
     "is_command_safe: unparseable input (unterminated quote) is unsafe",
     not hook.is_command_safe("echo 'unterminated"),
@@ -378,6 +419,69 @@ check(
 check(
     "adversarial: process substitution <(...) is NOT approved",
     not hook.is_command_safe("cat <(echo hi)"),
+)
+
+# --- fd-redirect regressions (2>&1 defeating tokenization) ---
+
+check(
+    "fd-redirect: 2>&1 stays glued as one token, not split on bare &",
+    hook.split_segments("ruff check . 2>&1") == [["ruff", "check", ".", "2>&1"]],
+)
+
+check(
+    "fd-redirect: is_command_safe approves a 2>&1 | tail chain",
+    hook.is_command_safe("git log --oneline -1 origin/x 2>&1; echo done"),
+)
+
+check(
+    "fd-redirect: is_command_safe approves docker exec with 2>&1",
+    hook.is_command_safe('docker exec my_db psql -U u -d d -c "select 1;" 2>&1'),
+)
+
+check(
+    "fd-redirect: is_command_safe approves ~/.claude/bin/ script piped with 2>&1 | head",
+    hook.is_command_safe("~/.claude/bin/venv-run.sh ruff --version 2>&1 | head -3"),
+)
+
+check(
+    "fd-redirect: bare & background operator still splits as its own segment (regression guard)",
+    hook.split_segments("true & touch /tmp/x") == [["true"], ["touch", "/tmp/x"]],
+)
+
+check(
+    "fd-redirect: 1>&2 also stays glued",
+    hook.split_segments("echo hi 1>&2") == [["echo", "hi", "1>&2"]],
+)
+
+# --- cd + trailing /dev/null redirect regression (cd X 2>/dev/null; ...) ---
+
+check(
+    "cd+redirect: cd into Projects with trailing 2>/dev/null is fully stripped",
+    hook.strip_cd_prefix(
+        ["cd", os.path.expanduser("~/Projects/acme-webshop"), "2>/dev/null"]
+    )
+    == [],
+)
+
+check(
+    "cd+redirect: is_command_safe approves cd+2>/dev/null followed by allowed commands",
+    hook.is_command_safe(
+        "cd "
+        + os.path.expanduser("~/Projects/acme-webshop")
+        + " 2>/dev/null; git status; echo done"
+    ),
+)
+
+check(
+    "cd+redirect: redirect to a real file (not /dev/null) is NOT silently stripped",
+    not hook.is_command_safe(
+        "cd " + os.path.expanduser("~/Projects/acme-webshop") + " 2>/tmp/real.log; echo hi"
+    ),
+)
+
+check(
+    "cd+redirect: cd outside Projects with trailing 2>/dev/null still unsafe",
+    not hook.is_command_safe("cd /etc 2>/dev/null; echo hi"),
 )
 
 print(f"\nResults: {passed} passed, {failed} failed")

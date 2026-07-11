@@ -188,9 +188,13 @@ If findings with severity > INFO:
 4. Call each new/modified endpoint, verify 2xx + correct JSON structure
 5. On 500: check `docker logs pam_api --tail 30`, fix root cause, re-run
 
+## Execute — do not describe or delegate
+
+You are the agent that performs this verification. There is no other agent to hand off to or wait for. Actually run each verification step below — do not respond with a description of what you would do or a status update implying work is happening elsewhere.
+
 ## Response Format
 
-When done, respond with EXACTLY this format:
+Respond with EXACTLY this format ONLY once you have actually performed the verification steps above — not as a status update:
 
 VERIFICATION_COMPLETE:
 TESTS: PASS/FAIL — <passed>/<total> tests (e.g., 12/12)
