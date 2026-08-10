@@ -5,3 +5,6 @@ claude-code-instructie-*.md
 implement-retro-promote-sync.md
 __pycache__/
 *.pyc
+
+# Codex-managed skills, not part of this toolkit
+skills/.system/
