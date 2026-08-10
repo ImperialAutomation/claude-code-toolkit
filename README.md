@@ -307,7 +307,7 @@ Symlinked to `~/.claude/CLAUDE.md`, applies to all projects. Contains only what'
 - **Available Utilities** — references to wrapper scripts and audit skills
 - **Claude Code Workarounds** — native tool preferences, file writing rules
 
-Contextual rules live in `rules/` and load based on their frontmatter: some always (error handling, API design, data integrity, structured logging, code review), others only when relevant files are edited (testing, documentation).
+Contextual rules live in `rules/` and load based on their frontmatter: some always (error handling, API design, data integrity, structured logging, code review), others only when relevant files are edited (testing, documentation, stripe-testing).
 
 ### Rules (`rules/`)
 
@@ -322,6 +322,7 @@ Rules provide contextual policies that load based on frontmatter configuration. 
 | `code-review.md` | Always | No performative agreement, verify before implementing, push back when feedback is wrong |
 | `testing.md` | Test files | Real behavior over mocks, 5 test scenarios per feature, realistic fixtures |
 | `documentation.md` | .md files | Current purpose over history, usage guidance, no changelogs |
+| `stripe-testing.md` | Payment/billing/webhook files | Never real cards, no raw PANs in code, assert on decline codes, prove webhook idempotency |
 
 ### Project Template (`claude-md/project-template.md`)
 
@@ -364,6 +365,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 | `/test` | `/test [--all\|--affected]` | Smart test runner that scopes tests based on changed files |
 | `/pre-merge` | `/pre-merge` | Combined quality gate — orchestrates review, tests, verification, AC checks |
 | `/sync-toolkit` | `/sync-toolkit <pull\|status\|drift>` | Sync toolkit across devices from configured git sources |
+| `/stripe-testing` | `/stripe-testing` | Stripe test values — cards, declines, 3DS, disputes, refunds, SEPA/ACH, webhooks |
 
 ---
 
