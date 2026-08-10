@@ -248,12 +248,24 @@ Read only the files relevant to your issue. Do NOT skip this step.
    **For E2E/Playwright tests:** also read the frontend components you are writing selectors for. Never guess heading text, aria-labels, CSS classes, or DOM structure — look them up in the React/Vue/Svelte source. Grep for the component name, read it, and extract the exact strings and attributes you need for locators.
 3. Implement the changes following the project policies above
 4. Write tests following the Test Quality Policy
-5. Run ONLY the tests relevant to your changes — NEVER the full test suite:
+5. **Commit and push incrementally — do not save it all for the end.**
+   Commit as soon as a coherent block works (endpoint + its tests green → commit;
+   component + its tests green → commit). **Push right after your FIRST commit**
+   so the work exists remotely even if you die mid-task, and keep pushing after
+   each later commit:
+   `~/.claude/bin/git-commit.sh "concise descriptive message"` then
+   `git push -u origin issue-<N>-<description>`
+   Multiple commits in the PR are fine and expected — a tidy single commit is not
+   worth the risk. A sub-agent can die silently (no error, no FAILED response),
+   and everything not yet pushed is lost; agents that had pushed lost nothing,
+   agents that had not lost hours of work. This is the single highest-value habit
+   in this prompt.
+6. Run ONLY the tests relevant to your changes — NEVER the full test suite:
    `~/.claude/bin/project-test.sh tests/unit/test_<relevant>/ -v`
    The full suite and project validation run after all sub-issues are done — not here.
-6. If tests fail: fix and retry (up to 3 attempts total)
-7. If tests pass:
-   - Commit: `~/.claude/bin/git-commit.sh "concise descriptive message"`
+7. If tests fail: fix and retry (up to 3 attempts total)
+8. If tests pass:
+   - Commit any remaining uncommitted work: `~/.claude/bin/git-commit.sh "concise descriptive message"`
    - Write PR body to /tmp/pr-body.md using the Write tool, then push + PR + merge in one command:
      `~/.claude/bin/git-push-pr-merge.sh --base <feature_branch> --title "<title>" --body-file /tmp/pr-body.md`
    - This script pushes, creates the PR, waits for required CI checks, merges it, and returns to the feature branch automatically
@@ -467,6 +479,11 @@ After spawning the background sub-agent:
    e. If not completed → continue polling (next iteration ~30-45s later)
    f. If completed → extract the result text and proceed to Step 4
    g. **If the progress file hasn't advanced across 2-3 consecutive polls AND `TaskOutput` returns "No task found with ID"** → the sub-agent has died silently (a process-level failure, not a task-level FAILED response). Do not treat this the same as an active FAILED result. Follow "Sub-agent Liveness & Recovery" below before re-spawning anything.
+
+**Two false-alarm sources to avoid when judging liveness:**
+
+- **Never use repo file mtimes as a liveness signal** (e.g. `find backend/ frontend/ -newermt '...'`). Under the sandbox this returns nothing while the agent is demonstrably editing files — it will report a healthy agent as dead. The progress file is the signal; `TaskOutput` is the proof.
+- **A silent progress file is not by itself proof of death.** An agent making a large edit or thinking through one spot can go a long time without hitting a milestone — the progress file only advances at milestones, not continuously. This is why the `TaskOutput` check in (g) is required, not optional: without that confirmation, treat silence under ~25 minutes as "still working". If you ever monitor on silence alone, use ~40 minutes as the threshold, and run the clock from when you *started watching*, not from the mtime left behind by a previous (dead) agent — otherwise the timer fires the instant you restart.
 
 ### Sub-agent Liveness & Recovery
 
