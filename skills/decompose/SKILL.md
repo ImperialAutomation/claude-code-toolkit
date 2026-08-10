@@ -59,6 +59,41 @@ If no branch exists, ask if user wants to create it:
 git checkout -b issue-$ARGUMENTS-[feature-name]
 ```
 
+### Step 3b: Ensure the Branch Has a Diff
+
+**GitHub refuses to open a PR when the branch is identical to its base** —
+`gh pr create` fails with `No commits between <base> and <branch>`. A tracking PR
+is opened *before* any implementation work exists, so this is the normal state,
+not an edge case. The branch needs at least one commit before Step 4.
+
+Check whether the branch already differs from the base:
+```bash
+git log --oneline origin/[base-branch]..HEAD
+```
+
+If that returns nothing, pick one of these:
+
+**A) Commit real work that belongs to the decomposition (preferred).**
+Decomposing an issue usually comes with an actual change — a scope revision, an
+updated ADR, a doc that records why the breakdown looks like it does. If such a
+change exists, commit it on the tracking branch and the PR has a diff for free:
+```bash
+git add [changed-files]
+~/.claude/bin/git-commit.sh --file /tmp/<project>-commit-msg-$ARGUMENTS.txt
+```
+
+**B) Open with an empty commit.**
+When there is genuinely nothing to commit yet, create an empty one so the PR can
+exist. Prefer this over inventing a placeholder file — an empty commit leaves no
+dead code to clean up later:
+```bash
+git commit --allow-empty -m "chore: open tracking PR for #$ARGUMENTS"
+```
+
+Do **not** create a throwaway file just to produce a diff — it violates the
+"delete old code" rule the moment it is committed, and someone has to remember to
+remove it.
+
 ### Step 4: Create Draft PR
 
 Use this template structure:
@@ -120,6 +155,18 @@ issue-[number]-[feature] (this PR)
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ```
+
+Write that body to `/tmp/<project>-pr-body-$ARGUMENTS.md` with the Write tool,
+then push the branch and open the PR as a draft:
+```bash
+git push -u origin issue-$ARGUMENTS-[feature-name]
+gh pr create --draft --base [base-branch] \
+  --title "[feature name] (#$ARGUMENTS)" \
+  --body-file /tmp/<project>-pr-body-$ARGUMENTS.md
+```
+
+If this still fails with `No commits between ...`, Step 3b was skipped — go back
+and give the branch a commit.
 
 ### Step 5: Create Sub-Issues (if user confirms)
 
