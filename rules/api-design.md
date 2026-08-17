@@ -1,8 +1,17 @@
 ---
 description: API design standards for HTTP APIs
+paths: "**/api/**, **/routes/**, **/handlers/**, **/endpoints/**, **/controllers/**, **/schemas/**, **/*router*, **/openapi*"
 ---
 
 # API Design
+
+> **Existing codebases: match what is already there.** These are the defaults
+> for a NEW API. Where a project already has an established convention — error
+> format, pagination style, status-code usage — that convention wins, and this
+> rule is not a licence to change it in passing. Applying a standard from here
+> to one endpoint of an API that does it differently creates two conventions
+> where there was one. Verify against the codebase first; propose a migration
+> as separate work if the gap matters.
 
 - Use standard HTTP status codes — don't invent custom ones:
 

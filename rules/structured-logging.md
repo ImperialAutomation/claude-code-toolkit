@@ -1,5 +1,6 @@
 ---
 description: Structured logging standards for application code
+paths: "**/*log*, **/api/**, **/routes/**, **/handlers/**, **/endpoints/**, **/services/**, **/worker*/**, **/tasks/**, **/middleware/**"
 ---
 
 # Structured Logging

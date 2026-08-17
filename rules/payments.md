@@ -1,5 +1,6 @@
 ---
 description: Payment provider (PSP) onboarding and integration rules
+paths: "**/*payment*, **/*billing*, **/*checkout*, **/*subscription*, **/*invoice*, **/*stripe*, **/*mollie*, **/*adyen*, **/*multisafepay*, **/*paypal*, **/*psp*"
 ---
 
 # Payments
