@@ -41,9 +41,16 @@ if [[ "$has_path_arg" == false ]]; then
   echo "[project-test.sh] WARNING: No test path specified — running full suite. Use a specific path for faster runs." >&2
 fi
 
-# Auto-detect venv and use its pytest directly (no activation needed)
+# Auto-detect venv and use its pytest directly (no activation needed).
+# The list is ordered nearest-first and covers CWD at the project root as well
+# as one level below it. `../backend/*` is the case that is easy to miss: from
+# a sibling of the venv's directory (e.g. cwd=frontend/ with the venv in
+# backend/), neither `.venv` nor `../.venv` matches. Without it the loop falls
+# through to the system pytest, which usually still runs — silently, against
+# the wrong interpreter and dependency set.
+# Keep this list in sync with the fallback loop below and with venv-run.sh.
 PYTEST_CMD=""
-for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv; do
+for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv ../backend/.venv ../backend/venv; do
   if [[ -f "$venv_dir/bin/pytest" ]]; then
     PYTEST_CMD="$venv_dir/bin/pytest"
     echo "[project-test.sh] Using pytest from $venv_dir" >&2
@@ -51,9 +58,9 @@ for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv; do
   fi
 done
 
-# Fallback: venv python with -m pytest
+# Fallback: venv python with -m pytest (same search list as above)
 if [[ -z "$PYTEST_CMD" ]]; then
-  for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv; do
+  for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv ../backend/.venv ../backend/venv; do
     if [[ -f "$venv_dir/bin/python" ]]; then
       echo "[project-test.sh] Using python -m pytest from $venv_dir" >&2
       exec "$venv_dir/bin/python" -m pytest "$@"

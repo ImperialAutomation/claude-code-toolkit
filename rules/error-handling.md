@@ -1,8 +1,17 @@
 ---
-description: Error handling standards for all application code
+description: Error handling standards for application code
+paths: "**/api/**, **/routes/**, **/handlers/**, **/endpoints/**, **/services/**, **/middleware/**, **/*error*, **/*exception*"
 ---
 
 # Error Handling
+
+> **Existing codebases: match what is already there.** The response-format rules
+> below describe the target for a NEW API. A project that already has a
+> consistent error format keeps that format — introducing a second one on a
+> single endpoint is worse than the imperfection it replaces. Migrating an
+> existing API to a new format is its own deliberate piece of work, never a
+> side effect of an unrelated change. Check what the codebase does before
+> applying the format rules.
 
 - Never swallow errors — every error must be either handled (corrective action) or propagated (caller deals with it). Logging and continuing is not handling.
 - Add context when propagating — each layer adds what it was doing. Final message reads as a chain: `"create order: charge payment: POST /payments: connection refused"`

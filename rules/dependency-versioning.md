@@ -1,5 +1,6 @@
 ---
 description: How to choose, pin, and age dependency versions safely across any ecosystem
+paths: "**/package.json, **/package-lock.json, **/pyproject.toml, **/uv.lock, **/requirements*.txt, **/poetry.lock, **/composer.json, **/composer.lock, **/Cargo.toml, **/Cargo.lock, **/go.mod, **/go.sum, **/Gemfile, **/Gemfile.lock, **/*dependabot*, **/*renovate*"
 ---
 
 # Dependency Versioning

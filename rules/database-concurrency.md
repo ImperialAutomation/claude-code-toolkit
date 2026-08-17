@@ -1,3 +1,8 @@
+---
+description: Sync vs async DB-access lanes and connection-pool hardening
+paths: "**/database/**, **/db/**, **/models/**, **/repositories/**, **/*session*, **/*engine*, **/api/**, **/routes/**, **/endpoints/**, **/worker*/**, **/tasks/**"
+---
+
 # Database Concurrency
 
 Pick one DB-access lane and stay in it. Mixing sync and async is the trap, not
