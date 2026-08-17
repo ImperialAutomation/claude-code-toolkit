@@ -24,8 +24,14 @@ fi
 CMD="$1"
 shift
 
-# Auto-detect venv and use its binary
-for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv; do
+# Auto-detect venv and use its binary.
+# The list is ordered nearest-first and covers CWD at the project root as well
+# as one level below it. `../backend/*` is the case that is easy to miss: from
+# a sibling of the venv's directory (e.g. cwd=frontend/ with the venv in
+# backend/), neither `.venv` nor `../.venv` matches. Without it the loop falls
+# through to the system interpreter, which usually still runs — silently,
+# against the wrong Python and dependency set.
+for venv_dir in .venv venv backend/.venv backend/venv ../.venv ../venv ../backend/.venv ../backend/venv; do
   if [[ -f "$venv_dir/bin/$CMD" ]]; then
     echo "[venv-run.sh] Using $CMD from $venv_dir" >&2
     exec "$venv_dir/bin/$CMD" "$@"
