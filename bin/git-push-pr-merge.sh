@@ -37,7 +37,7 @@
 #   --no-ci-wait                Merge immediately without waiting for CI checks
 #   --ci-timeout <secs>         Max time registered checks may stay pending (default: 900)
 #   --ci-grace <secs>           Max time checks may take to register (default: 120)
-#   --ci-poll-interval <secs>   Polling interval while waiting (default: 15)
+#   --ci-poll-interval <secs>   Polling interval while waiting (default: 15, must be >= 1)
 
 set -euo pipefail
 
@@ -106,6 +106,22 @@ if [[ -z "$BODY_FILE" ]]; then
 fi
 if [[ ! -f "$BODY_FILE" ]]; then
     echo "Error: Body file not found: $BODY_FILE" >&2
+    exit 1
+fi
+
+# Both deadlines advance by CI_POLL_INTERVAL, so 0 (or a non-number) would spin
+# forever without ever reaching CI_TIMEOUT or CI_GRACE — a hung gate, which for a
+# fail-closed design is worse than a wrong answer.
+if ! [[ "$CI_POLL_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$CI_POLL_INTERVAL" -lt 1 ]]; then
+    echo "Error: --ci-poll-interval must be a positive integer (got: $CI_POLL_INTERVAL)" >&2
+    exit 1
+fi
+if ! [[ "$CI_TIMEOUT" =~ ^[0-9]+$ ]]; then
+    echo "Error: --ci-timeout must be a non-negative integer (got: $CI_TIMEOUT)" >&2
+    exit 1
+fi
+if ! [[ "$CI_GRACE" =~ ^[0-9]+$ ]]; then
+    echo "Error: --ci-grace must be a non-negative integer (got: $CI_GRACE)" >&2
     exit 1
 fi
 
@@ -208,8 +224,13 @@ wait_for_ci_gate() {
         # Exit 0 (all passed) or exit 1 (a check failed) both carry a full JSON
         # payload. Anything else, or an exit 1 whose payload does not parse, is a
         # real gh error: retry once, then fail closed.
+        # `if type == "array"` matters: jq's `length` also succeeds on objects,
+        # strings and numbers, so an API error body like {"message":"Not Found"}
+        # would yield a plausible count and then blow up in the `.[]` queries
+        # below — which, with set -e suppressed inside `if ! wait_for_ci_gate`,
+        # left both name lists empty and reported PASS on no evidence at all.
         local parsed_count
-        parsed_count=$(echo "$checks_json" | jq -r 'length' 2>/dev/null || true)
+        parsed_count=$(echo "$checks_json" | jq -r 'if type == "array" then length else "notarray" end' 2>/dev/null || true)
 
         if [[ "$checks_exit" -ne 0 && "$checks_exit" -ne 1 ]] || ! [[ "$parsed_count" =~ ^[0-9]+$ ]]; then
             if [[ "$checks_exit" -ne 0 && "$retried_transient" -eq 0 ]]; then

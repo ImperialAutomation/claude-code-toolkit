@@ -9,12 +9,14 @@
 #    5. Pending then pass within timeout -> CI_GATE: PASS, merges
 #    6. Transient gh error retried once -> CI_GATE: PASS, merges
 #   6b. Malformed JSON from gh          -> CI_GATE: FAIL, no merge
+#   6c. Valid JSON that is not an array -> CI_GATE: FAIL, no merge
 #    7. --no-ci-wait                    -> merges without checking, regardless of check state
 #    8. --no-merge                      -> CI gate skipped entirely, unaffected
 #    9. Checks appear late, within grace -> CI_GATE: PASS, merges
 #   10. Grace period elapses, no checks  -> CI_GATE: FAIL, no merge
 #   11. gh exit 8                        -> read as pending, not "unable to verify"
 #   12. Re-run with an existing open PR   -> reuses it, gate runs again
+#   13. --ci-poll-interval 0              -> rejected up front, never spins
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
@@ -139,7 +141,10 @@ case "$1 $2" in
                 ;;
             exit8-then-pass)
                 # Exit 8 with no parseable payload — pending, not "unverifiable".
-                if [ "$count" -lt 2 ]; then
+                # Must exit 8 more than once: the transient-error branch retries
+                # a single time, so a one-shot exit 8 would also go green there
+                # and the scenario could not tell the two paths apart.
+                if [ "$count" -lt 4 ]; then
                     exit 8
                 fi
                 echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
@@ -156,6 +161,13 @@ case "$1 $2" in
                 ;;
             malformed-json)
                 echo 'not valid json {{{'
+                exit 0
+                ;;
+            object-json)
+                # Valid JSON but NOT an array — e.g. a GitHub API error body.
+                # jq's `length` succeeds on objects, so this used to pass the
+                # payload guard and then report PASS on zero green evidence.
+                echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}'
                 exit 0
                 ;;
         esac
@@ -211,7 +223,9 @@ assert_contains() {
     local needle="$2"
     local haystack="$3"
 
-    if echo "$haystack" | grep -qF "$needle"; then
+    # -e is required: needles starting with `--` would otherwise be parsed as
+    # grep options and silently never match.
+    if echo "$haystack" | grep -qF -e "$needle"; then
         echo "PASS: $case_name (found '$needle')"
         pass=$((pass + 1))
     else
@@ -268,7 +282,7 @@ assert_not_contains() {
     local needle="$2"
     local haystack="$3"
 
-    if echo "$haystack" | grep -qF "$needle"; then
+    if echo "$haystack" | grep -qF -e "$needle"; then
         echo "FAIL: $case_name (unexpectedly found '$needle')"
         echo "--- output ---"
         echo "$haystack"
@@ -371,6 +385,21 @@ assert_exit "malformed json: exit code" "1" "$(cat "$repo6b/last-exit.txt")"
 assert_file_absent "malformed json: no merge" "$repo6b/merged"
 rm -rf "$repo6b"
 
+# --- Scenario 6c: valid JSON that is not an array -> fail closed, no merge ---
+# jq `length` answers for objects too, so this payload satisfied a naive numeric
+# guard and then made the `.[]` queries error out. set -e is suppressed inside
+# `if ! wait_for_ci_gate`, so both name lists came back empty and the gate
+# announced PASS without a single green check.
+repo6c=$(make_repo)
+make_fake_gh "$repo6c"
+echo "Test PR body" > "$repo6c/body.md"
+run_case "object json" "$repo6c" "object-json"
+assert_contains "object json: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo6c/last-output.txt")"
+assert_not_contains "object json: never reports PASS" "CI_GATE: PASS" "$(cat "$repo6c/last-output.txt")"
+assert_exit "object json: exit code" "1" "$(cat "$repo6c/last-exit.txt")"
+assert_file_absent "object json: no merge" "$repo6c/merged"
+rm -rf "$repo6c"
+
 # --- Scenario 7: --no-ci-wait skips the gate even with failing checks ---
 repo7=$(make_repo)
 make_fake_gh "$repo7"
@@ -438,6 +467,18 @@ assert_contains "re-run: gate ran again" "CI_GATE: PASS" "$(cat "$repo12/last-ou
 assert_exit "re-run: exit code" "0" "$(cat "$repo12/last-exit.txt")"
 assert_file_present "re-run: merge happened" "$repo12/merged"
 rm -rf "$repo12"
+
+# --- Scenario 13: --ci-poll-interval 0 is rejected instead of spinning forever ---
+# Both deadlines advance by the poll interval, so 0 would never reach CI_TIMEOUT
+# or CI_GRACE: the gate would hammer `gh` in a tight loop and never return.
+repo13=$(make_repo)
+make_fake_gh "$repo13"
+echo "Test PR body" > "$repo13/body.md"
+run_case "zero poll interval" "$repo13" "pending-forever" --ci-timeout 2 --ci-poll-interval 0
+assert_contains "zero poll: rejected" "--ci-poll-interval must be a positive integer" "$(cat "$repo13/last-output.txt")"
+assert_exit "zero poll: exit code" "1" "$(cat "$repo13/last-exit.txt")"
+assert_file_absent "zero poll: no merge" "$repo13/merged"
+rm -rf "$repo13"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
