@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# Regression tests for git-push-pr-merge.sh's CI gate (issue #13).
+# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32).
 #
 # Covers:
-#   1. No checks configured           -> CI_GATE: SKIP, merges
-#   2. Required checks pass           -> CI_GATE: PASS, merges
-#   3. A required check fails         -> CI_GATE: FAIL, no merge, exit non-zero
-#   4. Checks stuck pending (timeout) -> CI_GATE: TIMEOUT, no merge, exit non-zero
-#   5. --no-ci-wait                   -> merges without checking, regardless of check state
-#   6. --no-merge                     -> CI gate skipped entirely, unaffected
+#    1. No checks reported at all      -> CI_GATE: FAIL after grace, no merge (fail closed)
+#    2. Checks pass                    -> CI_GATE: PASS, merges
+#    3. A check fails                  -> CI_GATE: FAIL, no merge, exit non-zero
+#    4. Checks stuck pending (timeout)  -> CI_GATE: TIMEOUT, no merge, exit non-zero
+#    5. Pending then pass within timeout -> CI_GATE: PASS, merges
+#    6. Transient gh error retried once -> CI_GATE: PASS, merges
+#   6b. Malformed JSON from gh          -> CI_GATE: FAIL, no merge
+#    7. --no-ci-wait                    -> merges without checking, regardless of check state
+#    8. --no-merge                      -> CI gate skipped entirely, unaffected
+#    9. Checks appear late, within grace -> CI_GATE: PASS, merges
+#   10. Grace period elapses, no checks  -> CI_GATE: FAIL, no merge
+#   11. gh exit 8                        -> read as pending, not "unable to verify"
+#   12. Re-run with an existing open PR   -> reuses it, gate runs again
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
@@ -34,9 +41,17 @@ make_repo() {
 }
 
 # Builds a fake `gh` binary in $1/bin that:
-#   - `gh pr create` prints a fake PR URL
+#   - `gh pr list` reports an existing open PR only if $1/existing-pr is present
+#   - `gh pr create` prints a fake PR URL and records the call in $1/create-count
 #   - `gh pr checks` behavior driven by $1/checks-state (see scenarios below)
 #   - `gh pr merge` records that merge happened into $1/merged
+#
+# The stub mirrors two real `gh pr checks` behaviours the earlier version got
+# wrong, which is why the suite never caught issue #32:
+#   - `--required` on a branch without protection returns an EMPTY set with
+#     exit 0 — not the actual checks. Any state combined with --required
+#     therefore looks green, which is the fail-open bug.
+#   - Pending checks exit 8; failing checks exit 1 (see `gh pr checks --help`).
 make_fake_gh() {
     local workdir="$1"
     local bindir="$workdir/bin"
@@ -47,20 +62,56 @@ make_fake_gh() {
 WORKDIR="$FAKE_GH_WORKDIR"
 
 case "$1 $2" in
+    "pr list")
+        # Only reports a PR when the scenario planted one (re-run case).
+        if [ -f "$WORKDIR/existing-pr" ]; then
+            echo '[{"number":42,"url":"https://github.com/example/repo/pull/42"}]'
+        else
+            echo '[]'
+        fi
+        exit 0
+        ;;
     "pr create")
+        count_file="$WORKDIR/create-count"
+        count=$(cat "$count_file" 2>/dev/null || echo "0")
+        echo $((count + 1)) > "$count_file"
         echo "https://github.com/example/repo/pull/42"
         exit 0
         ;;
     "pr checks")
-        # checks-state file contains one of: none, pass, fail, pending-then-pass, pending-forever, ratelimit-then-pass
+        # checks-state file contains one of: none, none-then-pass, none-forever,
+        # pass, fail, pending-then-pass, pending-forever, exit8-then-pass,
+        # ratelimit-then-pass, malformed-json
         state=$(cat "$WORKDIR/checks-state" 2>/dev/null || echo "none")
         count_file="$WORKDIR/checks-call-count"
         count=$(cat "$count_file" 2>/dev/null || echo "0")
         count=$((count + 1))
         echo "$count" > "$count_file"
 
+        # Real gh: --required on a branch without protection yields an empty
+        # set with exit 0, regardless of the checks that actually ran.
+        for arg in "$@"; do
+            if [ "$arg" = "--required" ]; then
+                echo "[]"
+                exit 0
+            fi
+        done
+
         case "$state" in
             none)
+                echo "no checks reported on the '42' pull request" >&2
+                exit 1
+                ;;
+            none-then-pass)
+                # Checks not registered yet, then they appear and pass.
+                if [ "$count" -lt 3 ]; then
+                    echo "no checks reported on the '42' pull request" >&2
+                    exit 1
+                fi
+                echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 0
+                ;;
+            none-forever)
                 echo "no checks reported on the '42' pull request" >&2
                 exit 1
                 ;;
@@ -69,19 +120,29 @@ case "$1 $2" in
                 exit 0
                 ;;
             fail)
+                # Real gh exits 1 when checks are failing.
                 echo '[{"name":"build","state":"FAILURE","bucket":"fail"}]'
-                exit 0
+                exit 1
                 ;;
             pending-then-pass)
                 if [ "$count" -lt 2 ]; then
                     echo '[{"name":"build","state":"PENDING","bucket":"pending"}]'
+                    exit 8
                 else
                     echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                    exit 0
                 fi
-                exit 0
                 ;;
             pending-forever)
                 echo '[{"name":"build","state":"PENDING","bucket":"pending"}]'
+                exit 8
+                ;;
+            exit8-then-pass)
+                # Exit 8 with no parseable payload — pending, not "unverifiable".
+                if [ "$count" -lt 2 ]; then
+                    exit 8
+                fi
+                echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
                 exit 0
                 ;;
             ratelimit-then-pass)
@@ -133,7 +194,7 @@ run_case() {
     local extra_args=("$@")
 
     echo "$checks_state" > "$repo/checks-state"
-    rm -f "$repo/merged" "$repo/checks-call-count"
+    rm -f "$repo/merged" "$repo/checks-call-count" "$repo/create-count"
 
     set +e
     output=$(cd "$repo" && PATH="$repo/bin:$PATH" "$TARGET" --base main --title "Test PR" --body-file "$repo/body.md" "${extra_args[@]}" 2>&1)
@@ -202,14 +263,52 @@ assert_file_present() {
     fi
 }
 
-# --- Scenario 1: no checks configured -> skip gate, merge proceeds ---
+assert_not_contains() {
+    local case_name="$1"
+    local needle="$2"
+    local haystack="$3"
+
+    if echo "$haystack" | grep -qF "$needle"; then
+        echo "FAIL: $case_name (unexpectedly found '$needle')"
+        echo "--- output ---"
+        echo "$haystack"
+        echo "--------------"
+        fail=$((fail + 1))
+    else
+        echo "PASS: $case_name (no '$needle')"
+        pass=$((pass + 1))
+    fi
+}
+
+assert_file_content() {
+    local case_name="$1"
+    local path="$2"
+    local expected="$3"
+    local actual
+    actual=$(cat "$path" 2>/dev/null || echo "<absent>")
+
+    if [ "$actual" = "$expected" ]; then
+        echo "PASS: $case_name ($expected)"
+        pass=$((pass + 1))
+    else
+        echo "FAIL: $case_name (expected '$expected', got '$actual')"
+        fail=$((fail + 1))
+    fi
+}
+
+# --- Scenario 1: no checks reported at all -> fail closed after grace, no merge ---
+# Previously asserted CI_GATE: SKIP + merge. That WAS the bug (issue #32): a PR
+# whose checks have not registered yet is indistinguishable from a repo without
+# CI, and merging on that assumption merged three red branches. "No checks" now
+# means wait, then fail closed; --no-ci-wait is the deliberate escape hatch.
 repo1=$(make_repo)
 make_fake_gh "$repo1"
 echo "Test PR body" > "$repo1/body.md"
-run_case "no checks" "$repo1" "none"
-assert_contains "no checks: CI_GATE line" "CI_GATE: SKIP" "$(cat "$repo1/last-output.txt")"
-assert_exit "no checks: exit code" "0" "$(cat "$repo1/last-exit.txt")"
-assert_file_present "no checks: merge happened" "$repo1/merged"
+run_case "no checks" "$repo1" "none" --ci-grace 2 --ci-poll-interval 1
+assert_contains "no checks: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo1/last-output.txt")"
+assert_contains "no checks: reason names grace period" "no checks appeared" "$(cat "$repo1/last-output.txt")"
+assert_exit "no checks: exit code" "1" "$(cat "$repo1/last-exit.txt")"
+assert_file_absent "no checks: no merge" "$repo1/merged"
 rm -rf "$repo1"
 
 # --- Scenario 2: required checks pass -> merge proceeds ---
@@ -290,6 +389,55 @@ run_case "no-merge path" "$repo8" "fail" --no-merge
 assert_exit "no-merge: exit code" "0" "$(cat "$repo8/last-exit.txt")"
 assert_file_absent "no-merge: no merge" "$repo8/merged"
 rm -rf "$repo8"
+
+# --- Scenario 9: checks appear late but within the grace period -> PASS, merge ---
+# The original failure mode: merged 3s before the check even started. The gate
+# must sit through the registration gap instead of reading it as "no CI".
+repo9=$(make_repo)
+make_fake_gh "$repo9"
+echo "Test PR body" > "$repo9/body.md"
+run_case "checks appear late" "$repo9" "none-then-pass" --ci-grace 30 --ci-poll-interval 1
+assert_contains "late checks: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo9/last-output.txt")"
+assert_exit "late checks: exit code" "0" "$(cat "$repo9/last-exit.txt")"
+assert_file_present "late checks: merge happened" "$repo9/merged"
+rm -rf "$repo9"
+
+# --- Scenario 10: grace period elapses with no checks -> FAIL closed, no merge ---
+repo10=$(make_repo)
+make_fake_gh "$repo10"
+echo "Test PR body" > "$repo10/body.md"
+run_case "grace expires" "$repo10" "none-forever" --ci-grace 2 --ci-poll-interval 1
+assert_contains "grace expires: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo10/last-output.txt")"
+assert_contains "grace expires: reason" "no checks appeared" "$(cat "$repo10/last-output.txt")"
+assert_exit "grace expires: exit code" "1" "$(cat "$repo10/last-exit.txt")"
+assert_file_absent "grace expires: no merge" "$repo10/merged"
+rm -rf "$repo10"
+
+# --- Scenario 11: exit 8 reads as pending, not "unable to verify" ---
+repo11=$(make_repo)
+make_fake_gh "$repo11"
+echo "Test PR body" > "$repo11/body.md"
+run_case "exit 8 is pending" "$repo11" "exit8-then-pass" --ci-timeout 30 --ci-poll-interval 1
+assert_contains "exit 8: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo11/last-output.txt")"
+assert_not_contains "exit 8: not misread as unverifiable" "unable to verify" "$(cat "$repo11/last-output.txt")"
+assert_exit "exit 8: exit code" "0" "$(cat "$repo11/last-exit.txt")"
+assert_file_present "exit 8: merge happened" "$repo11/merged"
+rm -rf "$repo11"
+
+# --- Scenario 12: re-run on a branch that already has a PR -> reuse, gate re-runs ---
+# implement-epic's CI_GATE_BLOCKED recovery re-runs with identical arguments.
+# Without an idempotent create, attempt 2 dies on gh instead of re-gating.
+repo12=$(make_repo)
+make_fake_gh "$repo12"
+echo "Test PR body" > "$repo12/body.md"
+touch "$repo12/existing-pr"
+run_case "re-run with existing PR" "$repo12" "pass" --ci-timeout 30 --ci-poll-interval 1
+assert_contains "re-run: reuses PR" "Reusing existing PR #42" "$(cat "$repo12/last-output.txt")"
+assert_file_content "re-run: no second create" "$repo12/create-count" "<absent>"
+assert_contains "re-run: gate ran again" "CI_GATE: PASS" "$(cat "$repo12/last-output.txt")"
+assert_exit "re-run: exit code" "0" "$(cat "$repo12/last-exit.txt")"
+assert_file_present "re-run: merge happened" "$repo12/merged"
+rm -rf "$repo12"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
