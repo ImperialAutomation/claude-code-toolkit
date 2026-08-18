@@ -268,11 +268,14 @@ Read only the files relevant to your issue. Do NOT skip this step.
    - Commit any remaining uncommitted work: `~/.claude/bin/git-commit.sh "concise descriptive message"`
    - Write PR body to /tmp/pr-body.md using the Write tool, then push + PR + merge in one command:
      `~/.claude/bin/git-push-pr-merge.sh --base <feature_branch> --title "<title>" --body-file /tmp/pr-body.md`
-   - This script pushes, creates the PR, waits for required CI checks, merges it, and returns to the feature branch automatically
-   - **If the script exits non-zero with `STATUS: CI_GATE_BLOCKED`:** the PR was left open — checks failed or timed out.
-     - Read the `CI_GATE: FAIL — <check names>` or `CI_GATE: TIMEOUT — <check names>` line to identify the failing/stuck checks
-     - Investigate the failure (`gh pr checks <PR_NUMBER>`, CI logs), fix at root cause, commit, push to the same branch
-     - Re-run `~/.claude/bin/git-push-pr-merge.sh` with the same arguments to re-trigger the gate
+   - This script pushes, creates the PR, waits for the CI checks, merges it, and returns to the feature branch automatically
+   - The gate **fails closed**: it merges only on positive evidence that every check is green. Expect each sub-PR to take 1-2 minutes longer than a blind merge, and expect blocks where a red branch used to slip through silently — that is the gate working.
+   - **If the script exits non-zero with `STATUS: CI_GATE_BLOCKED`:** the PR was left open. Read the `CI_GATE:` line to see why:
+     - `FAIL — <check names>` → those checks are red. Investigate (`gh pr checks <PR_NUMBER>`, CI logs), fix at root cause, commit, push to the same branch.
+     - `TIMEOUT — still pending: <check names>` → checks never finished. Check whether the run is stuck or the queue is slow before retrying.
+     - `FAIL — no checks appeared after <N>s` → no check ever registered. Either the workflow file is broken (fix it), or the repo genuinely has no CI — in that case, and only then, re-run with `--no-ci-wait`.
+     - `FAIL — unable to verify checks` → `gh` itself failed. Verify auth/rate limits; do not work around it by disabling the gate.
+     - Then re-run `~/.claude/bin/git-push-pr-merge.sh` with the same arguments to re-trigger the gate. The script reuses the open PR, so re-running is safe and does not create a duplicate.
      - Up to 3 fix-and-retry attempts; if still blocked, leave the PR open and report the blocker instead of forcing a merge
 
 ## Auth Impact Check (only include if auth_impact is true)
