@@ -285,6 +285,30 @@ def _is_safe_find_invocation(tokens):
     return not any(token in danger_flags for token in tokens)
 
 
+def is_sed_file_read(tokens):
+    """True for `sed -n 'X,Yp' <file>` and friends — sed used as a plain file
+    reader, which is Read with offset/limit written as a shell command.
+
+    Deliberately narrow. A real stream edit (-i, a substitution, reading from a
+    pipe) is NOT matched: those are legitimate shell work and must keep falling
+    through to a normal prompt rather than being denied."""
+    if not tokens or tokens[0] != "sed":
+        return False
+    if "-n" not in tokens and "--quiet" not in tokens and "--silent" not in tokens:
+        return False
+
+    operands = [t for t in tokens[1:] if not t.startswith("-")]
+    # Need both a script and at least one file operand; `sed -n 1,5p` alone
+    # reads stdin, so there is no file for Read to open instead.
+    if len(operands) < 2:
+        return False
+
+    # The script is the first operand. Match a line-range print: N p, N,M p,
+    # N,$ p — optionally with the whole thing wrapped in braces.
+    script = operands[0].strip("{} ")
+    return bool(re.fullmatch(r"\d+(,(\d+|\$))?\s*p", script))
+
+
 def is_segment_safe(segment_tokens):
     """A segment is safe if, after stripping cd/env prefixes, its first
     token is on ALLOWLIST or a ~/.claude/bin/ script — with no command
@@ -329,6 +353,20 @@ def is_segment_safe(segment_tokens):
     return True
 
 
+def command_has_sed_file_read(command):
+    """True if any segment of `command` uses sed as a file reader. False
+    (never raises) on unparseable input — the caller falls through."""
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    return any(
+        is_sed_file_read(strip_env_prefix(strip_cd_prefix(segment)))
+        for segment in segments
+    )
+
+
 def is_command_safe(command):
     """True if every segment of `command` is safe. False (never raises)
     on unparseable input — the caller falls through to the normal prompt."""
@@ -349,6 +387,23 @@ def main():
 
     command = payload.get("tool_input", {}).get("command", "")
     if not command:
+        return 0
+
+    # Deny wins over allow: a chain that is otherwise fully allowlisted is
+    # still denied when one of its segments reads a file through sed.
+    if command_has_sed_file_read(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: `sed -n 'X,Yp' <file>` is a file read. Use the Read "
+                    "tool with offset/limit instead — it is allowlisted, shows "
+                    "line numbers, and needs no permission prompt."
+                ),
+            }
+        }
+        print(json.dumps(output))
         return 0
 
     if is_command_safe(command):
