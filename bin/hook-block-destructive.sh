@@ -27,12 +27,55 @@ if [ -z "$COMMAND" ]; then
     exit 0
 fi
 
+# Guard: force-recursive rm of an absolute path, EXCEPT below /tmp.
+#
+# Replaces the old substring patterns ("rm -rf /", "rm -rf /[a-z]", "rm -rf ~",
+# "rm -rf $HOME"), which had two problems:
+#   1. Every scratch cleanup under /tmp was blocked — agents write their temp
+#      files there by convention, so deleting them is routine, not destructive.
+#      That false positive is what prompted this change.
+#   2. A single substring regex cannot express "EVERY path operand must be
+#      safe", so `rm -rf /tmp/a /usr` would pass on the strength of its first
+#      operand. Checking each operand fixes that.
+#
+# Still blocked, deliberately: bare `/tmp` and `/tmp/` (wiping the whole scratch
+# dir kills other concurrent agents' files), every other absolute path, and `~`
+# / `~/...` (the old `rm -rf ~` pattern required a trailing space, so `~/Projects`
+# slipped through — closed here).
+#
+# Relative paths (./build, node_modules) were never matched and still aren't:
+# they are scoped to the working directory and are ordinary build hygiene.
+_rm_hits_protected_path() {
+    local segment token
+    while IFS= read -r segment; do
+        echo "$segment" | grep -qE '(^|[[:space:]])rm([[:space:]]|$)' || continue
+        # Require BOTH recursive and force flags, in any order or combination.
+        echo "$segment" | grep -qE '(^|[[:space:]])-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]|$)' || continue
+        echo "$segment" | grep -qE '(^|[[:space:]])-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|$)' || continue
+        for token in $segment; do
+            # SC2088 (tilde in quotes) is intentional below: we match a LITERAL
+            # ~ in the command text. Expanding it would defeat the check, since
+            # the tilde reaches this hook unexpanded.
+            # shellcheck disable=SC2088
+            case "$token" in
+                rm|-*) continue ;;
+                /tmp/?*) continue ;;   # a path UNDER /tmp: allowed
+                /*) return 0 ;;        # any other absolute path
+                '~'|'~/'*) return 0 ;; # home directory (literal ~, see above)
+            esac
+        done
+    done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
+    return 1
+}
+
+if _rm_hits_protected_path; then
+    echo "BLOCKED by hook-block-destructive.sh: refusing a force-recursive rm of an absolute path outside /tmp. Deleting scratch files UNDER /tmp (e.g. /tmp/my-workdir) is allowed; wiping /tmp itself, a home path, or any other absolute path needs the user's explicit go-ahead." >&2
+    exit 2
+fi
+
 # Patterns for destructive operations
 BLOCKED_PATTERNS=(
     # Filesystem destruction
-    "rm -rf /"
-    "rm -rf /[a-z]"
-    "rm -rf ~"
     "rm -rf \\$HOME"
     # Git destructive operations
     "git push.*--force"
