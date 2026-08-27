@@ -484,5 +484,91 @@ check(
     not hook.is_command_safe("cd /etc 2>/dev/null; echo hi"),
 )
 
+# --- sed as a file reader: deny with a hint pointing at Read ---
+# `sed -n 'X,Yp' <file>` is Read with offset/limit spelled as a shell command.
+# The global CLAUDE.md has forbidden it for a long time and it still showed up
+# in 30 sessions, so it is enforced here rather than documented again.
+
+check(
+    "sed-read: -n with a line-range p is a file read",
+    hook.is_sed_file_read(["sed", "-n", "250,262p", "/tmp/x.py"]),
+)
+
+check(
+    "sed-read: single-line form is a file read too",
+    hook.is_sed_file_read(["sed", "-n", "42p", "/tmp/x.py"]),
+)
+
+check(
+    "sed-read: $ as the range end is a file read",
+    hook.is_sed_file_read(["sed", "-n", "10,$p", "/tmp/x.py"]),
+)
+
+check(
+    "sed-read: quoted range (shlex strips the quotes) is a file read",
+    hook.is_sed_file_read(hook._tokenize("sed -n '250,262p' /tmp/x.py")),
+)
+
+# The deny is narrow ON PURPOSE: a real stream edit must stay promptable, not
+# be denied outright, or the hook starts blocking legitimate shell work.
+check(
+    "sed-read: in-place edit is NOT classified as a read",
+    not hook.is_sed_file_read(["sed", "-i", "s/a/b/", "/tmp/x.py"]),
+)
+
+check(
+    "sed-read: substitution without -n is NOT classified as a read",
+    not hook.is_sed_file_read(["sed", "s/a/b/", "/tmp/x.py"]),
+)
+
+check(
+    "sed-read: -n reading from a pipe (no file operand) is NOT a read of a file",
+    not hook.is_sed_file_read(["sed", "-n", "1,5p"]),
+)
+
+# These three are what makes the line-range regex load-bearing. Without them
+# the earlier guards (-n present, >=2 operands) already reject every negative
+# case, so replacing the regex with `return True` passes the whole suite — the
+# "an earlier guard swallows the test" pattern from shell-and-config-testing.md
+# §2. Verified by mutation: `return True` flips exactly these.
+check(
+    "sed-read: deletion script with -n is not a line-range print",
+    not hook.is_sed_file_read(["sed", "-n", "/foo/d", "/tmp/x.py"]),
+)
+
+check(
+    "sed-read: a printing substitution is an edit, not a line-range read",
+    not hook.is_sed_file_read(["sed", "-n", "s/a/b/p", "/tmp/x.py"]),
+)
+
+check(
+    "sed-read: line-count script with -n is not a line-range print",
+    not hook.is_sed_file_read(["sed", "-n", "$=", "/tmp/x.py"]),
+)
+
+# End-to-end: the hook must emit an explicit deny with an actionable reason.
+approved, reason, rc = run_hook("sed -n '250,262p' /tmp/x.py")
+check("sed-read: hook does not approve it", not approved)
+check(
+    "sed-read: hook denies with a Read hint",
+    reason is not None and "Read" in reason,
+)
+check("sed-read: hook still exits 0", rc == 0)
+
+# A denied sed anywhere in a chain denies the whole command.
+approved, reason, _ = run_hook("git status; sed -n '1,5p' /tmp/x.py")
+check("sed-read: denied inside a chain", not approved and reason is not None)
+
+# Unrelated commands keep their existing behaviour: allowed stays allowed,
+# and a non-allowlisted command stays a silent fall-through (no deny).
+approved, reason, _ = run_hook("git status")
+check("sed-read: unrelated allowed command still approved", approved)
+
+approved, reason, _ = run_hook("sed -i 's/a/b/' /tmp/x.py")
+check(
+    "sed-read: a real stream edit falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
