@@ -96,3 +96,13 @@ Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug
 - **Tmp-bestandsnamen: ALTIJD uniek per project + taak.** NOOIT generieke namen als `/tmp/commit-msg.txt` of `/tmp/pr-body.md` — er draaien vaak meerdere agents tegelijk, ook in verschillende projecten, en die overschrijven elkaars bestand. Schema: `/tmp/<project>-<doel>-<nr>.<ext>`, waarbij `<project>` de basename van de working directory is, lowercase, niet-alfanumerieke tekens vervangen door `-` (bv. `~/Projects/Acme-Webshop` → `acme-webshop`), en `<nr>` het issue- of PR-nummer. Voorbeelden: `/tmp/acme-webshop-commit-msg-42.txt`, `/tmp/acme-webshop-pr-body-42.md`, `/tmp/acme-webshop-issue-body-42.md`. Zonder issue/PR-nummer: gebruik een kort beschrijvend doel (`/tmp/acme-webshop-deploy-log.txt`).
 - Never use `python3 -c`, `sed`, or `awk` for file reading, writing, searching, or modifications. Use Grep/Read to find content, then Edit to replace. `python3 -c` is allowed for non-file operations (calculations, data transformations, etc.).
 - For batch operations on multiple issues, always use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`). Never use `for` loops or chained `&&` commands to repeat `gh` calls.
+
+<!--
+RTK (Rust Token Killer) — optional, install separately: https://github.com/rtk-ai/rtk
+  curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+  rtk init -g          # registers the `rtk hook claude` hook in ~/.claude/settings.json
+Without both steps the import below loads instructions for a tool that is not
+installed. Claude Code silently ignores a missing import, so RTK.md is safe to
+delete when RTK is not in use.
+-->
+@RTK.md
