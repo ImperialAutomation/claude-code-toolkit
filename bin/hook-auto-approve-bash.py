@@ -309,6 +309,60 @@ def is_sed_file_read(tokens):
     return bool(re.fullmatch(r"\d+(,(\d+|\$))?\s*p", script))
 
 
+# --- Python used as a file reader -------------------------------------------
+# CLAUDE.md forbids python3 -c for file reading/writing/searching: Read, Grep
+# and Edit do it natively, with line numbers and no permission prompt. Python
+# for CALCULATION or data transformation stays explicitly allowed, so this
+# matches the file-access call itself, never the interpreter invocation.
+
+# An inline program: `python -c "..."` or a heredoc (`python - <<'PY'`). The
+# heredoc form is why the check below runs on the RAW command string rather
+# than on tokens: shlex tokenizes a heredoc body as loose words, and real
+# multi-line Python (apostrophes in comments, nested quotes) often fails to
+# tokenize at all — so a token-based test would miss the very shape that
+# produced most of these calls.
+_PYTHON_INLINE_RE = re.compile(
+    r"(^|[;&|]|\s)(python3?|py)\s+(-[A-Za-z]*c\b|-\s*(?=<<))", re.MULTILINE
+)
+
+# The file-reading calls themselves. Each requires a literal path argument, so
+# a program that merely mentions `open` in a string is not matched.
+_PYTHON_READ_RE = re.compile(
+    r"""(
+        json\.load\s*\(\s*open\s*\(          # json.load(open(...))
+      | \bopen\s*\(\s*['"][^'"]*['"]\s*\)    # open('path') — no mode: read
+      | \bopen\s*\(\s*['"][^'"]*['"]\s*,\s*['"][rb]{1,2}['"]   # open('path','r')
+      | \.read_text\s*\(                     # Path(...).read_text()
+      | \.read_bytes\s*\(
+      | \breadlines\s*\(\s*\)
+    )""",
+    re.VERBOSE,
+)
+
+
+def command_has_python_file_read(command):
+    """True if `command` runs inline Python that opens a file for reading.
+
+    Deliberately narrow, in the same spirit as is_sed_file_read: it fires only
+    when BOTH an inline-program invocation (-c or a heredoc) and a literal
+    file-reading call are present. Never raises — the caller falls through.
+
+    NOT matched, and must keep falling through to a normal prompt:
+      - `python3 -c` doing arithmetic or data transformation (no file access),
+        which CLAUDE.md explicitly permits;
+      - `python3 script.py` — running a real script, not an inline program;
+      - writes (`open(p, 'w')`) and other genuine shell work that happens to
+        name a path;
+      - venv-run.sh / .venv/bin/python wrappers, which are the sanctioned way
+        to reach a project interpreter.
+    """
+    if not isinstance(command, str):
+        return False
+    if not _PYTHON_INLINE_RE.search(command):
+        return False
+    return bool(_PYTHON_READ_RE.search(command))
+
+
 def is_segment_safe(segment_tokens):
     """A segment is safe if, after stripping cd/env prefixes, its first
     token is on ALLOWLIST or a ~/.claude/bin/ script — with no command
@@ -400,6 +454,23 @@ def main():
                     "Hook: `sed -n 'X,Yp' <file>` is a file read. Use the Read "
                     "tool with offset/limit instead — it is allowlisted, shows "
                     "line numbers, and needs no permission prompt."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
+    if command_has_python_file_read(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: inline Python that opens a file is a file read. Use "
+                    "Read (with offset/limit), Grep to search, or Edit to "
+                    "modify — they are allowlisted and need no permission "
+                    "prompt. Python for calculation or data transformation "
+                    "with no file access stays fine."
                 ),
             }
         }

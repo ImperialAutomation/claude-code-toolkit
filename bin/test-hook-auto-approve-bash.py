@@ -570,5 +570,128 @@ check(
     not approved and reason is None,
 )
 
+# --- inline Python as a file reader: deny with a hint pointing at Read ---
+# Same reasoning as the sed guard above. CLAUDE.md forbids `python3 -c` for file
+# operations, yet a permission-friction scan still found 35 such calls across 14
+# sessions — a convention violated that often is a hook, not a docs line.
+# Detection runs on the RAW command (not tokens) because the heredoc form
+# (`python3 - <<'PY'`) carries the program in a body shlex tokenizes as loose
+# words, and real multi-line Python frequently fails to tokenize at all.
+
+check(
+    "py-read: -c with json.load(open(...)) is a file read",
+    hook.command_has_python_file_read(
+        "python3 -c \"import json; d=json.load(open('/tmp/x.json')); print(d)\""
+    ),
+)
+
+check(
+    "py-read: -c with a bare open('path') is a file read",
+    hook.command_has_python_file_read("python3 -c \"print(open('/tmp/x.txt').read())\""),
+)
+
+check(
+    "py-read: explicit read mode is a file read",
+    hook.command_has_python_file_read("python3 -c \"f=open('/tmp/x.txt', 'r'); print(f.read())\""),
+)
+
+check(
+    "py-read: Path.read_text() is a file read",
+    hook.command_has_python_file_read(
+        "python3 -c \"from pathlib import Path; print(Path('/tmp/x.txt').read_text())\""
+    ),
+)
+
+check(
+    "py-read: heredoc form is caught too (the shape tokens cannot reach)",
+    hook.command_has_python_file_read(
+        "python3 - <<'PY'\nimport json\nd = json.load(open('/tmp/x.json'))\nprint(d)\nPY"
+    ),
+)
+
+check(
+    "py-read: multi-line heredoc with apostrophes still matches",
+    hook.command_has_python_file_read(
+        "python3 - <<'PY'\n# don't let quoting defeat this\ns = open('/tmp/a.py').read()\nPY"
+    ),
+)
+
+check(
+    "py-read: `python` without the 3 is matched as well",
+    hook.command_has_python_file_read("python -c \"print(open('/tmp/x.txt').read())\""),
+)
+
+check(
+    "py-read: denied inside a chain",
+    hook.command_has_python_file_read(
+        "git status && python3 -c \"print(open('/tmp/x.txt').read())\""
+    ),
+)
+
+# The deny is narrow ON PURPOSE. CLAUDE.md explicitly permits python3 -c for
+# calculation and data transformation, so anything without file access must keep
+# falling through to a normal prompt rather than being denied.
+check(
+    "py-read: arithmetic with no file access is NOT a file read",
+    not hook.command_has_python_file_read("python3 -c \"print(14 / 28 * 100)\""),
+)
+
+check(
+    "py-read: data transformation with no file access is NOT a file read",
+    not hook.command_has_python_file_read(
+        "python3 -c \"import json; print(json.dumps({'a': 1}))\""
+    ),
+)
+
+check(
+    "py-read: running a real script is NOT an inline file read",
+    not hook.command_has_python_file_read("python3 scripts/generate.py /tmp/x.json"),
+)
+
+check(
+    "py-read: a WRITE is not a read (it must stay promptable, not be denied)",
+    not hook.command_has_python_file_read("python3 -c \"open('/tmp/x.txt', 'w').write('hi')\""),
+)
+
+check(
+    "py-read: append mode is not a read either",
+    not hook.command_has_python_file_read("python3 -c \"open('/tmp/x.txt', 'a').write('hi')\""),
+)
+
+check(
+    "py-read: the venv wrapper is the sanctioned path, not an inline program",
+    not hook.command_has_python_file_read(
+        "~/.claude/bin/venv-run.sh python scripts/dump.py /tmp/x.json"
+    ),
+)
+
+check(
+    "py-read: non-string input never raises",
+    not hook.command_has_python_file_read(None),
+)
+
+# Both halves of the check must be load-bearing: an inline program with no file
+# call, and a file call with no inline program, must each fail on their own.
+# Verified by mutation — dropping either half flips exactly one of these.
+check(
+    "py-read: a file call without an inline program is NOT matched",
+    not hook.command_has_python_file_read("grep -n \"open('/tmp/x.txt')\" notes.md"),
+)
+
+# End-to-end through the hook: deny, with a reason that names the right tool.
+approved, reason, rc = run_hook("python3 -c \"import json; d=json.load(open('/tmp/x.json'))\"")
+check("py-read: hook does not approve it", not approved)
+check(
+    "py-read: hook denies with a Read hint",
+    reason is not None and "Read" in reason,
+)
+check("py-read: hook still exits 0", rc == 0)
+
+approved, reason, _ = run_hook("python3 -c \"print(2 + 2)\"")
+check(
+    "py-read: pure calculation falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
