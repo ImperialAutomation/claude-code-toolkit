@@ -7,6 +7,25 @@
 - Commit messages in English, concise and descriptive
 - `docker compose` (with space), never `docker-compose` (with hyphen)
 
+### Geen em-dashes (—)
+
+GEEN em-dash in tekst die een mens leest: niet in antwoorden aan de gebruiker,
+niet in UI-teksten/vertaalbestanden, niet in commit messages, PR-bodies of
+issue-bodies.
+
+Kies in plaats daarvan de leesteken die de zin echt nodig heeft:
+
+| In plaats van | Gebruik |
+|---|---|
+| Bijzin die iets toelicht | Puntkomma, of splits in twee zinnen |
+| Opsomming die volgt | Dubbele punt |
+| Terzijde midden in een zin | Komma's, of haakjes |
+| Bereik (2020—2024) | En-dash of "tot" |
+| Attributie ("— Jan") | Laat het streepje weg |
+
+De en-dash (–) en het koppelteken (-) blijven gewoon toegestaan waar ze
+typografisch horen.
+
 ## Bash Permissies (CRITICAL)
 
 Twee regels die ALTIJD gelden:
