@@ -126,8 +126,8 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `git-find-base-branch` | `git-find-base-branch` | Detect the base branch of the current branch |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
-| `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents) |
-| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). Repos without CI need `--no-ci-wait` |
+| `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
+| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). Repos without CI need `--no-ci-wait`. Creates the PR itself, so `gh pr create` hooks do not fire — see [failure modes](docs/git-script-failure-modes.md) |
 
 ### Project audits
 
