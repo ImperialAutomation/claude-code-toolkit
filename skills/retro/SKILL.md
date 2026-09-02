@@ -128,7 +128,42 @@ Write operational findings to `docs/development/` using the project's existing s
 
 Format: concise markdown with a `# Title`, a short explanation of **why** this matters, and a **How to apply** section. Match the style of existing files in the directory.
 
-After creating a new file, add a reference to the project's root CLAUDE.md under the "Operational Guidelines" section (or equivalent docs index). Follow the existing link format (e.g. `[topic-name](docs/development/topic-name.md)`).
+After creating a new file, add a reference to the project's root CLAUDE.md under the "Operational Guidelines" section (or equivalent docs index).
+
+**Index-entry norm — the index is a lookup table, not a summary.** The root CLAUDE.md is
+loaded on every single session, so every character in it is paid for whether or not the
+doc turns out to be relevant. Entries must be:
+
+- **One doc per line**, as a list item: `- [topic-name](docs/development/topic-name.md) — hint (#issue)`
+- **Hint only when the filename does not already carry it**, and then at most 100
+  characters. The hint exists to close the gap between what the name says and what you
+  need in order to decide whether to open the doc. When the name already says it
+  (`docker-restart`), the name *is* the hint and adding one just repeats it. When two
+  docs look alike by name, the hint is what tells them apart.
+- **Never appended to an existing entry's line.** Adding a clause to the neighbouring
+  entry is what turns a scannable index into an unreadable 2 kB paragraph. New finding,
+  new line.
+
+If the explanation does not fit in the hint, it belongs in the doc. The doc is only read
+when relevant and can be as long as it needs to be; the index is read always.
+
+Before adding an entry, check the section for a doc that already covers the topic and
+update that entry instead of adding a near-duplicate. Never let the section exceed a
+scannable size — if a section passes roughly 15 entries, propose splitting it by
+subtopic rather than growing the list.
+
+**Index each doc in exactly one place.** A project may also have scoped CLAUDE.md files
+(`frontend/CLAUDE.md`, `backend/app/CLAUDE.md`). Those load on demand — reading any file
+under `frontend/` pulls in `frontend/CLAUDE.md`, and a backend session never pays for it.
+So before adding an entry to the root index, grep the scoped files too: a doc listed
+there must NOT be repeated in the root. Checking only the root is how a doc ends up
+indexed twice.
+
+Two caveats before moving entries out of the root to buy that saving. The trigger is a
+**Read** on a path inside the tree — directory listings and content searches do not fire
+it. And the mechanism is anchored to the session working directory, so it does **not**
+fire in a sibling git worktree at all; entries moved out of the root are simply absent
+there. Verify with `/context` (see "Memory files") rather than assuming either way.
 
 If a relevant file already exists in `docs/development/`, update it rather than creating a duplicate.
 
