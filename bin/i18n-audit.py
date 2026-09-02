@@ -259,18 +259,50 @@ def scan_source_files(
     return key_locations, dynamic_keys
 
 
+# CLDR plural categories, as i18next suffixes them. A key with a `count`
+# option is looked up as `<key>_<category>` at runtime, so the bare key never
+# appears in the locale file and a literal comparison reports it missing.
+PLURAL_SUFFIXES = ("zero", "one", "two", "few", "many", "other")
+
+
 def check_missing(
     used_keys: Set[str], locale_keys: Set[str]
 ) -> Set[str]:
-    """Find keys used in code but not in locale."""
-    return used_keys - locale_keys
+    """Find keys used in code but not in locale.
+
+    A pluralised key resolves through its CLDR suffixes rather than its bare
+    form: `t("photos.count", {count})` reads `photos.count_one` /
+    `photos.count_other` and never `photos.count` itself. Treating the bare key
+    as missing is a false positive, and one that cannot be silenced without
+    duplicating the key — so any suffixed variant satisfies the bare form.
+    """
+    pluralised = {
+        key[: -(len(suffix) + 1)]
+        for key in locale_keys
+        for suffix in PLURAL_SUFFIXES
+        if key.endswith(f"_{suffix}")
+    }
+    return used_keys - locale_keys - pluralised
 
 
 def check_unused(
     used_keys: Set[str], locale_keys: Set[str]
 ) -> Set[str]:
-    """Find keys in locale but not used in code."""
-    return locale_keys - used_keys
+    """Find keys in locale but not used in code.
+
+    The mirror of the plural problem in `check_missing`: the code calls the bare
+    key, so `<key>_one` and `<key>_other` never appear as "used" and every
+    pluralised entry would be reported as dead translation. Deleting those on
+    that advice breaks the feature at runtime.
+    """
+    return {
+        key
+        for key in locale_keys - used_keys
+        if not (
+            any(key.endswith(f"_{suffix}") for suffix in PLURAL_SUFFIXES)
+            and key.rsplit("_", 1)[0] in used_keys
+        )
+    }
 
 
 def check_consistency(
