@@ -583,7 +583,7 @@ def main():
                 "permissionDecisionReason": (
                     "Hook: `until ...; do sleep N; done` waiting on a file is a "
                     "wait loop. Use ~/.claude/bin/wait-for-pattern.sh <file> "
-                    "<extended-regex> [timeout-seconds] [poll-seconds] instead — "
+                    "<extended-regex> [timeout-seconds] [poll-seconds] instead: "
                     "it matches Bash(~/.claude/bin/*) and needs no permission "
                     "prompt. The file need not exist yet. Loops waiting on "
                     "anything else (an HTTP status, a container state, a "
