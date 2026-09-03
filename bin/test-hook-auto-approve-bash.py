@@ -693,5 +693,283 @@ check(
     not approved and reason is None,
 )
 
+# --- until+sleep wait loops: deny with a hint pointing at wait-for-pattern.sh ---
+# `until <cond>; do sleep N; done` is a compound command, so permission matching
+# fails on its second segment and it prompts every single time.
+# wait-for-pattern.sh exists for exactly this and matches Bash(~/.claude/bin/*),
+# yet the raw idiom kept being used — so it is enforced here, not documented again.
+#
+# The deny covers ONLY the conditions that wrapper actually handles (waiting for
+# a file to exist, or for a regex to appear in a file). A loop waiting on an HTTP
+# status, a container state or a command's exit status has no wrapper to point
+# at, and a hint naming the wrong one is worse than the prompt it replaces.
+
+check(
+    "until-loop: [ -f FILE ] is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["[", "-f", "/tmp/progress.txt", "]"]),
+)
+
+check(
+    "until-loop: [ -s FILE ] is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["[", "-s", "/tmp/build.log", "]"]),
+)
+
+check(
+    "until-loop: [[ -e FILE ]] is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["[[", "-e", "/tmp/build.log", "]]"]),
+)
+
+check(
+    "until-loop: `test -f FILE` is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["test", "-f", "/tmp/progress.txt"]),
+)
+
+check(
+    "until-loop: grep with a file operand is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["grep", "-qE", "DONE|FAILED", "/tmp/build.log"]),
+)
+
+check(
+    "until-loop: grep with a long flag and a file operand is still one",
+    hook._is_wait_for_pattern_condition(["grep", "--quiet", "READY", "/tmp/build.log"]),
+)
+
+# Conditions with no wrapper to point at must NOT be classified — the loop then
+# keeps falling through to a normal prompt instead of getting a misleading hint.
+check(
+    "until-loop: grep reading stdin (no file operand) is NOT classified",
+    not hook._is_wait_for_pattern_condition(["grep", "-q", "READY"]),
+)
+
+check(
+    "until-loop: an HTTP poll is NOT classified (no wrapper covers it)",
+    not hook._is_wait_for_pattern_condition(["curl", "-sf", "http://localhost:8000/health"]),
+)
+
+check(
+    "until-loop: a container-state poll is NOT classified (different wrapper)",
+    not hook._is_wait_for_pattern_condition(
+        ["docker", "inspect", "--format", "{{.State.Health.Status}}", "my_service"]
+    ),
+)
+
+check(
+    "until-loop: a counter condition is NOT a wait on a file",
+    not hook._is_wait_for_pattern_condition(["[", "$i", "-gt", "5", "]"]),
+)
+
+check(
+    "until-loop: a string-comparison test is NOT a wait on a file",
+    not hook._is_wait_for_pattern_condition(["[", "$state", "=", "ready", "]"]),
+)
+
+# These two are what makes the OPERATOR SET load-bearing. Without them the
+# `len(inner) == 2` guard already rejects every other negative case, so dropping
+# the `in _FILE_TEST_OPERATORS` check entirely still passes — the "an earlier
+# guard swallows the test" trap. Both are two-token tests whose operator asks
+# something other than "does this file exist".
+check(
+    "until-loop: `[ -z VAR ]` is a string test, not a file test",
+    not hook._is_wait_for_pattern_condition(["[", "-z", "$state", "]"]),
+)
+
+check(
+    "until-loop: `[ -d DIR ]` waits on a directory, which the wrapper cannot poll",
+    not hook._is_wait_for_pattern_condition(["[", "-d", "/tmp/outdir", "]"]),
+)
+
+check(
+    "until-loop: an empty condition is NOT classified",
+    not hook._is_wait_for_pattern_condition([]),
+)
+
+# Full-command detection: the loop STRUCTURE (until ... do ... sleep) and the
+# condition must BOTH be present.
+
+check(
+    "until-loop: waiting for a file to appear is detected",
+    hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do sleep 10; done"
+    ),
+)
+
+check(
+    "until-loop: waiting for a regex in a log is detected",
+    hook.command_has_until_sleep_wait_loop(
+        'until grep -qE "DONE|FAILED" /tmp/build.log; do sleep 20; done'
+    ),
+)
+
+check(
+    "until-loop: a trailing command after the loop does not hide it",
+    hook.command_has_until_sleep_wait_loop(
+        'until [ -f /tmp/progress.txt ]; do sleep 10; done; echo "file appeared"'
+    ),
+)
+
+check(
+    "until-loop: a leading command before the loop does not hide it",
+    hook.command_has_until_sleep_wait_loop(
+        "git status && until test -f /tmp/progress.txt; do sleep 5; done"
+    ),
+)
+
+check(
+    "until-loop: extra commands in the loop body do not hide the sleep",
+    hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; sleep 10; done"
+    ),
+)
+
+# --- the negatives that make each half of the check load-bearing ---
+
+# AC: `until` loops without a sleep must not be touched. This is what stops the
+# rule from firing on busy-loops and other non-waiting `until` constructs.
+check(
+    "until-loop: an until loop WITHOUT sleep is not a wait loop",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; done"
+    ),
+)
+
+# AC: conditions no wrapper covers must keep falling through to a prompt.
+check(
+    "until-loop: an HTTP poll loop is NOT matched (no wrapper to point at)",
+    not hook.command_has_until_sleep_wait_loop(
+        "until curl -sf http://localhost:8000/health; do sleep 5; done"
+    ),
+)
+
+check(
+    "until-loop: a container-health poll loop is NOT matched",
+    not hook.command_has_until_sleep_wait_loop(
+        "until docker inspect --format '{{.State.Health.Status}}' my_service; do sleep 5; done"
+    ),
+)
+
+check(
+    "until-loop: a counter loop is NOT matched",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ $i -gt 5 ]; do sleep 1; done"
+    ),
+)
+
+# `while` is a different keyword with inverted semantics: `while [ -f X ]` waits
+# for a file to DISAPPEAR, which wait-for-pattern.sh cannot express at all.
+# The condition here is deliberately one the classifier accepts, so the test
+# pins the KEYWORD check rather than passing on the condition check.
+check(
+    "until-loop: a while loop over the same condition is NOT matched",
+    hook._is_wait_for_pattern_condition(["[", "-f", "/tmp/progress.txt", "]"])
+    and not hook.command_has_until_sleep_wait_loop(
+        "while [ -f /tmp/progress.txt ]; do sleep 10; done"
+    ),
+)
+
+check(
+    "until-loop: a bare sleep is not a wait loop",
+    not hook.command_has_until_sleep_wait_loop("sleep 30"),
+)
+
+# The `done` boundary is load-bearing: a sleep AFTER the loop is not in its
+# body, so the loop is not a wait loop. Without these, the boundary check can
+# be removed and the suite stays green, while the hook starts denying a
+# sleepless loop that AC 3 says must be left alone.
+check(
+    "until-loop: a sleep after `done` is not inside the loop body",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; done; sleep 5"
+    ),
+)
+
+check(
+    "until-loop: a sleep && -chained after `done` is not inside the body either",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; done && sleep 3"
+    ),
+)
+
+# `sleep` must match as a whole token, not as a substring. A body that merely
+# invokes something whose NAME contains "sleep" does not sleep, and denying it
+# would be a false positive on a loop AC 3 says to leave alone.
+check(
+    "until-loop: a command merely named like sleep is not a sleep",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do ./sleep_until_ready.sh; done"
+    ),
+)
+
+# The `do` token is stripped before scanning, so a body whose only content is
+# the keyword itself is not mistaken for one that sleeps.
+check(
+    "until-loop: env-prefixed condition is still classified",
+    hook.command_has_until_sleep_wait_loop(
+        "until FOO=bar [ -f /tmp/progress.txt ]; do sleep 1; done"
+    ),
+)
+
+check(
+    "until-loop: the word 'until' inside a quoted string is not a loop",
+    not hook.command_has_until_sleep_wait_loop(
+        'echo "wait until the file exists"; sleep 5'
+    ),
+)
+
+# Fail open, never raise: unparseable input must fall through to the prompt.
+check(
+    "until-loop: unparseable input returns False instead of raising",
+    not hook.command_has_until_sleep_wait_loop("until [ -f 'unterminated"),
+)
+
+# End-to-end through the hook: deny, with a hint naming the wrapper AND the
+# argument form to call it with (an alternative you have to go look up is not
+# actionable at the moment the command is blocked).
+approved, reason, rc = run_hook("until [ -f /tmp/progress.txt ]; do sleep 10; done")
+check("until-loop: hook does not approve it", not approved)
+check(
+    "until-loop: hook denies naming wait-for-pattern.sh",
+    reason is not None and "wait-for-pattern.sh" in reason,
+)
+check(
+    "until-loop: the hint spells out the argument form",
+    reason is not None and "<file>" in reason and "<extended-regex>" in reason,
+)
+check("until-loop: hook still exits 0", rc == 0)
+
+approved, reason, _ = run_hook(
+    'until grep -qE "DONE|FAILED" /tmp/build.log; do sleep 20; done'
+)
+check("until-loop: the grep form is denied too", not approved and reason is not None)
+
+# A wait loop anywhere in a chain denies the whole command, exactly like the
+# sed and inline-python rules above.
+approved, reason, _ = run_hook(
+    'git status && until [ -f /tmp/progress.txt ]; do sleep 10; done'
+)
+check("until-loop: denied inside a chain", not approved and reason is not None)
+
+# Loops the wrapper cannot replace must fall through to a normal prompt: no
+# deny (which would block legitimate work) and no allow.
+approved, reason, _ = run_hook("until curl -sf http://localhost:8000/health; do sleep 5; done")
+check(
+    "until-loop: an HTTP poll falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
+approved, reason, _ = run_hook(
+    "until docker inspect --format '{{.State.Health.Status}}' my_service; do sleep 5; done"
+)
+check(
+    "until-loop: a container poll falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
+# Unrelated commands keep their existing behaviour.
+approved, reason, _ = run_hook("git status && sleep 5")
+check(
+    "until-loop: an allowed command containing sleep is still approved",
+    approved,
+)
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

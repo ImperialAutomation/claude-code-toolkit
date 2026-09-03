@@ -363,6 +363,104 @@ def command_has_python_file_read(command):
     return bool(_PYTHON_READ_RE.search(command))
 
 
+# --- until+sleep wait loops ---------------------------------------------------
+# `until <cond>; do sleep N; done` is a compound command, so permission matching
+# fails on its second segment and it prompts on every call. wait-for-pattern.sh
+# exists for exactly this shape and matches Bash(~/.claude/bin/*).
+#
+# The deny below covers ONLY the conditions that wrapper actually handles:
+# waiting for a file to exist, or for a regex to appear in a file. A loop
+# polling an HTTP status, a container state or a command's exit status has no
+# wrapper to point at, so it is left alone — a hint naming the wrong tool sends
+# the reader down a dead end, which is worse than the prompt it replaces.
+
+# test/[ operators that ask "does this file exist / is it non-empty yet".
+_FILE_TEST_OPERATORS = {"-f", "-e", "-s", "-r"}
+
+
+def _is_file_existence_test(tokens):
+    """True for `[ -f FILE ]`, `[[ -s FILE ]]`, `test -e FILE` and friends.
+
+    Requires a literal path operand: `[ -f "$var" ]` still matches structurally,
+    which is fine — the wrapper takes a path either way.
+    """
+    if not tokens:
+        return False
+
+    if tokens[0] in ("[", "[["):
+        inner = tokens[1:-1] if tokens[-1] in ("]", "]]") else tokens[1:]
+    elif tokens[0] == "test":
+        inner = tokens[1:]
+    else:
+        return False
+
+    return len(inner) == 2 and inner[0] in _FILE_TEST_OPERATORS
+
+
+def _is_grep_on_file(tokens):
+    """True for `grep [flags] PATTERN FILE` — grep used to wait for a regex to
+    appear in a file.
+
+    A grep reading stdin (no file operand) is NOT matched: there is no file for
+    wait-for-pattern.sh to poll, so the wrapper cannot replace it.
+    """
+    if not tokens or tokens[0] != "grep":
+        return False
+
+    operands = [t for t in tokens[1:] if not t.startswith("-")]
+    # Need both a pattern and at least one file operand.
+    return len(operands) >= 2
+
+
+def _is_wait_for_pattern_condition(condition_tokens):
+    """True if an until-loop condition is one wait-for-pattern.sh can replace."""
+    tokens = strip_env_prefix(condition_tokens)
+    return _is_file_existence_test(tokens) or _is_grep_on_file(tokens)
+
+
+def _loop_body_sleeps(segments, start):
+    """True if the loop body starting at `segments[start]` calls sleep.
+
+    The body is every segment from the one opening with `do` up to the `done`
+    that closes the loop. `sleep` is what identifies the construct as a WAIT
+    loop rather than a counter or a busy loop, so a body without it is not
+    matched at all.
+    """
+    for index in range(start, len(segments)):
+        tokens = segments[index]
+        # The body's first segment carries `do` as its leading token
+        # (`; do sleep 10` tokenizes as ["do", "sleep", "10"]).
+        body = tokens[1:] if index == start and tokens[:1] == ["do"] else tokens
+        if "done" in body or body[:1] == ["done"]:
+            return False
+        if "sleep" in body:
+            return True
+    return False
+
+
+def command_has_until_sleep_wait_loop(command):
+    """True if `command` contains `until <file-condition>; do ... sleep N ...; done`.
+
+    Both halves must hold: the loop structure (an `until` whose body sleeps) AND
+    a condition wait-for-pattern.sh can actually replace. Never raises — on
+    unparseable input the caller falls through to the normal prompt.
+    """
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    for index, tokens in enumerate(segments):
+        if tokens[:1] != ["until"]:
+            continue
+        if not _is_wait_for_pattern_condition(tokens[1:]):
+            continue
+        if _loop_body_sleeps(segments, index + 1):
+            return True
+
+    return False
+
+
 def is_segment_safe(segment_tokens):
     """A segment is safe if, after stripping cd/env prefixes, its first
     token is on ALLOWLIST or a ~/.claude/bin/ script — with no command
@@ -471,6 +569,25 @@ def main():
                     "modify — they are allowlisted and need no permission "
                     "prompt. Python for calculation or data transformation "
                     "with no file access stays fine."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
+    if command_has_until_sleep_wait_loop(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: `until ...; do sleep N; done` waiting on a file is a "
+                    "wait loop. Use ~/.claude/bin/wait-for-pattern.sh <file> "
+                    "<extended-regex> [timeout-seconds] [poll-seconds] instead: "
+                    "it matches Bash(~/.claude/bin/*) and needs no permission "
+                    "prompt. The file need not exist yet. Loops waiting on "
+                    "anything else (an HTTP status, a container state, a "
+                    "command's exit status) are not affected by this rule."
                 ),
             }
         }

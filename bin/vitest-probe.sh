@@ -15,7 +15,7 @@
 #   relative-test-path...  one or more test paths, relative to vitest-root
 #
 # Example:
-#   vitest-probe.sh 60 /tmp/vitest-out ~/Projects/PAM/frontend \
+#   vitest-probe.sh 60 /tmp/vitest-out ~/Projects/my-project/frontend \
 #     src/components/Foo.test.ts src/lib/bar.test.ts
 #
 # Exit codes per path (recorded in summary): 0=PASS, 124/137=HANG/TIMEOUT,

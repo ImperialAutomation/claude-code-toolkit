@@ -15,7 +15,7 @@
 # Exits non-zero if any shellcheck run or any test fails.
 #
 # Example (project wrapper):
-#   exec ~/.claude/bin/shell-check.sh "$HOME/Projects/PAM" backend/docker/lib
+#   exec ~/.claude/bin/shell-check.sh "$HOME/Projects/my-project" backend/docker/lib
 set -u
 
 ROOT="${1:?repo root required (absolute path)}"

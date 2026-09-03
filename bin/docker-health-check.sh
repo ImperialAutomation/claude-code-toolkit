@@ -6,7 +6,7 @@ set -euo pipefail
 # Complements docker-audit.sh (which does static config analysis).
 #
 # Usage: docker-health-check.sh [project-dir] [--timeout SECS] [--filter PREFIX]
-# Example: docker-health-check.sh /path/to/project --filter pam_ --timeout 300
+# Example: docker-health-check.sh /path/to/project --filter myapp_ --timeout 300
 
 PROJECT_DIR=""
 TIMEOUT=120

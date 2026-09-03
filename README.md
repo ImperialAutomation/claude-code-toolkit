@@ -171,7 +171,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
-| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes); rejects command substitution and heredocs |
+| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, DROP TABLE, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
@@ -291,6 +291,16 @@ This is a copy (not symlink) because Claude Code writes to it when you approve p
 The global settings include three `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, and leading `VAR=value` env prefixes, then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
+
+   The same hook also **denies** three shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
+
+   | Denied | Use instead |
+   |---|---|
+   | `sed -n 'X,Yp' <file>` | the Read tool with offset/limit |
+   | inline Python (`-c` or a heredoc) that opens a file for reading | Read, Grep, or Edit |
+   | `until <file-condition>; do sleep N; done` | `wait-for-pattern.sh <file> <extended-regex> [timeout] [poll]` |
+
+   Each deny is deliberately narrow, so that work with no wrapper to point at keeps falling through to a normal prompt rather than being blocked: a real `sed` stream edit, Python doing calculation or writing a file, and wait loops polling anything other than a file (an HTTP status, a container state, a command's exit status) are all left alone. `while` loops are not matched either: `while [ -f X ]` waits for a file to *disappear*, which `wait-for-pattern.sh` cannot express.
 
 2. **`hook-block-destructive.sh`** — Blocks destructive patterns: `rm -rf /`, `git push --force`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `git clean -f`, `dd if=... of=/dev/`, and more. When blocked, Claude sees the reason and adjusts its approach.
 
