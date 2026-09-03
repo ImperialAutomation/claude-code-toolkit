@@ -101,6 +101,9 @@
   //   && chains, for loops) that permission matching would block.
   // block-destructive: catches dangerous patterns (force push,
   //   rm -rf, DROP TABLE, etc.). Exit code 2 = block.
+  // block-foreign-worktree-git: blocks git checkout/restore/reset/clean/stash
+  //   aimed via -C at a sibling worktree of the same repo, where it would
+  //   silently discard another session's uncommitted work.
   "hooks": {
     "PreToolUse": [
       {
@@ -113,6 +116,10 @@
           {
             "type": "command",
             "command": "~/.claude/bin/hook-block-destructive.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-block-foreign-worktree-git.sh"
           }
         ]
       }
