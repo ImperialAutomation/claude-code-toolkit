@@ -84,6 +84,37 @@ def is_key_shaped(candidate: str) -> bool:
     return bool(KEY_SHAPE_PATTERN.match(candidate))
 
 
+def extract_static_prefix(pattern: str) -> Optional[str]:
+    """The literal namespace a dynamic key reaches, or None if there is none.
+
+    `admin.users.roles.${role}` resolves at runtime to some key under
+    `admin.users.roles.`, so the prefix is everything up to the first `${`.
+    Anything after it is unknowable and discarded, including further segments.
+
+    Returns None when the prefix would not name a namespace: a pattern starting
+    with the interpolation has no static part, and one whose interpolation does
+    not follow a dot (`errorCode${code}`) interpolates inside a segment rather
+    than choosing between segments. Both would otherwise yield a prefix that
+    matches far more keys than the call site can actually reach.
+    """
+    static = pattern.split("${", 1)[0]
+    if ":" in static:
+        static = static.split(":", 1)[1]
+    if not static.endswith("."):
+        return None
+    return static
+
+
+def dynamic_prefixes(dynamic_keys: List[Tuple[str, str, int]]) -> Set[str]:
+    """The set of static prefixes over all detected dynamic call sites."""
+    prefixes = set()
+    for pattern, _filepath, _lineno in dynamic_keys:
+        prefix = extract_static_prefix(pattern)
+        if prefix:
+            prefixes.add(prefix)
+    return prefixes
+
+
 @dataclass
 class ScanResult:
     """What a source scan found.
@@ -347,6 +378,25 @@ def check_unused(
     }
 
 
+def split_undeterminable(
+    unused: Set[str], prefixes: Set[str]
+) -> Tuple[Set[str], Set[str]]:
+    """Split unused keys into genuinely dead ones and unresolvable ones.
+
+    A key under a prefix the code interpolates into is reachable at runtime; the
+    audit simply cannot say from which call. Reporting it alongside dead keys is
+    what makes the unused list unsafe to act on, so it becomes its own bucket.
+
+    Prefixes end in a dot, so matching is on the segment boundary: the
+    `admin.users.` prefix covers `admin.users.roles.owner` but not the unrelated
+    sibling `admin.usersOverview`.
+    """
+    undeterminable = {
+        key for key in unused if any(key.startswith(prefix) for prefix in prefixes)
+    }
+    return unused - undeterminable, undeterminable
+
+
 def check_consistency(
     locales: Dict[str, Dict[str, str]], reference: str
 ) -> Dict[str, Set[str]]:
@@ -360,6 +410,16 @@ def check_consistency(
         if missing:
             result[name] = missing
     return result
+
+
+def _covering_prefix(key: str, prefixes: Set[str]) -> Optional[str]:
+    """The dynamic prefix that makes this key unresolvable.
+
+    Longest match wins, so a key under both `admin.` and `admin.users.` is
+    attributed to the call site that actually reaches it.
+    """
+    matches = [prefix for prefix in prefixes if key.startswith(prefix)]
+    return max(matches, key=len) if matches else None
 
 
 def group_by_prefix(keys: Set[str]) -> Dict[str, List[str]]:
@@ -377,13 +437,20 @@ def format_plain_text(
     config: dict,
     missing: Set[str],
     unused: Set[str],
+    undeterminable: Set[str],
     consistency: Dict[str, Set[str]],
     key_locations: Dict[str, List[Tuple[str, int]]],
     dynamic_keys: List[Tuple[str, str, int]],
     checks: List[str],
     project_root: str,
+    dynamic_limit: int = 0,
 ) -> str:
-    """Format results as plain text."""
+    """Format results as plain text.
+
+    `dynamic_limit` caps the dynamic-key listing; 0 shows all of them. Truncating
+    by default would leave the reader unable to check by hand which prefixes
+    caused keys to be filtered out of the unused list.
+    """
     lines = []
     lines.append("i18n Audit Report")
     lines.append("=" * 50)
@@ -422,6 +489,15 @@ def format_plain_text(
 
     if "unused" in checks or "all" in checks:
         lines.append(f"── Unused Keys ({len(unused)}) " + "─" * 30)
+        if dynamic_keys:
+            lines.append(
+                f"WARNING: {len(dynamic_keys)} dynamic key(s) detected — this list "
+                "cannot be fully reliable."
+            )
+            lines.append(
+                "         Verify a key is truly dead before deleting it."
+            )
+            lines.append("")
         if unused:
             lines.append("Keys in reference locale but not found in source code:")
             lines.append("")
@@ -429,12 +505,30 @@ def format_plain_text(
                 lines.append(f"  {prefix}:")
                 for key in keys:
                     lines.append(f"    {key}")
-            if dynamic_keys:
-                lines.append("")
-                lines.append(f"  Note: {len(dynamic_keys)} dynamic key(s) detected (cannot verify statically)")
             total_issues += len(unused)
         else:
             lines.append("  No unused keys found.")
+        lines.append("")
+
+        lines.append(f"── Undeterminable Keys ({len(undeterminable)}) " + "─" * 20)
+        if undeterminable:
+            lines.append(
+                "Unreferenced keys that a dynamic call site can still reach. "
+                "Not dead — not counted as issues."
+            )
+            lines.append("")
+            prefixes = dynamic_prefixes(dynamic_keys)
+            counts: Dict[str, int] = {}
+            for key in undeterminable:
+                covering = _covering_prefix(key, prefixes)
+                if covering:
+                    counts[covering] = counts.get(covering, 0) + 1
+            for prefix in sorted(counts):
+                lines.append(f"  {prefix}*  ({counts[prefix]} key(s))")
+            lines.append("")
+            lines.append("  Use --json for the full key list.")
+        else:
+            lines.append("  None.")
         lines.append("")
 
     if "consistency" in checks or "all" in checks:
@@ -461,11 +555,12 @@ def format_plain_text(
         lines.append(f"── Dynamic Keys ({len(dynamic_keys)}) " + "─" * 27)
         lines.append("Keys using template literals (cannot audit statically):")
         lines.append("")
-        for pattern, filepath, lineno in dynamic_keys[:10]:
+        shown = dynamic_keys if dynamic_limit <= 0 else dynamic_keys[:dynamic_limit]
+        for pattern, filepath, lineno in shown:
             rel_path = os.path.relpath(filepath, project_root)
             lines.append(f"  `{pattern}`  {rel_path}:{lineno}")
-        if len(dynamic_keys) > 10:
-            lines.append(f"  ... and {len(dynamic_keys) - 10} more")
+        if len(shown) < len(dynamic_keys):
+            lines.append(f"  ... and {len(dynamic_keys) - len(shown)} more")
         lines.append("")
 
     lines.append("── Summary " + "─" * 39)
@@ -474,6 +569,7 @@ def format_plain_text(
         parts.append(f"Missing: {len(missing)}")
     if "unused" in checks or "all" in checks:
         parts.append(f"Unused: {len(unused)}")
+        parts.append(f"Undeterminable: {len(undeterminable)}")
     if "consistency" in checks or "all" in checks:
         consistency_total = sum(len(v) for v in consistency.values())
         parts.append(f"Inconsistent: {consistency_total}")
@@ -491,6 +587,7 @@ def format_json_output(
     config: dict,
     missing: Set[str],
     unused: Set[str],
+    undeterminable: Set[str],
     consistency: Dict[str, Set[str]],
     key_locations: Dict[str, List[Tuple[str, int]]],
     dynamic_keys: List[Tuple[str, str, int]],
@@ -514,6 +611,10 @@ def format_json_output(
 
     if "unused" in checks or "all" in checks:
         result["unused"] = [{"key": key} for key in sorted(unused)]
+        result["undeterminable"] = [
+            {"key": key, "prefix": _covering_prefix(key, dynamic_prefixes(dynamic_keys))}
+            for key in sorted(undeterminable)
+        ]
 
     if "consistency" in checks or "all" in checks:
         result["consistency"] = {
@@ -544,6 +645,9 @@ def format_json_output(
             sum(len(v) for v in consistency.values())
             if ("consistency" in checks or "all" in checks)
             else None
+        ),
+        "undeterminableCount": (
+            len(undeterminable) if ("unused" in checks or "all" in checks) else None
         ),
         "dynamicKeyCount": len(dynamic_keys),
         "totalIssues": total_issues,
@@ -616,6 +720,14 @@ Examples:
     parser.add_argument(
         "--exclude-dirs",
         help="Comma-separated directories to skip (added to defaults)",
+    )
+    parser.add_argument(
+        "--dynamic-limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Max dynamic keys to list in the text report (default: 0 = all). "
+             "Ignored with --json, which is always complete.",
     )
     parser.add_argument(
         "--json",
@@ -727,6 +839,11 @@ Examples:
         else {}
     )
 
+    # Dynamic call sites are collected regardless of --check, so the unused list
+    # is filtered the same way whichever checks are requested.
+    prefixes = dynamic_prefixes(dynamic_keys)
+    unused, undeterminable = split_undeterminable(unused, prefixes)
+
     # Build config info
     rel_locale_dir = os.path.relpath(locale_dir, project_root)
     rel_source_dir = os.path.relpath(source_dir, project_root)
@@ -744,13 +861,14 @@ Examples:
     # Output
     if args.json_output:
         print(format_json_output(
-            config, missing, unused, consistency,
+            config, missing, unused, undeterminable, consistency,
             key_locations, dynamic_keys, checks, str(project_root),
         ))
     else:
         print(format_plain_text(
-            config, missing, unused, consistency,
+            config, missing, unused, undeterminable, consistency,
             key_locations, dynamic_keys, checks, str(project_root),
+            args.dynamic_limit,
         ))
 
     # Exit code

@@ -133,7 +133,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `i18n-audit.py` | `i18n-audit.py [project-dir]` | Audit i18n translation keys (missing, unused, cross-locale) |
+| `i18n-audit.py` | `i18n-audit.py [project-dir]` | Audit i18n translation keys (missing, unused, undeterminable, cross-locale) |
 | `env-audit.sh` | `env-audit.sh [project-dir]` | Audit .env vs .env.example sync, empty values, secrets in git |
 | `deps-audit.sh` | `deps-audit.sh [project-dir]` | Audit npm/pip dependencies for known vulnerabilities |
 | `docker-audit.sh` | `docker-audit.sh [project-dir]` | Audit Docker config (unpinned images, health checks, secrets) |
