@@ -165,6 +165,47 @@ check(
 )
 
 
+# --- split_undeterminable: unused keys a dynamic call site could reach ---
+#
+# The audit already knows `admin.users.roles.${role}` exists. Every key under
+# that prefix is reachable at runtime, so listing it as unused hands the reader
+# a cleanup list that deletes working translations.
+
+unused, undeterminable = audit.split_undeterminable(
+    {
+        "admin.users.roles.moderator",
+        "admin.users.roles.owner",
+        "admin.users.deletedColumnHeader",
+        "profile.types.solo",
+    },
+    {"admin.users.roles.", "profile.types."},
+)
+
+check(
+    "keys under a detected prefix move to undeterminable",
+    undeterminable
+    == {"admin.users.roles.moderator", "admin.users.roles.owner", "profile.types.solo"},
+)
+
+check(
+    "a key outside every prefix stays unused",
+    unused == {"admin.users.deletedColumnHeader"},
+)
+
+check(
+    "no prefixes leaves the unused set untouched",
+    audit.split_undeterminable({"a.b", "c.d"}, set()) == ({"a.b", "c.d"}, set()),
+)
+
+# The prefix ends in a dot, so `admin.usersOverview` must not be swallowed by
+# the `admin.users.` prefix through a plain startswith on a dotless boundary.
+check(
+    "a sibling key sharing a text prefix is not swallowed",
+    audit.split_undeterminable({"admin.usersOverview"}, {"admin.users."})
+    == ({"admin.usersOverview"}, set()),
+)
+
+
 # --- summary ---
 
 print()

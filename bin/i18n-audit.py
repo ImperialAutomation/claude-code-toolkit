@@ -378,6 +378,25 @@ def check_unused(
     }
 
 
+def split_undeterminable(
+    unused: Set[str], prefixes: Set[str]
+) -> Tuple[Set[str], Set[str]]:
+    """Split unused keys into genuinely dead ones and unresolvable ones.
+
+    A key under a prefix the code interpolates into is reachable at runtime; the
+    audit simply cannot say from which call. Reporting it alongside dead keys is
+    what makes the unused list unsafe to act on, so it becomes its own bucket.
+
+    Prefixes end in a dot, so matching is on the segment boundary: the
+    `admin.users.` prefix covers `admin.users.roles.owner` but not the unrelated
+    sibling `admin.usersOverview`.
+    """
+    undeterminable = {
+        key for key in unused if any(key.startswith(prefix) for prefix in prefixes)
+    }
+    return unused - undeterminable, undeterminable
+
+
 def check_consistency(
     locales: Dict[str, Dict[str, str]], reference: str
 ) -> Dict[str, Set[str]]:
@@ -757,6 +776,11 @@ Examples:
         if args.check in ("consistency", "all")
         else {}
     )
+
+    # Dynamic call sites are collected regardless of --check, so the unused list
+    # is filtered the same way whichever checks are requested.
+    prefixes = dynamic_prefixes(dynamic_keys)
+    unused, undeterminable = split_undeterminable(unused, prefixes)
 
     # Build config info
     rel_locale_dir = os.path.relpath(locale_dir, project_root)
