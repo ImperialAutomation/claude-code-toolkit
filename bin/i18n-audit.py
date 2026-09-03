@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -62,6 +63,40 @@ TRANSLATION_PATTERNS = [
 
 # Pattern to detect dynamic/template literal keys (not auditable)
 DYNAMIC_KEY_PATTERN = re.compile(r'''(?:(?:^|[\s,({=!?:;&|+\[<])t|i18n\.t|\$t)\(\s*`([^`]*\$\{[^`]*)`''')
+
+# Any quoted string in the source. Candidates are filtered by is_key_shaped()
+# before they count — this is deliberately broad, because keys reach t() through
+# indirection as often as they are passed to it directly.
+STRING_LITERAL_PATTERN = re.compile(r'''['"]([^'"\n]+)['"]''')
+
+# Keys look like dotted identifiers: at least two segments of word characters.
+# Rejects paths ("./utils/x"), sentences, CSS classes and version strings.
+KEY_SHAPE_PATTERN = re.compile(r'^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$')
+
+
+def is_key_shaped(candidate: str) -> bool:
+    """Whether a string could be a translation key.
+
+    Shape alone, no locale lookup: the caller intersects with the locale file,
+    so a false positive here can only ever suppress an unused-key report for a
+    key that literally occurs in the source — which is the intended behaviour.
+    """
+    return bool(KEY_SHAPE_PATTERN.match(candidate))
+
+
+@dataclass
+class ScanResult:
+    """What a source scan found.
+
+    `key_locations` holds keys passed to a translation function — strong
+    evidence, safe to drive the missing-key check. `literal_keys` holds bare
+    key-shaped strings found anywhere — weak evidence of use, strong evidence
+    of NOT being dead, so it feeds only the unused check.
+    """
+
+    key_locations: Dict[str, List[Tuple[str, int]]] = field(default_factory=dict)
+    literal_keys: Set[str] = field(default_factory=set)
+    dynamic_keys: List[Tuple[str, str, int]] = field(default_factory=list)
 
 
 def flatten_json(obj: dict, prefix: str = "") -> Dict[str, str]:
@@ -198,15 +233,11 @@ def scan_source_files(
     extensions: List[str],
     exclude_dirs: Set[str],
     exclude_file_patterns: Set[str],
-) -> Tuple[Dict[str, List[Tuple[str, int]]], List[Tuple[str, str, int]]]:
-    """Scan source files for translation key usage.
-
-    Returns:
-        - key_locations: {key: [(filepath, line_number), ...]}
-        - dynamic_keys: [(pattern, filepath, line_number), ...]
-    """
-    key_locations: Dict[str, List[Tuple[str, int]]] = {}
-    dynamic_keys: List[Tuple[str, str, int]] = []
+) -> ScanResult:
+    """Scan source files for translation key usage."""
+    result = ScanResult()
+    key_locations = result.key_locations
+    dynamic_keys = result.dynamic_keys
 
     for root, dirs, files in os.walk(source_dir):
         # Prune excluded directories
@@ -233,6 +264,14 @@ def scan_source_files(
                 for match in DYNAMIC_KEY_PATTERN.finditer(line):
                     dynamic_keys.append((match.group(1), filepath, lineno))
 
+                # Any key-shaped string literal, wherever it sits. Covers the
+                # labelKey/titleKey/messageKey indirection where the key is
+                # stored in a config object and resolved by t() elsewhere.
+                for match in STRING_LITERAL_PATTERN.finditer(line):
+                    candidate = match.group(1)
+                    if is_key_shaped(candidate):
+                        result.literal_keys.add(candidate)
+
                 # Check for static keys
                 for pattern in TRANSLATION_PATTERNS:
                     for match in pattern.finditer(line):
@@ -247,16 +286,14 @@ def scan_source_files(
                         # - Must contain at least one dot
                         # - Must not contain spaces (real keys use camelCase/dots)
                         # - Must match dotted identifier pattern
-                        if "." not in key or " " in key:
-                            continue
-                        if not re.match(r'^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$', key):
+                        if not is_key_shaped(key):
                             continue
 
                         if key not in key_locations:
                             key_locations[key] = []
                         key_locations[key].append((filepath, lineno))
 
-    return key_locations, dynamic_keys
+    return result
 
 
 # CLDR plural categories, as i18next suffixes them. A key with a `count`
@@ -286,21 +323,26 @@ def check_missing(
 
 
 def check_unused(
-    used_keys: Set[str], locale_keys: Set[str]
+    used_keys: Set[str], locale_keys: Set[str], literal_keys: Set[str]
 ) -> Set[str]:
     """Find keys in locale but not used in code.
 
-    The mirror of the plural problem in `check_missing`: the code calls the bare
-    key, so `<key>_one` and `<key>_other` never appear as "used" and every
-    pluralised entry would be reported as dead translation. Deleting those on
-    that advice breaks the feature at runtime.
+    `literal_keys` are key-shaped strings found anywhere in the source, not just
+    inside a t() call. A key that occurs literally in the code cannot be dead —
+    it reaches t() through a config object, a route table or a props chain — so
+    reporting it as unused invites deleting a working translation.
+
+    The plural handling mirrors `check_missing`: the code calls the bare key, so
+    `<key>_one` and `<key>_other` never appear as "used" and every pluralised
+    entry would be reported as dead translation.
     """
+    referenced = used_keys | literal_keys
     return {
         key
-        for key in locale_keys - used_keys
+        for key in locale_keys - referenced
         if not (
             any(key.endswith(f"_{suffix}") for suffix in PLURAL_SUFFIXES)
-            and key.rsplit("_", 1)[0] in used_keys
+            and key.rsplit("_", 1)[0] in referenced
         )
     }
 
@@ -658,9 +700,11 @@ Examples:
     exclude_file_patterns = set(DEFAULT_EXCLUDE_FILE_PATTERNS)
 
     # Scan source files
-    key_locations, dynamic_keys = scan_source_files(
+    scan = scan_source_files(
         source_dir, extensions, exclude_dirs, exclude_file_patterns
     )
+    key_locations = scan.key_locations
+    dynamic_keys = scan.dynamic_keys
     used_keys = set(key_locations.keys())
     ref_keys = set(locales[reference].keys())
 
@@ -672,7 +716,11 @@ Examples:
     # Run checks
     checks = [args.check]
     missing = check_missing(used_keys, ref_keys) if args.check in ("missing", "all") else set()
-    unused = check_unused(used_keys, ref_keys) if args.check in ("unused", "all") else set()
+    unused = (
+        check_unused(used_keys, ref_keys, scan.literal_keys)
+        if args.check in ("unused", "all")
+        else set()
+    )
     consistency = (
         check_consistency(locales, reference)
         if args.check in ("consistency", "all")
