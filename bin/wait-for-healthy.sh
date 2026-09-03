@@ -5,7 +5,7 @@
 # permission allowlist. Matches Bash(~/.claude/bin/*).
 #
 # Usage: wait-for-healthy.sh <container> [--timeout SECS] [--interval SECS]
-# Example: wait-for-healthy.sh pam_api --timeout 60
+# Example: wait-for-healthy.sh my_service --timeout 60
 #
 # Exit codes:
 #   0  container reached "healthy"
