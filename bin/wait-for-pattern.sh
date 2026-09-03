@@ -3,8 +3,8 @@
 #
 # Replaces the `until grep -qE "..." <file>; do sleep N; done` idiom. That form
 # is a compound command, so permission matching fails on its second segment and
-# it prompts every time (measured: 85 calls across 15 sessions in one project).
-# This wrapper matches Bash(~/.claude/bin/*) and runs prompt-free.
+# it prompts every time. This wrapper matches Bash(~/.claude/bin/*) and runs
+# prompt-free. hook-auto-approve-bash.py denies the raw idiom and points here.
 #
 # Typical use: waiting on a background agent's progress file, a build log, or
 # any other file that a separate process appends to.
