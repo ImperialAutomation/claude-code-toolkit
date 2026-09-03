@@ -173,6 +173,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
 | `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes); rejects command substitution and heredocs |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, DROP TABLE, etc.) |
+| `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
 
 All scripts are already allowed in the global settings (`~/.claude/settings.json`) installed by the toolkit.
@@ -222,6 +223,8 @@ claude-code-toolkit/
 │   ├── hook-auto-approve-bash.py  ← real implementation: shlex-tokenized compound-command approval
 │   ├── test-hook-auto-approve-bash.py ← standalone tests for the above
 │   ├── hook-block-destructive.sh  ← PreToolUse hook: block destructive commands
+│   ├── hook-block-foreign-worktree-git.sh ← PreToolUse hook: block cross-worktree git destruction
+│   ├── test-hook-block-foreign-worktree-git.sh ← standalone tests for the above
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
 │   └── test-permission-friction.py ← standalone tests for the above
@@ -285,11 +288,13 @@ This is a copy (not symlink) because Claude Code writes to it when you approve p
 
 ### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
 
-The global settings include two `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
+The global settings include three `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, and leading `VAR=value` env prefixes, then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
 2. **`hook-block-destructive.sh`** — Blocks destructive patterns: `rm -rf /`, `git push --force`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `git clean -f`, `dd if=... of=/dev/`, and more. When blocked, Claude sees the reason and adjusts its approach.
+
+3. **`hook-block-foreign-worktree-git.sh`** — Blocks a destructive git command (`checkout --`, `checkout -f`, `restore`, `reset`, `clean`, `stash`) that targets a *different* worktree via `-C`/`--git-dir`. Linked worktrees share one repository but hold independent uncommitted work, so restoring a sibling tree to HEAD silently destroys whatever another session was editing there. Only cross-worktree operations are blocked: inside your own tree these commands stay untouched, and unrelated checkouts (a different `.git`) are left alone. Read-only `git stash list`/`show` pass through. Set `WORKTREE_GUARD_HINT` from a small project wrapper to append a repo-specific alternative (e.g. an isolated test runner) to the block message.
 
 To use bypass-permissions mode with these safety nets:
 
