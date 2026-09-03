@@ -60,6 +60,12 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 # Only look at git commands carrying an explicit -C/--git-dir target. Without one
 # git acts on the current directory, which by definition is the caller's own tree
 # and therefore out of scope.
+#
+# This is also the escape hatch. Working in another worktree the normal way --
+# `cd <wt> && git reset --hard` -- carries no -C and so never gets here. Only the
+# redundant `cd <wt> && git -C <wt> ...`, where the -C repeats the cd, is judged
+# against this process's working directory and blocked. Rewriting it the natural
+# way is the fix; the hook errs toward over-blocking, never under-blocking.
 echo "$COMMAND" | grep -qE '(^|[;&|]|\s)git\s' || exit 0
 echo "$COMMAND" | grep -qE -- '-C[= ]|--git-dir[= ]' || exit 0
 

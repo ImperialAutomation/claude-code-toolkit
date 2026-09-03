@@ -63,6 +63,10 @@ check 0 "stash show is read-only"               "git -C $BASE/wt stash show"
 # Allowed: out of scope.
 check 0 "same tree via explicit -C"             "git -C $BASE/main checkout -- f.txt"
 check 0 "no -C target at all"                   "git checkout -- f.txt"
+# The natural way to work in another worktree: cd there, then run plain git.
+# No -C, so it never reaches the scope check — this is the spelling that keeps
+# working when the redundant `cd <wt> && git -C <wt> ...` form gets blocked.
+check 0 "cd into worktree, then plain git"      "cd $BASE/wt && git reset --hard"
 check 0 "unrelated repository"                  "git -C $BASE/unrelated reset --hard"
 check 0 "non-destructive verb"                  "git -C $BASE/wt status"
 check 0 "not a git command"                     "ls -la"
