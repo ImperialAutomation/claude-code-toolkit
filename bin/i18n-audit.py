@@ -84,6 +84,37 @@ def is_key_shaped(candidate: str) -> bool:
     return bool(KEY_SHAPE_PATTERN.match(candidate))
 
 
+def extract_static_prefix(pattern: str) -> Optional[str]:
+    """The literal namespace a dynamic key reaches, or None if there is none.
+
+    `admin.users.roles.${role}` resolves at runtime to some key under
+    `admin.users.roles.`, so the prefix is everything up to the first `${`.
+    Anything after it is unknowable and discarded, including further segments.
+
+    Returns None when the prefix would not name a namespace: a pattern starting
+    with the interpolation has no static part, and one whose interpolation does
+    not follow a dot (`errorCode${code}`) interpolates inside a segment rather
+    than choosing between segments. Both would otherwise yield a prefix that
+    matches far more keys than the call site can actually reach.
+    """
+    static = pattern.split("${", 1)[0]
+    if ":" in static:
+        static = static.split(":", 1)[1]
+    if not static.endswith("."):
+        return None
+    return static
+
+
+def dynamic_prefixes(dynamic_keys: List[Tuple[str, str, int]]) -> Set[str]:
+    """The set of static prefixes over all detected dynamic call sites."""
+    prefixes = set()
+    for pattern, _filepath, _lineno in dynamic_keys:
+        prefix = extract_static_prefix(pattern)
+        if prefix:
+            prefixes.add(prefix)
+    return prefixes
+
+
 @dataclass
 class ScanResult:
     """What a source scan found.

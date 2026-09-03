@@ -106,6 +106,65 @@ check(
 )
 
 
+# --- extract_static_prefix: the part of a dynamic key that IS knowable ---
+#
+# `t(`admin.users.roles.${role}`)` cannot be resolved statically, but everything
+# before the first `${` is a literal namespace. That prefix is what tells us
+# which locale keys the call reaches.
+
+check(
+    "static prefix is everything before the first interpolation",
+    audit.extract_static_prefix("admin.users.roles.${role}")
+    == "admin.users.roles.",
+)
+
+check(
+    "trailing segment after the interpolation is ignored",
+    audit.extract_static_prefix("profile.types.${type}.label") == "profile.types.",
+)
+
+check(
+    "i18next namespace prefix is stripped like elsewhere",
+    audit.extract_static_prefix("common:admin.users.roles.${role}")
+    == "admin.users.roles.",
+)
+
+# A pattern that interpolates from the very start has no static part at all.
+# Returning "" would match every key in the locale and silently empty the
+# unused report, so it must yield nothing.
+check(
+    "leading interpolation yields no usable prefix",
+    audit.extract_static_prefix("${namespace}.roles.admin") is None,
+)
+
+check(
+    "prefix of a single segment is still usable",
+    audit.extract_static_prefix("roles.${role}") == "roles.",
+)
+
+# `t(`errors.${code}`)` names a real namespace; `t(`${a}${b}`)` does not.
+check(
+    "interpolation not preceded by a dot yields no prefix",
+    audit.extract_static_prefix("errorCode${code}") is None,
+)
+
+
+# --- dynamic_prefixes: the set over all detected dynamic call sites ---
+
+check(
+    "prefixes are collected across call sites and deduplicated",
+    audit.dynamic_prefixes(
+        [
+            ("admin.users.roles.${role}", "src/UserTable.tsx", 42),
+            ("admin.users.roles.${r}", "src/RoleBadge.tsx", 17),
+            ("profile.types.${profile.type}", "src/ProfileCard.tsx", 88),
+            ("${ns}.whatever", "src/Dynamic.tsx", 3),
+        ]
+    )
+    == {"admin.users.roles.", "profile.types."},
+)
+
+
 # --- summary ---
 
 print()
