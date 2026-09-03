@@ -871,6 +871,43 @@ check(
     not hook.command_has_until_sleep_wait_loop("sleep 30"),
 )
 
+# The `done` boundary is load-bearing: a sleep AFTER the loop is not in its
+# body, so the loop is not a wait loop. Without these, the boundary check can
+# be removed and the suite stays green, while the hook starts denying a
+# sleepless loop that AC 3 says must be left alone.
+check(
+    "until-loop: a sleep after `done` is not inside the loop body",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; done; sleep 5"
+    ),
+)
+
+check(
+    "until-loop: a sleep && -chained after `done` is not inside the body either",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; done && sleep 3"
+    ),
+)
+
+# `sleep` must match as a whole token, not as a substring. A body that merely
+# invokes something whose NAME contains "sleep" does not sleep, and denying it
+# would be a false positive on a loop AC 3 says to leave alone.
+check(
+    "until-loop: a command merely named like sleep is not a sleep",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do ./sleep_until_ready.sh; done"
+    ),
+)
+
+# The `do` token is stripped before scanning, so a body whose only content is
+# the keyword itself is not mistaken for one that sleeps.
+check(
+    "until-loop: env-prefixed condition is still classified",
+    hook.command_has_until_sleep_wait_loop(
+        "until FOO=bar [ -f /tmp/progress.txt ]; do sleep 1; done"
+    ),
+)
+
 check(
     "until-loop: the word 'until' inside a quoted string is not a loop",
     not hook.command_has_until_sleep_wait_loop(
