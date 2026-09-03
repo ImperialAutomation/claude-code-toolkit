@@ -418,6 +418,49 @@ def _is_wait_for_pattern_condition(condition_tokens):
     return _is_file_existence_test(tokens) or _is_grep_on_file(tokens)
 
 
+def _loop_body_sleeps(segments, start):
+    """True if the loop body starting at `segments[start]` calls sleep.
+
+    The body is every segment from the one opening with `do` up to the `done`
+    that closes the loop. `sleep` is what identifies the construct as a WAIT
+    loop rather than a counter or a busy loop, so a body without it is not
+    matched at all.
+    """
+    for index in range(start, len(segments)):
+        tokens = segments[index]
+        # The body's first segment carries `do` as its leading token
+        # (`; do sleep 10` tokenizes as ["do", "sleep", "10"]).
+        body = tokens[1:] if index == start and tokens[:1] == ["do"] else tokens
+        if "done" in body or body[:1] == ["done"]:
+            return False
+        if "sleep" in body:
+            return True
+    return False
+
+
+def command_has_until_sleep_wait_loop(command):
+    """True if `command` contains `until <file-condition>; do ... sleep N ...; done`.
+
+    Both halves must hold: the loop structure (an `until` whose body sleeps) AND
+    a condition wait-for-pattern.sh can actually replace. Never raises — on
+    unparseable input the caller falls through to the normal prompt.
+    """
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    for index, tokens in enumerate(segments):
+        if tokens[:1] != ["until"]:
+            continue
+        if not _is_wait_for_pattern_condition(tokens[1:]):
+            continue
+        if _loop_body_sleeps(segments, index + 1):
+            return True
+
+    return False
+
+
 def is_segment_safe(segment_tokens):
     """A segment is safe if, after stripping cd/env prefixes, its first
     token is on ALLOWLIST or a ~/.claude/bin/ script — with no command

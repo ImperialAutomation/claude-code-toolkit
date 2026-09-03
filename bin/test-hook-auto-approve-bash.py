@@ -768,5 +768,103 @@ check(
     not hook._is_wait_for_pattern_condition([]),
 )
 
+# Full-command detection: the loop STRUCTURE (until ... do ... sleep) and the
+# condition must BOTH be present.
+
+check(
+    "until-loop: waiting for a file to appear is detected",
+    hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do sleep 10; done"
+    ),
+)
+
+check(
+    "until-loop: waiting for a regex in a log is detected",
+    hook.command_has_until_sleep_wait_loop(
+        'until grep -qE "DONE|FAILED" /tmp/build.log; do sleep 20; done'
+    ),
+)
+
+check(
+    "until-loop: a trailing command after the loop does not hide it",
+    hook.command_has_until_sleep_wait_loop(
+        'until [ -f /tmp/progress.txt ]; do sleep 10; done; echo "file appeared"'
+    ),
+)
+
+check(
+    "until-loop: a leading command before the loop does not hide it",
+    hook.command_has_until_sleep_wait_loop(
+        "git status && until test -f /tmp/progress.txt; do sleep 5; done"
+    ),
+)
+
+check(
+    "until-loop: extra commands in the loop body do not hide the sleep",
+    hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; sleep 10; done"
+    ),
+)
+
+# --- the negatives that make each half of the check load-bearing ---
+
+# AC: `until` loops without a sleep must not be touched. This is what stops the
+# rule from firing on busy-loops and other non-waiting `until` constructs.
+check(
+    "until-loop: an until loop WITHOUT sleep is not a wait loop",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ -f /tmp/progress.txt ]; do echo waiting; done"
+    ),
+)
+
+# AC: conditions no wrapper covers must keep falling through to a prompt.
+check(
+    "until-loop: an HTTP poll loop is NOT matched (no wrapper to point at)",
+    not hook.command_has_until_sleep_wait_loop(
+        "until curl -sf http://localhost:8000/health; do sleep 5; done"
+    ),
+)
+
+check(
+    "until-loop: a container-health poll loop is NOT matched",
+    not hook.command_has_until_sleep_wait_loop(
+        "until docker inspect --format '{{.State.Health.Status}}' my_service; do sleep 5; done"
+    ),
+)
+
+check(
+    "until-loop: a counter loop is NOT matched",
+    not hook.command_has_until_sleep_wait_loop(
+        "until [ $i -gt 5 ]; do sleep 1; done"
+    ),
+)
+
+# `while` is a different keyword with different semantics (and the wrapper's
+# inverted condition); staying off it keeps the rule narrow.
+check(
+    "until-loop: a while loop is NOT matched",
+    not hook.command_has_until_sleep_wait_loop(
+        "while [ ! -f /tmp/progress.txt ]; do sleep 10; done"
+    ),
+)
+
+check(
+    "until-loop: a bare sleep is not a wait loop",
+    not hook.command_has_until_sleep_wait_loop("sleep 30"),
+)
+
+check(
+    "until-loop: the word 'until' inside a quoted string is not a loop",
+    not hook.command_has_until_sleep_wait_loop(
+        'echo "wait until the file exists"; sleep 5'
+    ),
+)
+
+# Fail open, never raise: unparseable input must fall through to the prompt.
+check(
+    "until-loop: unparseable input returns False instead of raising",
+    not hook.command_has_until_sleep_wait_loop("until [ -f 'unterminated"),
+)
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
