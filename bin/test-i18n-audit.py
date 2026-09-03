@@ -343,6 +343,47 @@ check(
 )
 
 
+# --- dynamic key listing: truncating hides what cannot be verified by hand ---
+
+MANY_DYNAMIC_SOURCE = {
+    f"Widget{n}.tsx": (
+        "import { useTranslation } from 'react-i18next';\n"
+        f"export function Widget{n}() {{\n"
+        "  const { t } = useTranslation();\n"
+        f"  return <span>{{t(`widget.section{n}.${{key}}`)}}</span>;\n"
+        "}\n"
+    )
+    for n in range(15)
+}
+MANY_DYNAMIC_LOCALE = {
+    "widget": {f"section{n}": {"label": f"Label {n}"} for n in range(15)}
+}
+
+proc = run_audit(MANY_DYNAMIC_LOCALE, MANY_DYNAMIC_SOURCE)
+
+check(
+    "every dynamic prefix is listed by default",
+    all(f"widget.section{n}." in proc.stdout for n in range(15))
+    and "more" not in proc.stdout,
+)
+
+proc = run_audit(MANY_DYNAMIC_LOCALE, MANY_DYNAMIC_SOURCE, "--dynamic-limit", "5")
+shown = sum(1 for n in range(15) if f"`widget.section{n}." in proc.stdout)
+
+check(
+    "--dynamic-limit caps the listing and says how many were hidden",
+    shown == 5 and "... and 10 more" in proc.stdout,
+)
+
+proc = run_audit(MANY_DYNAMIC_LOCALE, MANY_DYNAMIC_SOURCE, "--dynamic-limit", "5", "--json")
+report = json.loads(proc.stdout)
+
+check(
+    "--json ignores the limit and stays complete",
+    len(report["dynamicKeys"]) == 15,
+)
+
+
 # --- summary ---
 
 print()

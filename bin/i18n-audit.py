@@ -443,8 +443,14 @@ def format_plain_text(
     dynamic_keys: List[Tuple[str, str, int]],
     checks: List[str],
     project_root: str,
+    dynamic_limit: int = 0,
 ) -> str:
-    """Format results as plain text."""
+    """Format results as plain text.
+
+    `dynamic_limit` caps the dynamic-key listing; 0 shows all of them. Truncating
+    by default would leave the reader unable to check by hand which prefixes
+    caused keys to be filtered out of the unused list.
+    """
     lines = []
     lines.append("i18n Audit Report")
     lines.append("=" * 50)
@@ -549,11 +555,12 @@ def format_plain_text(
         lines.append(f"── Dynamic Keys ({len(dynamic_keys)}) " + "─" * 27)
         lines.append("Keys using template literals (cannot audit statically):")
         lines.append("")
-        for pattern, filepath, lineno in dynamic_keys[:10]:
+        shown = dynamic_keys if dynamic_limit <= 0 else dynamic_keys[:dynamic_limit]
+        for pattern, filepath, lineno in shown:
             rel_path = os.path.relpath(filepath, project_root)
             lines.append(f"  `{pattern}`  {rel_path}:{lineno}")
-        if len(dynamic_keys) > 10:
-            lines.append(f"  ... and {len(dynamic_keys) - 10} more")
+        if len(shown) < len(dynamic_keys):
+            lines.append(f"  ... and {len(dynamic_keys) - len(shown)} more")
         lines.append("")
 
     lines.append("── Summary " + "─" * 39)
@@ -715,6 +722,14 @@ Examples:
         help="Comma-separated directories to skip (added to defaults)",
     )
     parser.add_argument(
+        "--dynamic-limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Max dynamic keys to list in the text report (default: 0 = all). "
+             "Ignored with --json, which is always complete.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -853,6 +868,7 @@ Examples:
         print(format_plain_text(
             config, missing, unused, undeterminable, consistency,
             key_locations, dynamic_keys, checks, str(project_root),
+            args.dynamic_limit,
         ))
 
     # Exit code
