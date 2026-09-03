@@ -412,6 +412,16 @@ def check_consistency(
     return result
 
 
+def _covering_prefix(key: str, prefixes: Set[str]) -> Optional[str]:
+    """The dynamic prefix that makes this key unresolvable.
+
+    Longest match wins, so a key under both `admin.` and `admin.users.` is
+    attributed to the call site that actually reaches it.
+    """
+    matches = [prefix for prefix in prefixes if key.startswith(prefix)]
+    return max(matches, key=len) if matches else None
+
+
 def group_by_prefix(keys: Set[str]) -> Dict[str, List[str]]:
     """Group keys by their first dot-segment."""
     groups: Dict[str, List[str]] = {}
@@ -427,6 +437,7 @@ def format_plain_text(
     config: dict,
     missing: Set[str],
     unused: Set[str],
+    undeterminable: Set[str],
     consistency: Dict[str, Set[str]],
     key_locations: Dict[str, List[Tuple[str, int]]],
     dynamic_keys: List[Tuple[str, str, int]],
@@ -472,6 +483,15 @@ def format_plain_text(
 
     if "unused" in checks or "all" in checks:
         lines.append(f"── Unused Keys ({len(unused)}) " + "─" * 30)
+        if dynamic_keys:
+            lines.append(
+                f"WARNING: {len(dynamic_keys)} dynamic key(s) detected — this list "
+                "cannot be fully reliable."
+            )
+            lines.append(
+                "         Verify a key is truly dead before deleting it."
+            )
+            lines.append("")
         if unused:
             lines.append("Keys in reference locale but not found in source code:")
             lines.append("")
@@ -479,12 +499,30 @@ def format_plain_text(
                 lines.append(f"  {prefix}:")
                 for key in keys:
                     lines.append(f"    {key}")
-            if dynamic_keys:
-                lines.append("")
-                lines.append(f"  Note: {len(dynamic_keys)} dynamic key(s) detected (cannot verify statically)")
             total_issues += len(unused)
         else:
             lines.append("  No unused keys found.")
+        lines.append("")
+
+        lines.append(f"── Undeterminable Keys ({len(undeterminable)}) " + "─" * 20)
+        if undeterminable:
+            lines.append(
+                "Unreferenced keys that a dynamic call site can still reach. "
+                "Not dead — not counted as issues."
+            )
+            lines.append("")
+            prefixes = dynamic_prefixes(dynamic_keys)
+            counts: Dict[str, int] = {}
+            for key in undeterminable:
+                covering = _covering_prefix(key, prefixes)
+                if covering:
+                    counts[covering] = counts.get(covering, 0) + 1
+            for prefix in sorted(counts):
+                lines.append(f"  {prefix}*  ({counts[prefix]} key(s))")
+            lines.append("")
+            lines.append("  Use --json for the full key list.")
+        else:
+            lines.append("  None.")
         lines.append("")
 
     if "consistency" in checks or "all" in checks:
@@ -524,6 +562,7 @@ def format_plain_text(
         parts.append(f"Missing: {len(missing)}")
     if "unused" in checks or "all" in checks:
         parts.append(f"Unused: {len(unused)}")
+        parts.append(f"Undeterminable: {len(undeterminable)}")
     if "consistency" in checks or "all" in checks:
         consistency_total = sum(len(v) for v in consistency.values())
         parts.append(f"Inconsistent: {consistency_total}")
@@ -541,6 +580,7 @@ def format_json_output(
     config: dict,
     missing: Set[str],
     unused: Set[str],
+    undeterminable: Set[str],
     consistency: Dict[str, Set[str]],
     key_locations: Dict[str, List[Tuple[str, int]]],
     dynamic_keys: List[Tuple[str, str, int]],
@@ -564,6 +604,10 @@ def format_json_output(
 
     if "unused" in checks or "all" in checks:
         result["unused"] = [{"key": key} for key in sorted(unused)]
+        result["undeterminable"] = [
+            {"key": key, "prefix": _covering_prefix(key, dynamic_prefixes(dynamic_keys))}
+            for key in sorted(undeterminable)
+        ]
 
     if "consistency" in checks or "all" in checks:
         result["consistency"] = {
@@ -594,6 +638,9 @@ def format_json_output(
             sum(len(v) for v in consistency.values())
             if ("consistency" in checks or "all" in checks)
             else None
+        ),
+        "undeterminableCount": (
+            len(undeterminable) if ("unused" in checks or "all" in checks) else None
         ),
         "dynamicKeyCount": len(dynamic_keys),
         "totalIssues": total_issues,
@@ -799,12 +846,12 @@ Examples:
     # Output
     if args.json_output:
         print(format_json_output(
-            config, missing, unused, consistency,
+            config, missing, unused, undeterminable, consistency,
             key_locations, dynamic_keys, checks, str(project_root),
         ))
     else:
         print(format_plain_text(
-            config, missing, unused, consistency,
+            config, missing, unused, undeterminable, consistency,
             key_locations, dynamic_keys, checks, str(project_root),
         ))
 

@@ -206,6 +206,143 @@ check(
 )
 
 
+# --- end-to-end: a dynamic prefix must not produce issues or a failing exit ---
+
+
+def run_audit(locale: dict, sources: dict, *extra_args):
+    """Run the audit as a subprocess over a throwaway project."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        locale_dir = root / "src" / "i18n" / "locales"
+        locale_dir.mkdir(parents=True)
+        (locale_dir / "nl.json").write_text(
+            json.dumps(locale, ensure_ascii=False), encoding="utf-8"
+        )
+        for name, body in sources.items():
+            path = root / "src" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), str(root), *extra_args],
+            capture_output=True,
+            text=True,
+        )
+
+
+DYNAMIC_LOCALE = {
+    "admin": {
+        "users": {
+            "roles": {
+                "moderator": "Moderator",
+                "owner": "Eigenaar",
+                "guest": "Gast",
+            },
+            "title": "Gebruikersbeheer",
+        }
+    }
+}
+
+DYNAMIC_SOURCE = {
+    "RoleBadge.tsx": (
+        "import { useTranslation } from 'react-i18next';\n"
+        "export function RoleBadge({ role }: { role: string }) {\n"
+        "  const { t } = useTranslation();\n"
+        "  return <span>{t(`admin.users.roles.${role}`)}</span>;\n"
+        "}\n"
+    ),
+    "UsersPage.tsx": (
+        "import { useTranslation } from 'react-i18next';\n"
+        "export function UsersPage() {\n"
+        "  const { t } = useTranslation();\n"
+        "  return <h1>{t('admin.users.title')}</h1>;\n"
+        "}\n"
+    ),
+}
+
+proc = run_audit(DYNAMIC_LOCALE, DYNAMIC_SOURCE, "--json")
+report = json.loads(proc.stdout)
+
+check(
+    "no key under the dynamic prefix is reported unused",
+    [entry["key"] for entry in report["unused"]] == [],
+)
+
+check(
+    "those keys are reported as undeterminable instead",
+    [entry["key"] for entry in report["undeterminable"]]
+    == ["admin.users.roles.guest", "admin.users.roles.moderator", "admin.users.roles.owner"],
+)
+
+check(
+    "undeterminable keys do not count as issues",
+    report["summary"]["totalIssues"] == 0
+    and report["summary"]["unusedCount"] == 0
+    and report["summary"]["undeterminableCount"] == 3,
+)
+
+check(
+    "an unresolvable key does not fail the exit code",
+    proc.returncode == 0,
+)
+
+# A genuinely dead key must still be reported, or the fix has simply silenced
+# the whole check.
+proc = run_audit(
+    {**DYNAMIC_LOCALE, "checkout": {"abandonedBasketNotice": "Je mandje wacht"}},
+    DYNAMIC_SOURCE,
+    "--json",
+)
+report = json.loads(proc.stdout)
+
+check(
+    "a dead key outside the dynamic prefix is still reported unused",
+    [entry["key"] for entry in report["unused"]] == ["checkout.abandonedBasketNotice"]
+    and report["summary"]["totalIssues"] == 1
+    and proc.returncode == 1,
+)
+
+
+# --- text report: the reader must be told the unused list is not reliable ---
+
+proc = run_audit(DYNAMIC_LOCALE, DYNAMIC_SOURCE)
+text = proc.stdout
+
+check(
+    "unused block carries a warning while dynamic keys exist",
+    "WARNING: 1 dynamic key(s) detected" in text,
+)
+
+check(
+    "undeterminable keys get their own section with the covering prefix",
+    "── Undeterminable Keys (3)" in text and "admin.users.roles.*  (3 key(s))" in text,
+)
+
+check(
+    "summary reports the undeterminable count separately from unused",
+    "Unused: 0 | Undeterminable: 3" in text and "Result: CLEAN" in text,
+)
+
+# Without dynamic keys the warning must be absent, or it becomes noise that
+# readers learn to ignore.
+proc = run_audit(
+    {"checkout": {"abandonedBasketNotice": "Je mandje wacht"}},
+    {
+        "Cart.tsx": (
+            "import { useTranslation } from 'react-i18next';\n"
+            "export function Cart() {\n"
+            "  const { t } = useTranslation();\n"
+            "  return <p>{t('checkout.otherNotice')}</p>;\n"
+            "}\n"
+        )
+    },
+)
+
+check(
+    "no warning when the project has no dynamic keys",
+    "WARNING:" not in proc.stdout and "── Undeterminable Keys (0)" in proc.stdout,
+)
+
+
 # --- summary ---
 
 print()
