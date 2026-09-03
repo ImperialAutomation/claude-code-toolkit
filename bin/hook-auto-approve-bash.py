@@ -575,6 +575,25 @@ def main():
         print(json.dumps(output))
         return 0
 
+    if command_has_until_sleep_wait_loop(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: `until ...; do sleep N; done` waiting on a file is a "
+                    "wait loop. Use ~/.claude/bin/wait-for-pattern.sh <file> "
+                    "<extended-regex> [timeout-seconds] [poll-seconds] instead — "
+                    "it matches Bash(~/.claude/bin/*) and needs no permission "
+                    "prompt. The file need not exist yet. Loops waiting on "
+                    "anything else (an HTTP status, a container state, a "
+                    "command's exit status) are not affected by this rule."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
     if is_command_safe(command):
         output = {
             "hookSpecificOutput": {

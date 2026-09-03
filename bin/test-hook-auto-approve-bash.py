@@ -866,5 +866,55 @@ check(
     not hook.command_has_until_sleep_wait_loop("until [ -f 'unterminated"),
 )
 
+# End-to-end through the hook: deny, with a hint naming the wrapper AND the
+# argument form to call it with (an alternative you have to go look up is not
+# actionable at the moment the command is blocked).
+approved, reason, rc = run_hook("until [ -f /tmp/progress.txt ]; do sleep 10; done")
+check("until-loop: hook does not approve it", not approved)
+check(
+    "until-loop: hook denies naming wait-for-pattern.sh",
+    reason is not None and "wait-for-pattern.sh" in reason,
+)
+check(
+    "until-loop: the hint spells out the argument form",
+    reason is not None and "<file>" in reason and "<extended-regex>" in reason,
+)
+check("until-loop: hook still exits 0", rc == 0)
+
+approved, reason, _ = run_hook(
+    'until grep -qE "DONE|FAILED" /tmp/build.log; do sleep 20; done'
+)
+check("until-loop: the grep form is denied too", not approved and reason is not None)
+
+# A wait loop anywhere in a chain denies the whole command, exactly like the
+# sed and inline-python rules above.
+approved, reason, _ = run_hook(
+    'git status && until [ -f /tmp/progress.txt ]; do sleep 10; done'
+)
+check("until-loop: denied inside a chain", not approved and reason is not None)
+
+# Loops the wrapper cannot replace must fall through to a normal prompt: no
+# deny (which would block legitimate work) and no allow.
+approved, reason, _ = run_hook("until curl -sf http://localhost:8000/health; do sleep 5; done")
+check(
+    "until-loop: an HTTP poll falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
+approved, reason, _ = run_hook(
+    "until docker inspect --format '{{.State.Health.Status}}' my_service; do sleep 5; done"
+)
+check(
+    "until-loop: a container poll falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
+# Unrelated commands keep their existing behaviour.
+approved, reason, _ = run_hook("git status && sleep 5")
+check(
+    "until-loop: an allowed command containing sleep is still approved",
+    approved,
+)
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
