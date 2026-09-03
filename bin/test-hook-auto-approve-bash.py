@@ -763,6 +763,21 @@ check(
     not hook._is_wait_for_pattern_condition(["[", "$state", "=", "ready", "]"]),
 )
 
+# These two are what makes the OPERATOR SET load-bearing. Without them the
+# `len(inner) == 2` guard already rejects every other negative case, so dropping
+# the `in _FILE_TEST_OPERATORS` check entirely still passes — the "an earlier
+# guard swallows the test" trap. Both are two-token tests whose operator asks
+# something other than "does this file exist".
+check(
+    "until-loop: `[ -z VAR ]` is a string test, not a file test",
+    not hook._is_wait_for_pattern_condition(["[", "-z", "$state", "]"]),
+)
+
+check(
+    "until-loop: `[ -d DIR ]` waits on a directory, which the wrapper cannot poll",
+    not hook._is_wait_for_pattern_condition(["[", "-d", "/tmp/outdir", "]"]),
+)
+
 check(
     "until-loop: an empty condition is NOT classified",
     not hook._is_wait_for_pattern_condition([]),
@@ -839,12 +854,15 @@ check(
     ),
 )
 
-# `while` is a different keyword with different semantics (and the wrapper's
-# inverted condition); staying off it keeps the rule narrow.
+# `while` is a different keyword with inverted semantics: `while [ -f X ]` waits
+# for a file to DISAPPEAR, which wait-for-pattern.sh cannot express at all.
+# The condition here is deliberately one the classifier accepts, so the test
+# pins the KEYWORD check rather than passing on the condition check.
 check(
-    "until-loop: a while loop is NOT matched",
-    not hook.command_has_until_sleep_wait_loop(
-        "while [ ! -f /tmp/progress.txt ]; do sleep 10; done"
+    "until-loop: a while loop over the same condition is NOT matched",
+    hook._is_wait_for_pattern_condition(["[", "-f", "/tmp/progress.txt", "]"])
+    and not hook.command_has_until_sleep_wait_loop(
+        "while [ -f /tmp/progress.txt ]; do sleep 10; done"
     ),
 )
 
