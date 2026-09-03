@@ -693,5 +693,80 @@ check(
     not approved and reason is None,
 )
 
+# --- until+sleep wait loops: deny with a hint pointing at wait-for-pattern.sh ---
+# `until <cond>; do sleep N; done` is a compound command, so permission matching
+# fails on its second segment and it prompts every single time.
+# wait-for-pattern.sh exists for exactly this and matches Bash(~/.claude/bin/*),
+# yet the raw idiom kept being used — so it is enforced here, not documented again.
+#
+# The deny covers ONLY the conditions that wrapper actually handles (waiting for
+# a file to exist, or for a regex to appear in a file). A loop waiting on an HTTP
+# status, a container state or a command's exit status has no wrapper to point
+# at, and a hint naming the wrong one is worse than the prompt it replaces.
+
+check(
+    "until-loop: [ -f FILE ] is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["[", "-f", "/tmp/progress.txt", "]"]),
+)
+
+check(
+    "until-loop: [ -s FILE ] is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["[", "-s", "/tmp/build.log", "]"]),
+)
+
+check(
+    "until-loop: [[ -e FILE ]] is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["[[", "-e", "/tmp/build.log", "]]"]),
+)
+
+check(
+    "until-loop: `test -f FILE` is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["test", "-f", "/tmp/progress.txt"]),
+)
+
+check(
+    "until-loop: grep with a file operand is a wait-for-pattern condition",
+    hook._is_wait_for_pattern_condition(["grep", "-qE", "DONE|FAILED", "/tmp/build.log"]),
+)
+
+check(
+    "until-loop: grep with a long flag and a file operand is still one",
+    hook._is_wait_for_pattern_condition(["grep", "--quiet", "READY", "/tmp/build.log"]),
+)
+
+# Conditions with no wrapper to point at must NOT be classified — the loop then
+# keeps falling through to a normal prompt instead of getting a misleading hint.
+check(
+    "until-loop: grep reading stdin (no file operand) is NOT classified",
+    not hook._is_wait_for_pattern_condition(["grep", "-q", "READY"]),
+)
+
+check(
+    "until-loop: an HTTP poll is NOT classified (no wrapper covers it)",
+    not hook._is_wait_for_pattern_condition(["curl", "-sf", "http://localhost:8000/health"]),
+)
+
+check(
+    "until-loop: a container-state poll is NOT classified (different wrapper)",
+    not hook._is_wait_for_pattern_condition(
+        ["docker", "inspect", "--format", "{{.State.Health.Status}}", "my_service"]
+    ),
+)
+
+check(
+    "until-loop: a counter condition is NOT a wait on a file",
+    not hook._is_wait_for_pattern_condition(["[", "$i", "-gt", "5", "]"]),
+)
+
+check(
+    "until-loop: a string-comparison test is NOT a wait on a file",
+    not hook._is_wait_for_pattern_condition(["[", "$state", "=", "ready", "]"]),
+)
+
+check(
+    "until-loop: an empty condition is NOT classified",
+    not hook._is_wait_for_pattern_condition([]),
+)
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
