@@ -114,9 +114,74 @@ if git branch --merged "$BASE_BRANCH" | grep -q "^[* ]*$FEATURE_BRANCH$"; then
         fi
     fi
 else
-    echo -e "${RED}Error: Branch '$FEATURE_BRANCH' is not fully merged into '$BASE_BRANCH'${NC}"
-    echo "Use 'git branch -D $FEATURE_BRANCH' to force delete (will lose unmerged changes!)"
-    exit 1
+    # "Not fully merged" means the branch tip is not an ancestor of the base --
+    # a reachability fact, not a content fact. The two diverge whenever history
+    # was rewritten (cherry-pick, rebase, squash-merge), so the raw warning
+    # cannot tell "work would be lost" apart from "already applied under a new
+    # commit". Diagnose both before suggesting anything destructive.
+    echo -e "${YELLOW}Branch '$FEATURE_BRANCH' is not fully merged into '$BASE_BRANCH'${NC}"
+    echo "Diagnosing whether that means unmerged work or rewritten history..."
+
+    UNIQUE_COMMITS=$(git log --oneline "$BASE_BRANCH".."$FEATURE_BRANCH")
+
+    if [ -z "$UNIQUE_COMMITS" ]; then
+        # No unique commits: only a local merge-commit is unreachable.
+        echo -e "\n${GREEN}✓ No unique commits. Nothing would be lost.${NC}"
+        echo "  (Typically a local '$BASE_BRANCH'-into-feature merge that GitHub"
+        echo "   superseded with its own merge commit.)"
+        SAFE_TO_FORCE=1
+    else
+        echo -e "\n${YELLOW}Commits not reachable from '$BASE_BRANCH':${NC}"
+        echo "$UNIQUE_COMMITS" | sed 's/^/  /'
+
+        # Content check. Two dots is deliberate: it compares the two tips, so an
+        # empty result proves the branch adds nothing the base lacks. (Three dots
+        # would diff from the merge-base and hide base-side changes -- the wrong
+        # question here.)
+        if [ -z "$(git diff "$BASE_BRANCH" "$FEATURE_BRANCH")" ]; then
+            echo -e "\n${GREEN}✓ ...but the trees are identical.${NC}"
+            echo "  The content already landed under different commit hashes"
+            echo "  (cherry-pick, rebase, or squash-merge). Nothing would be lost."
+            SAFE_TO_FORCE=1
+        else
+            echo -e "\n${RED}✗ These commits contain content missing from '$BASE_BRANCH'.${NC}"
+            echo "  Files that differ:"
+            git diff --stat "$BASE_BRANCH" "$FEATURE_BRANCH" | sed 's/^/    /'
+            SAFE_TO_FORCE=0
+        fi
+    fi
+
+    if [ "$SAFE_TO_FORCE" = "1" ]; then
+        echo
+        read -p "Force-delete '$FEATURE_BRANCH'? (y/N) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            git branch -D "$FEATURE_BRANCH"
+            echo -e "${GREEN}✓ Deleted local branch '$FEATURE_BRANCH'${NC}"
+
+            if git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" &>/dev/null; then
+                echo -e "\n${YELLOW}Remote branch 'origin/$FEATURE_BRANCH' still exists${NC}"
+                read -p "Delete remote branch? (y/N) " -n 1 -r
+                echo
+                if [[ $REPLY =~ ^[Yy]$ ]]; then
+                    git push origin --delete "$FEATURE_BRANCH"
+                    echo -e "${GREEN}✓ Deleted remote branch 'origin/$FEATURE_BRANCH'${NC}"
+                fi
+            fi
+        else
+            echo "Left '$FEATURE_BRANCH' in place."
+            exit 1
+        fi
+    else
+        echo
+        echo -e "${RED}Refusing to delete: this branch holds work that exists nowhere else.${NC}"
+        echo "Rescue it first, for example:"
+        echo "  git cherry-pick <commit>   # replay onto $BASE_BRANCH, then re-run cleanup"
+        echo "  gh pr create --base $BASE_BRANCH --head $FEATURE_BRANCH"
+        echo
+        echo "If you are certain it is disposable: git branch -D $FEATURE_BRANCH"
+        exit 1
+    fi
 fi
 
 echo -e "\n${GREEN}=== Cleanup Complete ===${NC}"
