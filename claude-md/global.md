@@ -61,6 +61,8 @@ ALTIJD `~/.claude/bin/git-commit.sh` — NOOIT raw `git commit`.
 
 NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of Bash voor file-aanmaak.
 
+**Co-Authored-By-trailer.** Elke agent-commit eindigt met de `Co-Authored-By`-trailer. Repo's die zwaardere review ophangen aan een `agent-authored`-label passen dat label zonder trailer nooit toe, waardoor de bijbehorende verplichte checklist stil niet draait — een groene gate die nooit gedraaid heeft. **Enforced, not advisory:** `hook-post-commit-trailer.sh` (PostToolUse op Bash) voegt de trailer alsnog toe aan een verse, ongepushte, niet-merge commit en meldt dat op stderr. Bewust NIET in `git-commit.sh`: dat script gebruik je ook zelf, en een trailer daar zou je eigen commits als agent-authored bestempelen.
+
 ### Git branches
 
 Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug>` een korte kebab-case samenvatting van de issue-titel is. Bijv. issue #3 "Per-feature code discipline" → `issue-3-code-discipline`. Zo is elke branch traceerbaar naar zijn issue. Branches zonder issue (los experiment) mogen afwijken.
