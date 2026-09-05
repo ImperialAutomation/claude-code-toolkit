@@ -181,7 +181,37 @@ Steps:
 
 ### For toolkit candidates
 
-Do everything above for the project-local version, then ALSO create a proposal file at `~/.claude/toolkit-proposals/<name>.md` containing:
+**The toolkit repo is PUBLIC. Strip project-identifying context before anything goes there.**
+
+This applies to every artefact that lands in the toolkit — proposal files, `rules/`,
+`skills/`, `claude-md/`, and just as much to the **GitHub issue bodies, PR bodies and
+commit messages** you write against that repo. The project-local version keeps the full
+story; the toolkit version gets the generalised lesson.
+
+Remove: project names, client/person names, product URLs and hostnames, and internal
+issue/PR numbers from other repos. Keep: the lesson, the reasoning, and any number that
+is load-bearing for the lesson (pool sizes, timeouts) — without the attribution.
+
+Write "a FastAPI project shipped dozens of async-def routes holding a sync Session",
+not the named-project version. Say "measured in a project repo (2026-05-12)", not
+"measured in <Project> #<nr>".
+
+Two traps worth knowing:
+
+- An issue number from another project renders as a link to *this* repo's issue with
+  that number — a leak and a wrong reference at once.
+- `gh issue edit` does NOT clean up a body that was already published: GitHub keeps the
+  previous version in the "edited" menu. Fixing a leak means `gh issue delete` +
+  recreate, `gh pr close --delete-branch`, and rewriting the commit message if it
+  carried the context too.
+
+Scan the body before publishing, not after:
+
+```bash
+grep -oiE "<project>|<client>|<product-domain>|#[0-9]{3}" <body-file>
+```
+
+Then do everything above for the project-local version, and ALSO create a proposal file at `~/.claude/toolkit-proposals/<name>.md` containing:
 - Name and one-line description
 - The problem pattern it solves (generic, not project-specific)
 - Which projects would benefit
@@ -227,3 +257,4 @@ Artefacts:
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.
 - When in doubt about toolkit candidacy, keep it project-local. Promote later via `/promote`.
 - Claude Code tool behaviour (permissions, Bash patterns, sandbox workarounds) ALWAYS goes to memory, never to `docs/development/`.
+- The toolkit repo is public: never put project names, client names, product URLs or other repos' issue/PR numbers in toolkit files, issues, PRs or commit messages. Generalise the lesson, drop the attribution.

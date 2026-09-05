@@ -42,6 +42,25 @@ Create a parameterised version that:
 - Includes a usage comment explaining all parameters
 - Works as a standalone script or can be sourced
 
+**The toolkit repo is PUBLIC — generalise the prose too, not just the code.**
+
+The same strip applies to comments, docs, and to the **GitHub issue bodies, PR bodies
+and commit messages** you write against the toolkit repo. Remove project names,
+client/person names, product URLs and hostnames, and internal issue/PR numbers from
+other repos. Keep the lesson, the reasoning, and load-bearing numbers — without the
+attribution. The project-local version keeps the full story.
+
+Note that an issue number from another project renders as a link to *this* repo's issue
+with that number, so it leaks and misleads at once. And `gh issue edit` does not undo a
+published leak — GitHub keeps the old body in the "edited" menu, so cleaning up means
+delete + recreate.
+
+Scan before publishing:
+
+```bash
+grep -oiE "<project>|<client>|<product-domain>|#[0-9]{3}" <body-file>
+```
+
 ## Phase 3: Determine Toolkit Location
 
 Check the toolkit repo for existing similar scripts/skills before creating duplicates.
@@ -129,3 +148,4 @@ Wait for confirmation before making any changes.
 - Check the toolkit for existing similar scripts/skills before creating duplicates.
 - If a toolkit proposal file exists for this pattern, use it as input but verify it is still accurate.
 - Clean up the toolkit proposal file after successful promotion.
+- The toolkit repo is public: never put project names, client names, product URLs or other repos' issue/PR numbers in toolkit files, issues, PRs or commit messages. Generalise the lesson, drop the attribution.
