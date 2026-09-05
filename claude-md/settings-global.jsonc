@@ -133,6 +133,21 @@
             "command": "~/.claude/bin/hook-post-edit-lint.sh"
           }
         ]
+      },
+      {
+        // Adds the Co-Authored-By trailer to agent-authored commits when it is
+        // missing. Repos that gate heightened review on an `agent-authored`
+        // label never apply that label without the trailer, so the required
+        // checklist silently never runs. Deliberately NOT in git-commit.sh:
+        // that wrapper is also used by the human maintainer, and a trailer
+        // there would label human commits as agent-authored.
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-post-commit-trailer.sh"
+          }
+        ]
       }
     ]
   }
