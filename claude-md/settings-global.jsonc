@@ -93,6 +93,33 @@
   },
   "alwaysThinkingEnabled": true,
 
+  // ── Environment ─────────────────────────────────────────────────
+  // PLAYWRIGHT_MCP_OUTPUT_DIR: where the Playwright MCP server writes
+  //   screenshots, traces and console logs.
+  //
+  //   Without it, the server's output directory defaults to its working
+  //   directory — which is the repository you are working in. A screenshot
+  //   taken WITHOUT a filename still lands in a `.playwright-mcp/` subdir
+  //   (commonly gitignored), but passing a `filename` writes a relative path
+  //   straight into the repo root, where nothing ignores it. That leaves an
+  //   untracked image one `git add .` away from being committed, in every
+  //   repo, forever.
+  //
+  //   Pointing it at a fixed directory outside any checkout fixes it once for
+  //   all projects instead of asking each repo for its own gitignore rule.
+  //   Verified against @playwright/mcp 0.0.79, which documents the variable
+  //   and its `--output-dir` equivalent.
+  //
+  //   __HOME__ is replaced with the real home directory by install.sh. It is
+  //   NOT a syntax Claude Code understands: an `env` value is passed to the
+  //   subprocess as a literal string, so neither `~` nor `${HOME}` is expanded
+  //   here — Playwright would resolve `~` into a directory actually named `~`.
+  //   (The `~/.claude/bin/...` hook commands lower down do work, because those
+  //   are run through a shell, which expands the tilde itself.)
+  "env": {
+    "PLAYWRIGHT_MCP_OUTPUT_DIR": "__HOME__/.claude/playwright-output"
+  },
+
   // ── Hooks ───────────────────────────────────────────────────────
   // Pre-tool hooks run BEFORE a tool executes. They work in ALL
   // permission modes, including bypass-permissions.
