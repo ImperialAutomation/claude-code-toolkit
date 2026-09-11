@@ -123,11 +123,12 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `git-find-base-branch` | `git-find-base-branch [repo-dir]` | Detect the base branch of the current branch, or of the worktree at `repo-dir` |
+| `git-find-base-branch` | `git-find-base-branch [--repo DIR \| repo-dir]` | Detect the base branch of the current branch, or of the given worktree |
 | `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
+| `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. Creates the PR itself, so `gh pr create` hooks do not fire — see [failure modes](docs/git-script-failure-modes.md) |
 
 `git-resolve-worktree.sh` exists because an agent's working directory resets
@@ -147,14 +148,32 @@ stdout**, so a `$(...)` capture cannot silently become a guess. With no argument
 and nothing to detect it prints the current worktree, leaving single-worktree
 projects exactly as they were.
 
-`git-find-base-branch <dir>`, `git-commit.sh --repo`, `git-diff-base.sh --repo`
-and `git-push-pr-merge.sh --repo` all take that same path, for the same reason:
-without it they read the start directory and act on the wrong tree.
-`git-push-pr-merge.sh` is the one with real teeth — it pushes, opens a PR, and on
-merge runs `checkout` and `branch -D`, so a wrong target is destructive to a tree
-nobody is watching, so it validates the path itself and refuses before pushing;
-the others fail loudly through git. None of them fall back to the caller's
-directory.
+**`--repo` is the convention for every script that selects a git worktree**:
+`git-commit.sh`, `git-diff-base.sh`, `git-push-pr-merge.sh`, `git-verify.sh` and
+`git-find-base-branch` all take that same path, for the same reason — without it
+they read the start directory and act on the wrong tree. `git-push-pr-merge.sh`
+is the one with real teeth: it pushes, opens a PR, and on merge runs `checkout`
+and `branch -D`, so a wrong target is destructive to a tree nobody is watching.
+It validates the path itself and refuses before pushing; the others fail loudly
+through git. None of them fall back to the caller's directory.
+
+Deliberately *not* `-C`, despite the resemblance to `git -C`. That flag means
+"run as if git was started in `<path>`" — a chdir, which is why `git -C ""` is a
+no-op and why multiple `-C`s stack relative to each other. These scripts do
+something narrower: select a worktree, and refuse a path that is not one.
+Reusing the letter for different semantics is the wrong kind of consistency, and
+a single letter buys nothing when the caller is an agent rather than a typist.
+
+`git-verify.sh` and `git-find-base-branch` also still accept the path
+positionally, so existing calls keep working. Naming the same tree twice is fine;
+naming two different ones is an error rather than a silent pick, because the
+loser is a tree the caller believed they were asking about.
+
+Scripts that take a *scan path* rather than a worktree keep their positional
+argument: `deps-audit.sh`, `secret-scan.sh`, `env-audit.sh`, `docker-audit.sh`,
+`docker-health-check.sh` and `epic-prepare-context.sh`. `secret-scan.sh
+~/Downloads` is a meaningful thing to ask for, and calling that `--repo` would
+misdescribe the argument.
 
 ### Project audits
 
@@ -226,6 +245,7 @@ claude-code-toolkit/
 │   ├── batch-issue-view.sh    ← fetch multiple issues as JSON array
 │   ├── batch-issue-status.sh  ← fetch issue status as JSON array
 │   ├── git-find-base-branch   ← detect base branch (of a given worktree)
+│   ├── git-verify.sh          ← read-only git status snapshot in one call
 │   ├── git-resolve-worktree.sh ← resolve a worktree hint to one absolute path
 │   ├── git-cleanup-merged-branch.sh ← cleanup after PR merge
 │   ├── git-commit.sh               ← commit via temp file (sub-agent safe)

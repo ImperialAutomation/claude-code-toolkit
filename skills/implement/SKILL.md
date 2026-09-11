@@ -13,7 +13,7 @@ Implement GitHub issue with automated workflow.
 
 The user provides an issue number, optionally followed by a worktree hint: `$ARGUMENTS`
 
-MUST use `~/.claude/bin/git-find-base-branch <worktree>` for base branch detection for the PR.
+MUST use `~/.claude/bin/git-find-base-branch --repo <worktree>` for base branch detection for the PR.
 
 ## Worktree
 
@@ -211,7 +211,7 @@ churn you then have to revert and risk committing. Use the check-only variant
 ### Step 1: Gather context for the sub-agent
 
 Before spawning, collect:
-- `base_branch` — from `~/.claude/bin/git-find-base-branch <worktree>`
+- `base_branch` — from `~/.claude/bin/git-find-base-branch --repo <worktree>`
 - `acceptance_criteria` — the AC list parsed in Phase 1 (or "none" if not found)
 - `modified_files` — `~/.claude/bin/git-diff-base.sh --repo <worktree> <base-branch>`
 - `worktree` — the absolute path resolved in Phase 1
@@ -246,7 +246,7 @@ survive either. Every command must carry the path:
 
 - `git -C <worktree> ...` — never a bare `git`
 - `~/.claude/bin/git-diff-base.sh --repo <worktree> <base_branch>`
-- `~/.claude/bin/git-find-base-branch <worktree>`
+- `~/.claude/bin/git-find-base-branch --repo <worktree>`
 - commits (if a fix needs one): `~/.claude/bin/git-commit.sh --repo <worktree> "..."`
 - Read/Edit/Write/Glob/Grep: absolute paths under `<worktree>` only
 - project scripts: `<worktree>/bin/<script>`; `~/.claude/bin/` scripts are shared
@@ -359,7 +359,7 @@ Before proceeding to PR creation:
 
 ## Phase 4: PR Creation
 
-1. Determine base branch: `~/.claude/bin/git-find-base-branch <worktree>`
+1. Determine base branch: `~/.claude/bin/git-find-base-branch --repo <worktree>`
 2. Write PR body to `/tmp/<project>-pr-body-$ARGUMENTS.md` using the Write tool —
    a per-project, per-issue name, because parallel worktrees mean parallel
    sessions and a shared `/tmp/pr-body.md` gets overwritten by whichever writes

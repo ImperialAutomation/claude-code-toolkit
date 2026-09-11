@@ -114,6 +114,70 @@ else
     pass=$((pass + 1))
 fi
 
+# --repo is the named spelling of the same argument, matching the other
+# worktree-targeting scripts (git-commit.sh, git-diff-base.sh, …). An agent
+# reading a command should see which tree it acts on without knowing each
+# script's argument order.
+actual=$(cd "$wt4" && "$TARGET" --repo "$repo4")
+if [ "$actual" = "develop" ]; then
+    echo "PASS: --repo targets the given worktree (got '$actual')"
+    pass=$((pass + 1))
+else
+    echo "FAIL: --repo targets the given worktree (expected 'develop', got '$actual')"
+    fail=$((fail + 1))
+fi
+
+actual=$(cd "$repo4" && "$TARGET" --repo "$wt4")
+if [ "$actual" = "master" ]; then
+    echo "PASS: --repo works in the other direction (got '$actual')"
+    pass=$((pass + 1))
+else
+    echo "FAIL: --repo works in the other direction (expected 'master', got '$actual')"
+    fail=$((fail + 1))
+fi
+
+if (cd "$repo4" && "$TARGET" --repo "${repo4}-nonexistent" >/dev/null 2>&1); then
+    echo "FAIL: nonexistent --repo exits non-zero"
+    fail=$((fail + 1))
+else
+    echo "PASS: nonexistent --repo exits non-zero"
+    pass=$((pass + 1))
+fi
+
+if (cd "$repo4" && "$TARGET" --repo >/dev/null 2>&1); then
+    echo "FAIL: --repo without a value exits non-zero"
+    fail=$((fail + 1))
+else
+    echo "PASS: --repo without a value exits non-zero"
+    pass=$((pass + 1))
+fi
+
+# Two different trees named at once is a conflict, not a pick: the loser is a
+# tree the caller believed they were asking about.
+if (cd "$repo4" && "$TARGET" "$wt4" --repo "$repo4" >/dev/null 2>&1); then
+    echo "FAIL: conflicting targets exit non-zero"
+    fail=$((fail + 1))
+else
+    echo "PASS: conflicting targets exit non-zero"
+    pass=$((pass + 1))
+fi
+
+# An unknown option must be REJECTED as an option, not swallowed as the target
+# directory. Asserting only on the exit code is not enough: a fall-through makes
+# `cd --nope` fail too, so the case would pass while the bug is present. The
+# message is what distinguishes the two.
+err=$(cd "$repo4" && "$TARGET" --nope 2>&1 >/dev/null) || true
+case "$err" in
+    *"unknown option"*)
+        echo "PASS: unknown option rejected as an option"
+        pass=$((pass + 1))
+        ;;
+    *)
+        echo "FAIL: unknown option rejected as an option (got '$err')"
+        fail=$((fail + 1))
+        ;;
+esac
+
 git -C "$repo4" worktree remove --force "$wt4" >/dev/null 2>&1
 rm -rf "$repo4" "$wt4"
 
