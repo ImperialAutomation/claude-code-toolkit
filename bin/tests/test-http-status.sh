@@ -79,6 +79,32 @@ DIAG=$(run "$DEAD" 2>&1 >/dev/null)
 check "curl diagnostic on stderr" "yes" \
     "$(case "$DIAG" in *onnect*|*efus*|*imed\ out*) echo yes ;; *) echo no ;; esac)"
 
+echo "== 4. --body prints the response instead of the status =="
+check "single body is raw" '{"status": "ok", "service": "billing-api"}' \
+    "$(run --body "$BASE/health")"
+check "no status code in single body" "yes" \
+    "$(case "$(run --body "$BASE/health")" in *200*) echo no ;; *) echo yes ;; esac)"
+# Several bodies concatenated are unattributable, so each gets a header.
+OUT=$(run --body "$BASE/health" "$BASE/health")
+check "body header names the URL" "==> $BASE/health <==" "$(sed -n 1p <<<"$OUT")"
+check "body follows its header" '{"status": "ok", "service": "billing-api"}' \
+    "$(sed -n 2p <<<"$OUT")"
+check "both bodies present" "2" \
+    "$(grep -c 'billing-api' <<<"$OUT")"
+check "--body still exits 1 on transport failure" "1" \
+    "$(run --body "$DEAD" >/dev/null 2>&1; echo $?)"
+
+echo "== 5. argument validation =="
+check "no URLs exits 2"        "2" "$(run >/dev/null 2>&1; echo $?)"
+check "unknown option exits 2" "2" "$(run --nope "$BASE/health" >/dev/null 2>&1; echo $?)"
+check "usage goes to stderr"   "yes" \
+    "$(case "$(run 2>&1 >/dev/null)" in *usage*) echo yes ;; *) echo no ;; esac)"
+check "--max-time accepted"    "200" "$(run --max-time 5 "$BASE/health")"
+check "--max-time without value exits 2" "2" \
+    "$(run "$BASE/health" --max-time >/dev/null 2>&1; echo $?)"
+check "non-numeric --max-time exits 2" "2" \
+    "$(run --max-time abc "$BASE/health" >/dev/null 2>&1; echo $?)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

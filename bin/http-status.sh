@@ -37,7 +37,15 @@ URLS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --body)     SHOW_BODY=1; shift ;;
-    --max-time) MAX_TIME="${2:-}"; shift 2 ;;
+    --max-time)
+      # An empty or non-numeric value makes curl wait forever, which is the one
+      # outcome this wrapper exists to prevent.
+      [[ $# -ge 2 ]] || { echo "--max-time needs a value" >&2; exit 2; }
+      MAX_TIME="$2"
+      case "$MAX_TIME" in
+        ''|*[!0-9.]*) echo "--max-time must be a number: $MAX_TIME" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) URLS+=("$1"); shift ;;
   esac
@@ -51,6 +59,14 @@ fi
 FAILED=0
 
 for url in "${URLS[@]}"; do
+  if [[ $SHOW_BODY -eq 1 ]]; then
+    # Several bodies run together are unattributable, so each gets a header.
+    # A single body stays raw, so it can be piped into jq or compared directly.
+    [[ ${#URLS[@]} -gt 1 ]] && echo "==> $url <=="
+    curl -sS --max-time "$MAX_TIME" "$url" || FAILED=1
+    continue
+  fi
+
   # A transport failure prints ERR rather than curl's "000", which is easy to
   # misread as a status. The loop continues: one dead host must not hide the
   # answers for the URLs behind it.
