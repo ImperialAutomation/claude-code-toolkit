@@ -14,6 +14,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$SCRIPT_DIR/git-find-base-branch"
 
+# Every scenario repo goes under one temp root, removed on EXIT. The per-scenario
+# `rm -rf` at the end of each block only runs when that block completes, so under
+# `set -e` a failing assertion used to leave the repo (and its linked worktree)
+# behind — one orphaned pair per red run, which is exactly what a TDD cycle
+# produces. The trap fires on the failure path too.
+TEST_ROOT=$(mktemp -d)
+trap 'rm -rf "$TEST_ROOT"' EXIT
+
 pass=0
 fail=0
 
@@ -34,7 +42,7 @@ run_case() {
 
 make_repo() {
     local dir
-    dir=$(mktemp -d)
+    dir=$(mktemp -d -p "$TEST_ROOT")
     git -C "$dir" init -q
     git -C "$dir" config user.email "test@example.com"
     git -C "$dir" config user.name "Test"

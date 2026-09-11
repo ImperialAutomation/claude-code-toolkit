@@ -26,12 +26,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$SCRIPT_DIR/git-push-pr-merge.sh"
 
+# One temp root for every scenario repo, removed on EXIT. The per-scenario
+# `rm -rf` only runs when that scenario completes, so under `set -e` a failing
+# assertion would leave the repo (and scenario 14's linked worktrees) behind.
+TEST_ROOT=$(mktemp -d)
+trap 'rm -rf "$TEST_ROOT"' EXIT
+
 pass=0
 fail=0
 
 make_repo() {
     local dir
-    dir=$(mktemp -d)
+    dir=$(mktemp -d -p "$TEST_ROOT")
     git -C "$dir" init -q
     git -C "$dir" config user.email "test@example.com"
     git -C "$dir" config user.name "Test"
