@@ -70,6 +70,53 @@ git -C "$repo3" commit -q --allow-empty -m "feature work"
 run_case "repo without develop" "master" "$repo3"
 rm -rf "$repo3"
 
+# Scenario 4: an explicit repo argument reports THAT tree's base branch.
+#
+# Run from a linked worktree whose own answer differs from the target's, so the
+# case fails if the argument is ignored and the caller's directory wins. That is
+# the real bug: an agent working in a linked worktree would otherwise get the
+# base branch of whichever tree the session happened to start in.
+repo4=$(make_repo)
+git -C "$repo4" checkout -q -b master
+git -C "$repo4" commit -q --allow-empty -m "master root"
+git -C "$repo4" checkout -q -b develop
+git -C "$repo4" commit -q --allow-empty -m "develop ahead"
+wt4="${repo4}-dev1"
+git -C "$repo4" worktree add -q -b issue-42-invoice-rounding "$wt4" master >/dev/null 2>&1
+
+# From the linked tree (base master), ask about the main tree (on develop).
+actual=$(cd "$wt4" && "$TARGET" "$repo4")
+if [ "$actual" = "develop" ]; then
+    echo "PASS: repo argument targets the given worktree (got '$actual')"
+    pass=$((pass + 1))
+else
+    echo "FAIL: repo argument targets the given worktree (expected 'develop', got '$actual')"
+    fail=$((fail + 1))
+fi
+
+# And the reverse, so the case cannot pass by always reporting develop.
+actual=$(cd "$repo4" && "$TARGET" "$wt4")
+if [ "$actual" = "master" ]; then
+    echo "PASS: repo argument works in the other direction (got '$actual')"
+    pass=$((pass + 1))
+else
+    echo "FAIL: repo argument works in the other direction (expected 'master', got '$actual')"
+    fail=$((fail + 1))
+fi
+
+# A bad path must fail loudly. Falling back to the caller's directory here would
+# turn a typo into a confidently wrong answer.
+if (cd "$repo4" && "$TARGET" "${repo4}-nonexistent" >/dev/null 2>&1); then
+    echo "FAIL: nonexistent repo argument exits non-zero"
+    fail=$((fail + 1))
+else
+    echo "PASS: nonexistent repo argument exits non-zero"
+    pass=$((pass + 1))
+fi
+
+git -C "$repo4" worktree remove --force "$wt4" >/dev/null 2>&1
+rm -rf "$repo4" "$wt4"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

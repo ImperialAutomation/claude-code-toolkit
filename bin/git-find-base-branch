@@ -15,6 +15,20 @@
 #      current branch (original heuristic) — covers repos without a
 #      develop/master/main branch.
 #   3. Last resort: first existing develop/master/main, even if not an ancestor.
+#
+# Usage:
+#   git-find-base-branch [repo-dir]
+#
+# Without an argument this reports on the current directory. With one it reports
+# on THAT worktree — necessary because an agent's working directory resets
+# between commands, so a caller working in a linked worktree would otherwise get
+# the base branch of whichever tree the session started in. Resolve the path with
+# git-resolve-worktree.sh rather than typing it out.
+
+REPO_DIR="${1:-}"
+if [ -n "$REPO_DIR" ]; then
+    cd "$REPO_DIR" || { echo "Error: cannot cd into repo '$REPO_DIR'." >&2; exit 1; }
+fi
 
 current=$(git branch --show-current)
 
