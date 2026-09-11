@@ -154,6 +154,9 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 |--------|-------|-------------|
 | `docker-health-check.sh` | `docker-health-check.sh [project-dir] [--timeout S] [--filter PREFIX]` | Runtime Docker container health verification (status, restarts, error logs) |
 | `smoke-test.sh` | `smoke-test.sh [base-url] [--health-token TOKEN]` | API endpoint smoke testing with auto-discovery |
+| `http-status.sh` | `http-status.sh [--body] [--max-time SECS] <url> [url...]` | HTTP status per URL as a single command. One URL prints the bare code; several print `<status>  <url>`. 4xx/5xx exit 0 (a valid answer); transport failures print `ERR` and exit 1 |
+
+`http-status.sh` exists for permission matching, not for curl features. `curl -s -o /dev/null -w "%{http_code}\n" <url>` is rarely wanted just once, and two on a line make a compound command — every segment after the `;` or `&&` goes unmatched and prompts, even with a broad `Bash(curl *)` rule allowlisted. Auth headers, retries and JSON parsing are deliberately absent: past that point it is not a smoke test and calling `curl` directly is clearer. For waiting until a service comes up, use `wait-for-pattern.sh` or `wait-for-healthy.sh`.
 
 ### Development tools
 
@@ -208,6 +211,7 @@ claude-code-toolkit/
 │   ├── docker-audit.sh            ← audit Docker config for common issues
 │   ├── docker-health-check.sh     ← runtime Docker container health verification
 │   ├── smoke-test.sh              ← API endpoint smoke testing with auto-discovery
+│   ├── http-status.sh             ← HTTP status for one or more URLs (single command)
 │   ├── project-test.sh            ← run pytest with automatic venv detection
 │   ├── venv-run.sh                ← run any venv binary (python, pip, alembic)
 │   ├── secret-scan.sh             ← scan for hardcoded secrets and API keys
