@@ -48,4 +48,11 @@ if [[ ${#URLS[@]} -eq 0 ]]; then
   exit 2
 fi
 
-curl -sS -o /dev/null -w '%{http_code}\n' --max-time "$MAX_TIME" "${URLS[0]}"
+for url in "${URLS[@]}"; do
+  status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$MAX_TIME" "$url")
+  if [[ ${#URLS[@]} -eq 1 ]]; then
+    echo "$status"
+  else
+    echo "$status  $url"
+  fi
+done

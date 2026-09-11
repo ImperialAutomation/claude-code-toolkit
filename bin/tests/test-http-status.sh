@@ -54,6 +54,16 @@ echo "== 1. single URL prints only the status code =="
 check "bare status" "200" "$(run "$BASE/health")"
 check "exit 0 on 200" "0" "$(run "$BASE/health" >/dev/null 2>&1; echo $?)"
 
+echo "== 2. several URLs print status and URL, in argument order =="
+OUT=$(run "$BASE/health" "$BASE/missing")
+check "first line"  "200  $BASE/health"   "$(sed -n 1p <<<"$OUT")"
+check "second line" "404  $BASE/missing"  "$(sed -n 2p <<<"$OUT")"
+check "line count"  "2"                   "$(wc -l <<<"$OUT" | tr -d ' ')"
+# Argument order, not response order: a slower first URL must still print first.
+OUT=$(run "$BASE/missing" "$BASE/health")
+check "order follows args" "404  $BASE/missing" "$(sed -n 1p <<<"$OUT")"
+check "a 4xx is not an error" "0" "$(run "$BASE/missing" >/dev/null 2>&1; echo $?)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
