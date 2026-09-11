@@ -112,6 +112,37 @@ check "nonexistent absolute path exits non-zero" "1" \
 # An explicit hint decides; --issue is only the fallback for when none was given.
 check "hint wins over --issue" "$DEV1" "$(run "$MAIN" --issue 108 dev1)"
 
+echo "== 4. ambiguity is refused, never resolved by picking one =="
+# 'dev' matches both dev1 and dev2. Picking either would be a coin flip whose
+# loss is a commit in a tree the user never opened.
+check "ambiguous hint exits non-zero" "1" "$(run "$MAIN" dev >/dev/null 2>&1; echo $?)"
+check "ambiguous hint prints nothing on stdout" "" "$(run "$MAIN" dev 2>/dev/null)"
+AMBIG=$(run "$MAIN" dev 2>&1 >/dev/null)
+check "names both candidates" "2" "$(grep -c 'billing-api-dev[12]' <<< "$AMBIG")"
+# Path alone does not distinguish the two; the branch is what tells the user
+# which tree holds the work they mean.
+check "shows the first branch" "yes" \
+    "$(case "$AMBIG" in *issue-77-invoice-rounding*) echo yes ;; *) echo no ;; esac)"
+check "shows the second branch" "yes" \
+    "$(case "$AMBIG" in *issue-108-vat-export*) echo yes ;; *) echo no ;; esac)"
+# A substring matching every worktree, including the main tree, is the other
+# shape of the same mistake — 'billing-api' looks specific but matches all three.
+check "repo-wide substring is ambiguous too" "1" \
+    "$(run "$MAIN" billing-api >/dev/null 2>&1; echo $?)"
+# A failed resolve must leave nothing on stdout for `$(...)` to capture, or the
+# caller silently proceeds with an empty path that `git -C ''` reads as cwd.
+check "no match prints nothing on stdout" "" "$(run "$MAIN" nope 2>/dev/null)"
+check "unknown issue prints nothing on stdout" "" "$(run "$MAIN" --issue 999 2>/dev/null)"
+# The no-match message must still show where the caller could go instead.
+NOMATCH=$(run "$MAIN" nope 2>&1 >/dev/null)
+check "no match lists known worktrees" "3" "$(grep -c 'billing-api' <<< "$NOMATCH")"
+
+echo "== 5. argument validation =="
+check "two hints exit 2" "2" "$(run "$MAIN" dev1 dev2 >/dev/null 2>&1; echo $?)"
+check "unknown option exits 2" "2" "$(run "$MAIN" --nope >/dev/null 2>&1; echo $?)"
+check "usage goes to stderr" "yes" \
+    "$(case "$(run "$MAIN" --nope 2>&1 >/dev/null)" in *usage*) echo yes ;; *) echo no ;; esac)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
