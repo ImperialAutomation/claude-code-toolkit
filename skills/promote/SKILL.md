@@ -14,7 +14,7 @@ Move a proven project-local pattern to the shared toolkit (`claude-code-toolkit`
 ## Input
 
 The argument is one of: `$ARGUMENTS`
-- A path to a script (e.g. `scripts/pam-login.sh`)
+- A path to a script (e.g. `scripts/api-login.sh`)
 - A procedure name from CLAUDE.md (e.g. "FastAPI session auth")
 - A toolkit proposal file (e.g. `~/.claude/toolkit-proposals/fastapi-session-login.md`)
 
@@ -87,10 +87,10 @@ Before (in project repo):
 After (in project repo):
 ```bash
 #!/usr/bin/env bash
-# PAM login — wraps toolkit's fastapi-session-login
+# Project login — wraps toolkit's fastapi-session-login
 source .env
 ~/.claude/bin/fastapi-session-login.sh \
-  "http://localhost:8000" "$PAM_DEBUG_USER" "$PAM_DEBUG_PASS"
+  "http://localhost:8000" "$DEBUG_USER" "$DEBUG_PASS"
 ```
 
 New (in toolkit repo):
@@ -118,7 +118,7 @@ After (in project CLAUDE.md):
 ## Learned Procedures
 ### FastAPI Session Auth
 See ~/.claude/skills/claude-code-toolkit/claude-md/procedures/fastapi-session-auth.md
-Project-specific: base URL is http://localhost:8000, credentials in .env as PAM_DEBUG_USER/PAM_DEBUG_PASS
+Project-specific: base URL is http://localhost:8000, credentials in .env as DEBUG_USER/DEBUG_PASS
 ```
 
 ## Phase 5: Update References

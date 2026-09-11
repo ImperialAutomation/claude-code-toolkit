@@ -44,9 +44,9 @@ not do before?**
 
 | Bump | When | Real example |
 |---|---|---|
-| `major` | breaking change consumers must react to — removed/renamed route or response field, a migration dropping data still in use, a config rename with no fallback | (none yet in this repo) |
-| `minor` | new capability that did not exist in the previous tag | v1.9.0 — registration kill-switch, unified seen-tracking |
-| `patch` | fixes, refactors, docs, dependency bumps, tests. No new capability | v1.7.1 — backups produced archives that could not be restored; "fixes a path that was already supposed to work" |
+| `major` | breaking change consumers must react to — removed/renamed route or response field, a migration dropping data still in use, a config rename with no fallback | a response field consumers still read is renamed with no fallback |
+| `minor` | new capability that did not exist in the previous tag | a kill-switch that lets an operator disable registration at runtime |
+| `patch` | fixes, refactors, docs, dependency bumps, tests. No new capability | backups produced archives that could not be restored; "fixes a path that was already supposed to work" |
 
 Mixed batch → the highest bump present wins. A batch with one new feature and
 twelve fixes is `minor`.
@@ -99,10 +99,10 @@ Headings describe **the problem solved**, not the PR. Past releases use
 
 - **Operator note** — anything a human must do around the deploy: renamed env
   vars (with an old→new table), a new variable to set, a feature that ships
-  *off* and needs turning on. Include the restart caveat: use `stop.sh`/
-  `start.sh`, since a plain `docker compose restart` leaves `pam_api` untouched
-  behind its `depends_on` health gate, so a new env value never reaches the
-  process.
+  *off* and needs turning on. Include the restart caveat where it applies: with
+  a `depends_on` health gate, a plain `docker compose restart` can leave a
+  service untouched, so a new env value never reaches the process — use the
+  project's own stop/start scripts instead.
 - **Migration note** — one bullet per migration: what it does, whether it is
   additive or destructive, whether it is idempotent. Call out any drop
   explicitly and say why it is safe (e.g. expand/contract split across two
@@ -120,8 +120,8 @@ each with a **specific justification for this batch** — not a bare `[x]`:
 
 ```
 - [x] No destructive ops added without a second barrier — `20260812002` drops
-      `persons.waves_last_viewed_at`, deliberately split into its own revision
-      so it runs only after the data moved to `match_actions.seen_at`
+      `<table>.<old_column>`, deliberately split into its own revision so it
+      runs only after the data moved to `<other_table>.<new_column>`
 ```
 
 If an item genuinely does not apply, say why it does not apply. Never tick a
@@ -134,8 +134,8 @@ Apply the label **at creation**, so `semver-check` sees exactly one:
 ```bash
 gh pr create --repo OWNER/NAME --base master --head develop \
   --label "release:minor" \
-  --title "release: v1.9.0 — registration kill-switch (#2480), unified seen-tracking (#2466), bare-domain vhosts (#2369)" \
-  --body-file /tmp/pam-pr-body-release-190.md
+  --title "release: v1.9.0 — <headline item> (#123), <second item> (#124), <third item> (#125)" \
+  --body-file /tmp/<project>-pr-body-release-190.md
 ```
 
 Title format: `release: vX.Y.Z — <2-3 headline items with issue numbers>`.

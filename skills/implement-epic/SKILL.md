@@ -90,7 +90,7 @@ Copy the project's CLAUDE.md files to a temp location so sub-agents can lazy-loa
 ~/.claude/bin/epic-prepare-context.sh $ARGUMENTS
 ```
 
-The script prints the destination prefix on stdout — store it as `context_prefix` (e.g. `/tmp/epic-otia-632-claude`). On stderr it lists which sections it copied and from which source path, because doc layouts differ per project (`backend/CLAUDE.md` vs `backend/app/CLAUDE.md`, `frontend/CLAUDE.md` vs `src/CLAUDE.md`).
+The script prints the destination prefix on stdout — store it as `context_prefix` (e.g. `/tmp/epic-<project>-632-claude`). On stderr it lists which sections it copied and from which source path, because doc layouts differ per project (`backend/CLAUDE.md` vs `backend/app/CLAUDE.md`, `frontend/CLAUDE.md` vs `src/CLAUDE.md`).
 
 **Only list a section in a sub-agent prompt if the script reported copying it.** A missing context file is harmless — the sub-agent reads the repo's CLAUDE.md itself. Pointing an agent at a path that holds nothing, or worse another project's doc, makes it treat foreign architecture as this project's. The prefix is namespaced per project and epic, and stale destinations are cleared on every run, so cross-project contamination cannot occur through this path.
 
@@ -710,6 +710,23 @@ You are verifying that the application works at runtime after all sub-issues for
 Project policies are in these files — read them BEFORE starting:
 - <context_prefix>-root.md (project overview, dev commands)
 
+### Step 0: Find the project's own commands
+
+This step is project-specific — never guess a container name or a script path.
+Read the root CLAUDE.md and the compose file to establish, before running
+anything:
+
+- `api_container` — the service/container running the API (`docker compose ps`,
+  or the service key in `docker-compose.yml`)
+- `restart_cmd` — how this project restarts its stack. Many projects wrap this
+  in `stop.sh`/`start.sh` scripts, because a plain `docker compose restart`
+  leaves services behind a `depends_on` health gate untouched. Prefer the
+  project's own scripts where they exist
+- `login_script` — the project's API login helper, if it has one
+
+If a project defines none of these, skip the steps below that depend on it and
+report SKIP with the reason. A step that cannot be run is not a failure.
+
 ### Step 1: Rebuild containers if dependencies changed
 
 Check if dependency files were modified:
@@ -718,10 +735,9 @@ Check if dependency files were modified:
 git diff develop..<feature_branch> --name-only | grep -E "(package\.json|package-lock\.json|requirements\.txt|pyproject\.toml|uv\.lock)"
 ```
 
-If any dependency file changed:
-- Frontend: `cd backend/docker && ./stop.sh && ./start.sh`
-- Backend only: `docker restart pam_api`
-Wait for containers to be healthy: `~/.claude/bin/wait-for-healthy.sh pam_api`
+If any dependency file changed, run `<restart_cmd>` — a dependency change needs
+a rebuild, not a plain restart. Then wait for health:
+`~/.claude/bin/wait-for-healthy.sh <api_container>`
 
 ### Step 2: Container health check
 
@@ -730,7 +746,7 @@ Wait for containers to be healthy: `~/.claude/bin/wait-for-healthy.sh pam_api`
 ```
 
 If containers are down or unhealthy:
-1. Run `cd backend/docker && ./stop.sh && ./start.sh`
+1. Run `<restart_cmd>`
 2. Wait 15 seconds, re-check
 3. After 1 failed retry: report failure but continue
 
@@ -740,19 +756,21 @@ If containers are down or unhealthy:
 ~/.claude/bin/smoke-test.sh [base-url] [--health-token TOKEN]
 ```
 
-### Step 4: Migration check (if alembic detected)
+### Step 4: Migration check (if a migration tool is detected)
 
-- Run `docker exec pam_api alembic current` and verify no errors
-- Check `docker logs pam_api --tail 20` for migration failures
+- Run the project's "current revision" command in the API container (for
+  alembic: `docker exec <api_container> alembic current`) and verify no errors
+- Check `docker logs <api_container> --tail 20` for migration failures
 - If migrations failed: investigate and fix
 
 ### Step 5: Login smoke test
 
-Use the project's API login script to verify a test account can log in:
+If the project has a login script, use it to verify a test account can log in:
 ```bash
-./scripts/api-login.sh admin
+<login_script> admin
 ```
 If it fails with 502/500: the API is broken — investigate container logs.
+If the project has no such script, report SKIP.
 
 ### Step 6: Report
 
