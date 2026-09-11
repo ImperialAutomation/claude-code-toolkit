@@ -123,11 +123,32 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `git-find-base-branch` | `git-find-base-branch` | Detect the base branch of the current branch |
+| `git-find-base-branch` | `git-find-base-branch [repo-dir]` | Detect the base branch of the current branch, or of the worktree at `repo-dir` |
+| `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). Repos without CI need `--no-ci-wait`. Creates the PR itself, so `gh pr create` hooks do not fire — see [failure modes](docs/git-script-failure-modes.md) |
+
+`git-resolve-worktree.sh` exists because an agent's working directory resets
+between every Bash call, and so do exported variables. In a repository with
+linked worktrees nothing carries "work in that tree" from one command to the
+next, so a bare `git` or a repo-relative path quietly acts on whichever directory
+the session started in. The failure is silent: a commit can land on another
+session's branch, carrying that session's staged files, and exit 0.
+
+The script turns a short hint into the one absolute path that every following
+command must carry (`git -C <path>`, `git-commit.sh --repo <path>`, absolute
+Read/Edit paths). `--issue N` finds the worktree on branch `issue-N-*`, so resumed
+work needs no argument at all; otherwise a case-insensitive substring of the path
+is enough. Ambiguity is the interesting case: several matches, or none, exit
+non-zero with the candidates and their branches on stderr and **nothing on
+stdout**, so a `$(...)` capture cannot silently become a guess. With no argument
+and nothing to detect it prints the current worktree, leaving single-worktree
+projects exactly as they were.
+
+`git-find-base-branch` takes the same path, for the same reason: without it, it
+reads the start directory and reports the base branch of the wrong tree.
 
 ### Project audits
 
@@ -198,7 +219,8 @@ claude-code-toolkit/
 ├── bin/                       ← helper scripts (batch operations, git utilities)
 │   ├── batch-issue-view.sh    ← fetch multiple issues as JSON array
 │   ├── batch-issue-status.sh  ← fetch issue status as JSON array
-│   ├── git-find-base-branch   ← detect base branch of current branch
+│   ├── git-find-base-branch   ← detect base branch (of a given worktree)
+│   ├── git-resolve-worktree.sh ← resolve a worktree hint to one absolute path
 │   ├── git-cleanup-merged-branch.sh ← cleanup after PR merge
 │   ├── git-commit.sh               ← commit via temp file (sub-agent safe)
 │   ├── git-push-pr-merge.sh        ← push, PR, merge, return to base
