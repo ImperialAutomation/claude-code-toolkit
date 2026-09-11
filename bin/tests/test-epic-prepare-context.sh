@@ -60,17 +60,17 @@ marker_of() { # file -> first-line marker, or "MISSING"
     head -1 "$1" | sed 's/^# //'
 }
 
-echo "== 1. PAM layout: backend/app/CLAUDE.md is copied =="
-P=$(newproject pam "CLAUDE.md:pam-root" "backend/app/CLAUDE.md:pam-backend")
+echo "== 1. nested layout: backend/app/CLAUDE.md is copied =="
+P=$(newproject nested "CLAUDE.md:nested-root" "backend/app/CLAUDE.md:nested-backend")
 PREFIX=$(run 100 "$P")
-check "root copied"    pam-root    "$(marker_of "$PREFIX-root.md")"
-check "backend copied" pam-backend "$(marker_of "$PREFIX-backend.md")"
+check "root copied"    nested-root    "$(marker_of "$PREFIX-root.md")"
+check "backend copied" nested-backend "$(marker_of "$PREFIX-backend.md")"
 
-echo "== 2. Otia layout: backend/CLAUDE.md is copied =="
-P=$(newproject otia "CLAUDE.md:otia-root" "backend/CLAUDE.md:otia-backend")
+echo "== 2. flat layout: backend/CLAUDE.md is copied =="
+P=$(newproject flat "CLAUDE.md:flat-root" "backend/CLAUDE.md:flat-backend")
 PREFIX=$(run 200 "$P")
-check "root copied"    otia-root    "$(marker_of "$PREFIX-root.md")"
-check "backend copied" otia-backend "$(marker_of "$PREFIX-backend.md")"
+check "root copied"    flat-root    "$(marker_of "$PREFIX-root.md")"
+check "backend copied" flat-backend "$(marker_of "$PREFIX-backend.md")"
 
 echo "== 3. frontend: src/CLAUDE.md is used when frontend/ has none =="
 P=$(newproject webapp "CLAUDE.md:web-root" "src/CLAUDE.md:web-src")

@@ -6,16 +6,16 @@ paths: "**/database/**, **/db/**, **/models/**, **/repositories/**, **/*session*
 # Database Concurrency
 
 Pick one DB-access lane and stay in it. Mixing sync and async is the trap, not
-either one on its own. (Lesson A8 — PAM.)
+either one on its own.
 
 ## Sync vs async: choose deliberately, never by cargo-cult
 
 - **Sync engine → `def` route handlers, never `async def`** for DB-touching routes.
   FastAPI runs `def` handlers in a threadpool (no event-loop blocking). A **sync**
   `Session` inside an `async def` route blocks the event loop on *every query* — the
-  most common FastAPI footgun. PAM shipped 87 `async def` routes holding a sync
-  `Session`, doing synchronous DB work with no `await` in the body: pure overhead and
-  a latent outage, chosen by copying FastAPI examples, never decided.
+  most common FastAPI footgun. One project shipped 87 `async def` routes holding a
+  sync `Session`, doing synchronous DB work with no `await` in the body: pure overhead
+  and a latent outage, chosen by copying FastAPI examples, never decided.
 - **`async def` only when there is real async I/O** — an actual `await` on an async
   client/SDK. Don't propagate `async` through services/helpers that do no real I/O;
   async that awaits nothing is cost without benefit.
@@ -31,7 +31,7 @@ either one on its own. (Lesson A8 — PAM.)
 ## Pool hardening is foundation work, not incident response
 
 Bake these into the engine setup from day one — don't wait for the outage that
-teaches them (PAM learned via a 40-minute stuck-pool outage):
+teaches them (one project learned via a 40-minute stuck-pool outage):
 
 - `pool_pre_ping=True` — replace dead connections before handing them out; log the
   replacement so degrading pool health is visible early, not discovered mid-outage.

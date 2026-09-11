@@ -27,9 +27,9 @@ MUST use ~/.claude/bin/git-find-base-branch for base branch detection for the PR
 
 1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/issue-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels`, then use the Read tool to read it
 2. **Check for linked Sentry issues** in the issue body:
-   * Look for Sentry issue references like `PAM-BACKEND-X`, Sentry URLs, or "Sentry Issues" sections
+   * Look for Sentry issue references — short IDs of the form `<PROJECT>-<PLATFORM>-<SUFFIX>`, Sentry URLs, or "Sentry Issues" sections
    * If found, note the Sentry issue IDs — these will be referenced in commit messages and the PR body for automatic resolution
-   * Store as a list, e.g. `SENTRY_ISSUES=["PAM-BACKEND-G", "PAM-BACKEND-H"]`
+   * Store as a list, e.g. `SENTRY_ISSUES=["MYAPP-BACKEND-G", "MYAPP-BACKEND-H"]`
 3. Read AND verify understanding of existing code:
    * Read all CLAUDE.md files (root, frontend, backend if they exist)
    * Read the ACTUAL source files you plan to modify
@@ -80,7 +80,7 @@ STOP HERE and ask for confirmation before proceeding to implementation.
    * Remove duplication, improve naming if needed
    * Run tests again to confirm nothing broke
    * Commit: `~/.claude/bin/git-commit.sh "descriptive message for this step"`
-   * If SENTRY_ISSUES were found in Phase 1, add `Fixes <ID>` to the **final commit only** (the last step before PR creation), e.g.: `~/.claude/bin/git-commit.sh "final step description" "" "Fixes PAM-BACKEND-G" "Fixes PAM-BACKEND-H"`
+   * If SENTRY_ISSUES were found in Phase 1, add `Fixes <ID>` to the **final commit only** (the last step before PR creation), e.g.: `~/.claude/bin/git-commit.sh "final step description" "" "Fixes MYAPP-BACKEND-G" "Fixes MYAPP-BACKEND-H"`
 
 4. **Move on — Focus shifts to the next step**
    * Do not revisit completed steps unless a later test breaks them
@@ -215,11 +215,15 @@ If findings with severity > INFO:
 - Max 2 iterations — remaining findings go into the PR body as "Known Issues"
 
 ### Step F: API smoke test (skip if has_backend_endpoints = false)
-1. Restart API container: `docker restart pam_api`, then wait for it to come back up: `~/.claude/bin/wait-for-healthy.sh pam_api`
-2. Seed E2E accounts if needed: `npm run db:seed:e2e`
-3. Login: `./scripts/api-login.sh premium` then read `/tmp/pam-token.txt`
+First establish the project's own names — read the root CLAUDE.md and the
+compose file for the API container, the restart command and the login helper.
+Never guess a container name or script path; if the project defines none, skip
+this step and report SKIP with the reason.
+1. Restart the API container, then wait for it to come back up: `~/.claude/bin/wait-for-healthy.sh <api_container>`
+2. Seed test accounts if the project has a seed command
+3. Log in with the project's login helper and capture the token it writes
 4. Call each new/modified endpoint, verify 2xx + correct JSON structure
-5. On 500: check `docker logs pam_api --tail 30`, fix root cause, re-run
+5. On 500: check `docker logs <api_container> --tail 30`, fix root cause, re-run
 
 ## Execute — do not describe or delegate
 
@@ -270,7 +274,7 @@ Before proceeding to PR creation:
    - Test checklist (test counts from the verification sub-agent's TESTS line)
    - If `KNOWN_ISSUES` from Phase 3 is not "none": add a `## Known Issues` section listing them
    - If `AC_UNVERIFIED` from Phase 3 is not "none": add a `## Manual Review Needed` section listing the UNVERIFIED criteria
-   - If SENTRY_ISSUES were found in Phase 1, add a `## Sentry` section: `Resolves: PAM-BACKEND-G, PAM-BACKEND-H`
+   - If SENTRY_ISSUES were found in Phase 1, add a `## Sentry` section: `Resolves: MYAPP-BACKEND-G, MYAPP-BACKEND-H`
 3. Push + create PR in one command:
    `~/.claude/bin/git-push-pr-merge.sh --base <base-branch> --title "<concise description>" --body-file /tmp/pr-body.md --no-merge`
    `--no-merge` means the CI gate is skipped — the PR is left open for human review regardless of check status
