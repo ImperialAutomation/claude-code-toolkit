@@ -64,6 +64,21 @@ OUT=$(run "$BASE/missing" "$BASE/health")
 check "order follows args" "404  $BASE/missing" "$(sed -n 1p <<<"$OUT")"
 check "a 4xx is not an error" "0" "$(run "$BASE/missing" >/dev/null 2>&1; echo $?)"
 
+echo "== 3. transport failure exits non-zero but does not hide the other URLs =="
+check "refused connection exits 1" "1" "$(run "$DEAD" >/dev/null 2>&1; echo $?)"
+check "refused prints ERR" "ERR" "$(run "$DEAD" 2>/dev/null)"
+# A dead host first must not stop the live one behind it from being reported —
+# otherwise one broken service makes the whole smoke test unreadable.
+OUT=$(run "$DEAD" "$BASE/health" 2>/dev/null)
+check "dead URL marked"   "ERR  $DEAD"        "$(sed -n 1p <<<"$OUT")"
+check "live URL reported" "200  $BASE/health" "$(sed -n 2p <<<"$OUT")"
+check "mixed run exits 1" "1" "$(run "$DEAD" "$BASE/health" >/dev/null 2>&1; echo $?)"
+# curl's own explanation must survive to stderr — "ERR" alone does not tell you
+# whether it was DNS, a refused connection or a timeout.
+DIAG=$(run "$DEAD" 2>&1 >/dev/null)
+check "curl diagnostic on stderr" "yes" \
+    "$(case "$DIAG" in *onnect*|*efus*|*imed\ out*) echo yes ;; *) echo no ;; esac)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

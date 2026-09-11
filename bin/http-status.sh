@@ -48,11 +48,24 @@ if [[ ${#URLS[@]} -eq 0 ]]; then
   exit 2
 fi
 
+FAILED=0
+
 for url in "${URLS[@]}"; do
-  status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$MAX_TIME" "$url")
+  # A transport failure prints ERR rather than curl's "000", which is easy to
+  # misread as a status. The loop continues: one dead host must not hide the
+  # answers for the URLs behind it.
+  if status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$MAX_TIME" "$url"); then
+    :
+  else
+    status="ERR"
+    FAILED=1
+  fi
+
   if [[ ${#URLS[@]} -eq 1 ]]; then
     echo "$status"
   else
     echo "$status  $url"
   fi
 done
+
+exit "$FAILED"
