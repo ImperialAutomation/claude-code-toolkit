@@ -79,6 +79,20 @@ check "from a subdirectory" "$DEV1" "$(run "$DEV1/src/billing")"
 # exact silent fallback this script exists to prevent.
 check "outside a repository exits non-zero" "1" "$(run "$T" >/dev/null 2>&1; echo $?)"
 
+echo "== 2. --issue picks the worktree whose branch is issue-<nr>-<slug> =="
+check "matches its own tree" "$DEV1" "$(run "$MAIN" --issue 77)"
+check "matches the other tree" "$DEV2" "$(run "$MAIN" --issue 108)"
+check "--issue=N spelling" "$DEV2" "$(run "$MAIN" --issue=108)"
+# The pattern must end at the dash. Without it `7` matches `issue-77-*` and the
+# work lands one tree over, which is precisely the silent failure this prevents.
+check "7 does not match issue-77" "1" "$(run "$MAIN" --issue 7 >/dev/null 2>&1; echo $?)"
+check "10 does not match issue-108" "1" "$(run "$MAIN" --issue 10 >/dev/null 2>&1; echo $?)"
+check "unknown issue exits non-zero" "1" "$(run "$MAIN" --issue 999 >/dev/null 2>&1; echo $?)"
+# Resolving from inside a linked tree must still obey --issue, otherwise an
+# agent already sitting in dev1 would silently keep working there.
+check "--issue wins over the caller's tree" "$DEV2" "$(run "$DEV1" --issue 108)"
+check "--issue without a value exits 2" "2" "$(run "$MAIN" --issue >/dev/null 2>&1; echo $?)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

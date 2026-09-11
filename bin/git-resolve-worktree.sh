@@ -68,4 +68,72 @@ if [[ -z "$CURRENT_ROOT" ]]; then
     exit 1
 fi
 
+# Collect the repository's worktrees as `<path>\t<branch>` lines. --porcelain is
+# the stable machine format; a detached worktree gets an empty branch field
+# rather than being dropped, so it can still be matched by path and can still be
+# listed as a candidate.
+WORKTREES=$(
+    git worktree list --porcelain 2>/dev/null |
+    awk '
+        /^worktree /        { if (path != "") print path "\t" branch; path = substr($0, 10); branch = "" }
+        /^branch refs\/heads\// { branch = substr($0, 19) }
+        END                 { if (path != "") print path "\t" branch }
+    '
+)
+
+field() { # line index
+    printf '%s' "$1" | cut -f"$2"
+}
+
+# Report every worktree with its branch, so a failed resolve tells the caller
+# what they could have meant instead of just that they were wrong.
+list_candidates() { # lines...
+    local line path branch
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        path=$(field "$line" 1)
+        branch=$(field "$line" 2)
+        printf '  %s  [%s]\n' "$path" "${branch:-detached}" >&2
+    done <<< "$1"
+}
+
+# Narrow to at most one worktree, or explain why that was not possible. Nothing
+# is ever printed to stdout on failure: callers capture stdout in `$(...)`, so a
+# guess there would be indistinguishable from a real answer.
+select_one() { # matches description
+    local matches="$1" description="$2" count
+    count=$(grep -c . <<< "$matches")
+    [[ -z "$matches" ]] && count=0
+
+    if [[ "$count" -eq 1 ]]; then
+        field "$matches" 1
+        return 0
+    fi
+
+    if [[ "$count" -eq 0 ]]; then
+        echo "git-resolve-worktree.sh: $description matches no worktree of this repository." >&2
+    else
+        echo "git-resolve-worktree.sh: $description matches $count worktrees:" >&2
+        list_candidates "$matches"
+        echo "Be more specific — pass a longer hint or the absolute path." >&2
+    fi
+
+    if [[ "$count" -eq 0 ]]; then
+        echo "Known worktrees:" >&2
+        list_candidates "$WORKTREES"
+    fi
+    return 1
+}
+
+# 1. --issue: the branch convention `issue-<nr>-<slug>` makes the worktree
+#    derivable on resumed work, so the caller types nothing. The trailing dash
+#    is load-bearing: without it `--issue 7` also matches `issue-77-...`.
+if [[ -n "$ISSUE" ]]; then
+    MATCHES=$(awk -F'\t' -v prefix="issue-$ISSUE-" 'index($2, prefix) == 1' <<< "$WORKTREES")
+    select_one "$MATCHES" "issue $ISSUE" || exit 1
+    exit 0
+fi
+
+# 2. No hint and no issue: the caller's own tree. Unchanged behaviour for the
+#    single-worktree case, which is most repositories most of the time.
 echo "$CURRENT_ROOT"
