@@ -125,7 +125,39 @@ select_one() { # matches description
     return 1
 }
 
-# 1. --issue: the branch convention `issue-<nr>-<slug>` makes the worktree
+# 1. An explicit hint decides, because the caller said it out loud. Two forms,
+#    tried in order of how specific they are.
+if [[ -n "$HINT" ]]; then
+    # Expand a leading ~ so a shell-quoted path still resolves.
+    case "$HINT" in "~"/*) HINT="$HOME/${HINT#\~/}" ;; esac
+
+    # 1a. A path: validated against this repository's worktree list, never
+    #     trusted on sight. A typo that happens to be a real directory
+    #     elsewhere, or a worktree of another project, must fail loudly.
+    if [[ "$HINT" == /* || "$HINT" == ./* || "$HINT" == ../* ]]; then
+        HINT_ROOT=$(git -C "$HINT" rev-parse --show-toplevel 2>/dev/null || true)
+        if [[ -z "$HINT_ROOT" ]]; then
+            echo "git-resolve-worktree.sh: '$HINT' is not inside a git worktree." >&2
+            echo "Known worktrees:" >&2
+            list_candidates "$WORKTREES"
+            exit 1
+        fi
+        MATCHES=$(awk -F'\t' -v root="$HINT_ROOT" '$1 == root' <<< "$WORKTREES")
+        select_one "$MATCHES" "path '$HINT_ROOT'" || exit 1
+        exit 0
+    fi
+
+    # 1b. A substring of a worktree path, case-insensitively. Short enough to
+    #     type, and unique matching is what keeps it honest.
+    MATCHES=$(awk -F'\t' -v hint="$HINT" '
+        BEGIN { hint = tolower(hint) }
+        index(tolower($1), hint) > 0
+    ' <<< "$WORKTREES")
+    select_one "$MATCHES" "hint '$HINT'" || exit 1
+    exit 0
+fi
+
+# 2. --issue: the branch convention `issue-<nr>-<slug>` makes the worktree
 #    derivable on resumed work, so the caller types nothing. The trailing dash
 #    is load-bearing: without it `--issue 7` also matches `issue-77-...`.
 if [[ -n "$ISSUE" ]]; then
@@ -134,6 +166,6 @@ if [[ -n "$ISSUE" ]]; then
     exit 0
 fi
 
-# 2. No hint and no issue: the caller's own tree. Unchanged behaviour for the
+# 3. No hint and no issue: the caller's own tree. Unchanged behaviour for the
 #    single-worktree case, which is most repositories most of the time.
 echo "$CURRENT_ROOT"

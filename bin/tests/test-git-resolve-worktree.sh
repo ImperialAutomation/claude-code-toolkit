@@ -93,6 +93,25 @@ check "unknown issue exits non-zero" "1" "$(run "$MAIN" --issue 999 >/dev/null 2
 check "--issue wins over the caller's tree" "$DEV2" "$(run "$DEV1" --issue 108)"
 check "--issue without a value exits 2" "2" "$(run "$MAIN" --issue >/dev/null 2>&1; echo $?)"
 
+echo "== 3. a hint is a case-insensitive substring of a worktree path =="
+check "unique substring" "$DEV1" "$(run "$MAIN" dev1)"
+check "uppercase hint" "$DEV2" "$(run "$MAIN" DEV2)"
+check "mixed case hint" "$DEV1" "$(run "$MAIN" Dev1)"
+check "hint exit 0" "0" "$(run "$MAIN" dev1 >/dev/null 2>&1; echo $?)"
+check "no such hint exits non-zero" "1" "$(run "$MAIN" nope >/dev/null 2>&1; echo $?)"
+# An absolute path is the escape hatch when no short hint is unique, but it is
+# validated rather than trusted: a typo must fail loudly, not point somewhere.
+check "absolute path passes through" "$DEV2" "$(run "$MAIN" "$DEV2")"
+check "trailing slash tolerated" "$DEV2" "$(run "$MAIN" "$DEV2/")"
+check "subdirectory of a worktree resolves to its root" "$DEV1" "$(run "$MAIN" "$DEV1/src/billing")"
+# A worktree of a DIFFERENT repository is a valid worktree, just not one of
+# ours. Accepting it would commit this session's work into an unrelated project.
+check "another repo's worktree is refused" "1" "$(run "$MAIN" "$OTHER" >/dev/null 2>&1; echo $?)"
+check "nonexistent absolute path exits non-zero" "1" \
+    "$(run "$MAIN" "$T/billing-api-dev9" >/dev/null 2>&1; echo $?)"
+# An explicit hint decides; --issue is only the fallback for when none was given.
+check "hint wins over --issue" "$DEV1" "$(run "$MAIN" --issue 108 dev1)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
