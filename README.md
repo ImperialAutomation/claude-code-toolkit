@@ -128,7 +128,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
-| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). Repos without CI need `--no-ci-wait`. Creates the PR itself, so `gh pr create` hooks do not fire — see [failure modes](docs/git-script-failure-modes.md) |
+| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. Creates the PR itself, so `gh pr create` hooks do not fire — see [failure modes](docs/git-script-failure-modes.md) |
 
 `git-resolve-worktree.sh` exists because an agent's working directory resets
 between every Bash call, and so do exported variables. In a repository with
@@ -147,8 +147,14 @@ stdout**, so a `$(...)` capture cannot silently become a guess. With no argument
 and nothing to detect it prints the current worktree, leaving single-worktree
 projects exactly as they were.
 
-`git-find-base-branch` takes the same path, for the same reason: without it, it
-reads the start directory and reports the base branch of the wrong tree.
+`git-find-base-branch <dir>`, `git-commit.sh --repo`, `git-diff-base.sh --repo`
+and `git-push-pr-merge.sh --repo` all take that same path, for the same reason:
+without it they read the start directory and act on the wrong tree.
+`git-push-pr-merge.sh` is the one with real teeth — it pushes, opens a PR, and on
+merge runs `checkout` and `branch -D`, so a wrong target is destructive to a tree
+nobody is watching, so it validates the path itself and refuses before pushing;
+the others fail loudly through git. None of them fall back to the caller's
+directory.
 
 ### Project audits
 

@@ -371,12 +371,8 @@ Before proceeding to PR creation:
    - If `AC_UNVERIFIED` from Phase 3 is not "none": add a `## Manual Review Needed` section listing the UNVERIFIED criteria
    - If SENTRY_ISSUES were found in Phase 1, add a `## Sentry` section: `Resolves: MYAPP-BACKEND-G, MYAPP-BACKEND-H`
 3. Push + create PR in one command:
-   `~/.claude/bin/git-push-pr-merge.sh --base <base-branch> --title "<concise description>" --body-file /tmp/<project>-pr-body-$ARGUMENTS.md --no-merge`
+   `~/.claude/bin/git-push-pr-merge.sh --repo <worktree> --base <base-branch> --title "<concise description>" --body-file /tmp/<project>-pr-body-$ARGUMENTS.md --no-merge`
    `--no-merge` means the CI gate is skipped — the PR is left open for human review regardless of check status
-   **This script has no `--repo` flag: it acts on the current directory.** When
-   `<worktree>` is not the session's start directory, confirm the branch first
-   (`git -C <worktree> branch --show-current`) and ask the user to run it from
-   `<worktree>`, rather than pushing whatever branch the start directory is on.
 4. Return PR URL for review
 
 ## Phase 5: Epic Tracking Update (automatic, if applicable)

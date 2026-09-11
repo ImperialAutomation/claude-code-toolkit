@@ -358,11 +358,10 @@ at the wrong one lands on another session's branch and exits 0.
 8. If tests pass:
    - Commit any remaining uncommitted work: `~/.claude/bin/git-commit.sh --repo <worktree> "concise descriptive message"`
    - Write PR body to /tmp/<project>-pr-body-<N>.md using the Write tool, then push + PR + merge in one command:
-     `~/.claude/bin/git-push-pr-merge.sh --base <feature_branch> --title "<title>" --body-file /tmp/<project>-pr-body-<N>.md`
-   - **This script has no `--repo` flag — it acts on the current directory.** If
-     `<worktree>` is not your start directory, do not run it: report the branch
-     you pushed in your response and let the orchestrator open the PR instead.
-     A blind run here pushes whatever branch the start directory is on.
+     `~/.claude/bin/git-push-pr-merge.sh --repo <worktree> --base <feature_branch> --title "<title>" --body-file /tmp/<project>-pr-body-<N>.md`
+   - `--repo` is not optional here: this script pushes, opens a PR, and on merge
+     runs `checkout` and `branch -D`. Without it those land in the session's
+     start directory, which after a merge is destructive to a tree nobody is watching.
    - This script pushes, creates the PR, waits for the CI checks, merges it, and returns to the feature branch automatically
    - The gate **fails closed**: it merges only on positive evidence that every check is green. Expect each sub-PR to take 1-2 minutes longer than a blind merge, and expect blocks where a red branch used to slip through silently — that is the gate working.
    - **If the script exits non-zero with `STATUS: CI_GATE_BLOCKED`:** the PR was left open. Read the `CI_GATE:` line to see why:
