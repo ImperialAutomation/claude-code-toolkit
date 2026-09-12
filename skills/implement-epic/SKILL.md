@@ -34,15 +34,23 @@ land on another session's branch with that session's staged files, exit 0.
 ~/.claude/bin/git-resolve-worktree.sh --issue $ARGUMENTS <hint-if-given>
 ```
 
-The hint is the second word of `$ARGUMENTS`, if given. Omit it and `--issue`
-finds the worktree already on branch `issue-$ARGUMENTS-*` — how a resumed epic is
-picked up without typing a path. With neither, the script prints the current
-worktree, so single-worktree projects behave exactly as before.
+The hint is the second word of `$ARGUMENTS`, if given. It may be the exact name
+of a worktree (an exact name always wins over a longer sibling, so `<repo>` means
+the main tree, not `<repo>-dev1`), any unique substring of its path, or an
+absolute path.
+
+`--issue` is tried when no hint resolves it: it finds the worktree already on
+branch `issue-$ARGUMENTS-*`, which is how a resumed epic is picked up without
+typing a path. On new work that branch does not exist yet — that is normal, and
+the script then reports the current worktree, exactly as with no arguments at
+all. Single-worktree projects therefore never notice this skill has a worktree
+concept.
 
 One absolute path on stdout and exit 0, or nothing on stdout and exit non-zero.
-**On non-zero, stop and show the user its stderr** — it lists the candidates with
-their branches. Never pick one yourself; an autonomous run is exactly where an
-unnoticed wrong guess does the most damage before anyone looks.
+Non-zero means the user's own hint was wrong or ambiguous. **Then stop and show
+them its stderr** — it lists the candidates with their branches. Never pick one
+yourself; an autonomous run is exactly where an unnoticed wrong guess does the
+most damage before anyone looks.
 
 Report the resolved path before the first commit: `Working in: <worktree> [branch]`.
 

@@ -140,13 +140,26 @@ session's branch, carrying that session's staged files, and exit 0.
 
 The script turns a short hint into the one absolute path that every following
 command must carry (`git -C <path>`, `git-commit.sh --repo <path>`, absolute
-Read/Edit paths). `--issue N` finds the worktree on branch `issue-N-*`, so resumed
-work needs no argument at all; otherwise a case-insensitive substring of the path
-is enough. Ambiguity is the interesting case: several matches, or none, exit
+Read/Edit paths). A hint is an exact worktree name, a unique case-insensitive
+substring of its path, or an absolute path.
+
+**An exact name beats a substring.** Worktree siblings are conventionally named
+by suffixing the main tree (`<repo>`, `<repo>-dev1`, `<repo>-dev2`), so the main
+tree's name appears inside every sibling's. Under a plain substring rule, typing
+the exact name of the main tree matches all of them and resolves to nothing,
+making the most common target the one tree you cannot name without an absolute
+path. Exact-beats-partial is how tab-completion already behaves.
+
+`--issue N` is the fallback when no hint resolves it: it finds the worktree on
+branch `issue-N-*`, so resumed work needs no argument at all. When no tree is on
+that branch — new work, before the branch exists — it reports the current
+worktree rather than failing, the same answer as no arguments at all. Detection
+that finds nothing is not an error; only a hint the user typed can be wrong.
+
+Ambiguity is the interesting case: a hint matching several trees, or none, exits
 non-zero with the candidates and their branches on stderr and **nothing on
-stdout**, so a `$(...)` capture cannot silently become a guess. With no argument
-and nothing to detect it prints the current worktree, leaving single-worktree
-projects exactly as they were.
+stdout**, so a `$(...)` capture cannot silently become a guess. Single-worktree
+projects never notice any of this.
 
 **`--repo` is the convention for every script that selects a git worktree**:
 `git-commit.sh`, `git-diff-base.sh`, `git-push-pr-merge.sh`, `git-verify.sh` and

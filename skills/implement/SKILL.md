@@ -33,16 +33,23 @@ land on another session's branch, carrying that session's staged files, and exit
 ~/.claude/bin/git-resolve-worktree.sh --issue $ARGUMENTS <hint-if-given>
 ```
 
-The hint is the second word of `$ARGUMENTS`, if the user gave one. Omit it and
-`--issue` finds the worktree already on branch `issue-$ARGUMENTS-*` — how resumed
-work is picked up without anyone typing a path. With neither, the script prints
-the current worktree, so single-worktree projects behave exactly as before.
+The hint is the second word of `$ARGUMENTS`, if the user gave one. It may be the
+exact name of a worktree (an exact name always wins over a longer sibling, so
+`<repo>` means the main tree, not `<repo>-dev1`), any unique substring of its
+path, or an absolute path.
+
+`--issue` is tried when no hint resolves it: it finds the worktree already on
+branch `issue-$ARGUMENTS-*`, which is how resumed work is picked up without
+anyone typing a path. On new work that branch does not exist yet — that is
+normal, and the script then simply reports the current worktree, exactly as it
+does with no arguments at all. Single-worktree projects therefore never notice
+this skill has a worktree concept.
 
 The script prints one absolute path and exits 0, or prints nothing to stdout and
-exits non-zero. **On non-zero, stop and show the user its stderr** — it lists the
-candidates with their branches. Do not pick one yourself and do not fall back to
-the current directory; an unresolved worktree is a question for the user, not a
-guess to make.
+exits non-zero. Non-zero means the user's own hint was wrong or ambiguous.
+**Then stop and show them its stderr** — it lists the candidates with their
+branches. Do not pick one yourself and do not fall back to the current directory;
+an unresolved hint is a question for the user, not a guess to make.
 
 Then state the resolved path to the user, before the first commit:
 

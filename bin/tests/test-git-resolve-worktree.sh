@@ -85,9 +85,11 @@ check "matches the other tree" "$DEV2" "$(run "$MAIN" --issue 108)"
 check "--issue=N spelling" "$DEV2" "$(run "$MAIN" --issue=108)"
 # The pattern must end at the dash. Without it `7` matches `issue-77-*` and the
 # work lands one tree over, which is precisely the silent failure this prevents.
-check "7 does not match issue-77" "1" "$(run "$MAIN" --issue 7 >/dev/null 2>&1; echo $?)"
-check "10 does not match issue-108" "1" "$(run "$MAIN" --issue 10 >/dev/null 2>&1; echo $?)"
-check "unknown issue exits non-zero" "1" "$(run "$MAIN" --issue 999 >/dev/null 2>&1; echo $?)"
+# An unmatched --issue falls back to the caller's tree (section 3c), so what
+# matters here is that it never resolves to the wrong SIBLING.
+check "7 does not match issue-77" "$MAIN" "$(run "$MAIN" --issue 7)"
+check "10 does not match issue-108" "$MAIN" "$(run "$MAIN" --issue 10)"
+check "7 from a linked tree stays there" "$DEV2" "$(run "$DEV2" --issue 7)"
 # Resolving from inside a linked tree must still obey --issue, otherwise an
 # agent already sitting in dev1 would silently keep working there.
 check "--issue wins over the caller's tree" "$DEV2" "$(run "$DEV1" --issue 108)"
@@ -112,6 +114,40 @@ check "nonexistent absolute path exits non-zero" "1" \
 # An explicit hint decides; --issue is only the fallback for when none was given.
 check "hint wins over --issue" "$DEV1" "$(run "$MAIN" --issue 108 dev1)"
 
+echo "== 3b. an exact name beats a substring of its own siblings =="
+# The main tree's name is a prefix of every sibling's ("billing-api" is inside
+# "billing-api-dev1"), so a plain substring search finds the parent AND all its
+# children. Typing the exact name of a worktree must therefore mean THAT tree,
+# not "these three are all candidates" — otherwise naming the main tree is
+# impossible without typing an absolute path, which is the thing hints exist to
+# avoid. This is how tab-completion and package managers already behave.
+check "exact basename wins over its children" "$MAIN" "$(run "$MAIN" billing-api)"
+check "exact basename exits 0" "0" "$(run "$MAIN" billing-api >/dev/null 2>&1; echo $?)"
+check "exact basename from another tree" "$MAIN" "$(run "$DEV1" billing-api)"
+check "exact match is case-insensitive too" "$MAIN" "$(run "$DEV1" BILLING-API)"
+# A child's exact name still resolves to the child — the rule is "exact wins",
+# not "the parent always wins".
+check "exact child name still wins" "$DEV1" "$(run "$MAIN" billing-api-dev1)"
+# A full path is exact too, and must not be defeated by a longer sibling path.
+check "exact full path wins" "$MAIN" "$(run "$DEV1" "$MAIN")"
+# Without an exact hit, ambiguity still stands (see section 4).
+check "partial hint stays ambiguous" "1" "$(run "$MAIN" billing- >/dev/null 2>&1; echo $?)"
+
+echo "== 3c. failed --issue detection falls back to the caller's tree =="
+# --issue is a DETECTION attempt the skill always makes, not something the user
+# typed. When no worktree is on that branch — new work, before the branch exists
+# — the honest answer is "the tree you are in", exactly as with no argument at
+# all. Failing here strands the caller with no path, and whatever picks up the
+# pieces is guessing, which is what this script exists to prevent.
+check "unmatched --issue yields the caller's tree" "$MAIN" "$(run "$MAIN" --issue 4242)"
+check "unmatched --issue exits 0" "0" "$(run "$MAIN" --issue 4242 >/dev/null 2>&1; echo $?)"
+check "unmatched --issue from a linked tree" "$DEV1" "$(run "$DEV1" --issue 4242)"
+# A hint the user typed is different: that is an explicit instruction, so a miss
+# stays an error rather than quietly becoming "never mind, stay here".
+check "unmatched hint is still an error" "1" "$(run "$MAIN" --issue 4242 nope >/dev/null 2>&1; echo $?)"
+# Detection must still win when it does match.
+check "matched --issue still wins" "$DEV1" "$(run "$MAIN" --issue 77)"
+
 echo "== 4. ambiguity is refused, never resolved by picking one =="
 # 'dev' matches both dev1 and dev2. Picking either would be a coin flip whose
 # loss is a commit in a tree the user never opened.
@@ -125,14 +161,16 @@ check "shows the first branch" "yes" \
     "$(case "$AMBIG" in *issue-77-invoice-rounding*) echo yes ;; *) echo no ;; esac)"
 check "shows the second branch" "yes" \
     "$(case "$AMBIG" in *issue-108-vat-export*) echo yes ;; *) echo no ;; esac)"
-# A substring matching every worktree, including the main tree, is the other
-# shape of the same mistake — 'billing-api' looks specific but matches all three.
+# A substring matching every worktree is the other shape of the same mistake.
+# 'billing-' looks specific but matches all three, and is nobody's exact name.
 check "repo-wide substring is ambiguous too" "1" \
-    "$(run "$MAIN" billing-api >/dev/null 2>&1; echo $?)"
+    "$(run "$MAIN" billing- >/dev/null 2>&1; echo $?)"
 # A failed resolve must leave nothing on stdout for `$(...)` to capture, or the
 # caller silently proceeds with an empty path that `git -C ''` reads as cwd.
 check "no match prints nothing on stdout" "" "$(run "$MAIN" nope 2>/dev/null)"
-check "unknown issue prints nothing on stdout" "" "$(run "$MAIN" --issue 999 2>/dev/null)"
+# An unmatched --issue is NOT a failure (section 3c), so it is deliberately not
+# asserted here. A hint the user typed still is.
+check "ambiguous hint prints nothing again" "" "$(run "$MAIN" billing- 2>/dev/null)"
 # The no-match message must still show where the caller could go instead.
 NOMATCH=$(run "$MAIN" nope 2>&1 >/dev/null)
 check "no match lists known worktrees" "3" "$(grep -c 'billing-api' <<< "$NOMATCH")"

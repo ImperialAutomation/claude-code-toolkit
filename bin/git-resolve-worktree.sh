@@ -147,12 +147,32 @@ if [[ -n "$HINT" ]]; then
         exit 0
     fi
 
-    # 1b. A substring of a worktree path, case-insensitively. Short enough to
-    #     type, and unique matching is what keeps it honest.
+    # 1b. An exact name wins outright. Worktree siblings are conventionally named
+    #     by suffixing the main tree (`<repo>`, `<repo>-dev1`, `<repo>-dev2`), so
+    #     the main tree's own name is a substring of every sibling. Under a plain
+    #     substring rule, typing the exact name of the main tree matches all of
+    #     them and resolves to nothing — making the most common target the one
+    #     tree you cannot name without an absolute path. Exact-beats-partial is
+    #     how tab-completion and package managers already behave.
     MATCHES=$(awk -F'\t' -v hint="$HINT" '
         BEGIN { hint = tolower(hint) }
-        index(tolower($1), hint) > 0
+        {
+            path = tolower($1)
+            base = path
+            sub(/^.*\//, "", base)
+            if (base == hint || path == hint) print
+        }
     ' <<< "$WORKTREES")
+
+    # 1c. Otherwise a substring, case-insensitively. Short enough to type, and
+    #     unique matching is what keeps it honest.
+    if [[ -z "$MATCHES" ]]; then
+        MATCHES=$(awk -F'\t' -v hint="$HINT" '
+            BEGIN { hint = tolower(hint) }
+            index(tolower($1), hint) > 0
+        ' <<< "$WORKTREES")
+    fi
+
     select_one "$MATCHES" "hint '$HINT'" || exit 1
     exit 0
 fi
@@ -162,8 +182,21 @@ fi
 #    is load-bearing: without it `--issue 7` also matches `issue-77-...`.
 if [[ -n "$ISSUE" ]]; then
     MATCHES=$(awk -F'\t' -v prefix="issue-$ISSUE-" 'index($2, prefix) == 1' <<< "$WORKTREES")
-    select_one "$MATCHES" "issue $ISSUE" || exit 1
-    exit 0
+
+    # No worktree on that branch is not an error. --issue is a detection attempt
+    # the CALLER makes on every run, not something the user typed: on new work
+    # the branch does not exist yet, which is the normal case, not a mistake.
+    # Falling through to the current worktree gives the same answer as no
+    # argument at all. Failing here would instead hand back no path, and whatever
+    # picks up the pieces would be guessing — the exact failure this script
+    # exists to prevent.
+    #
+    # Several matches IS an error: the branch convention is supposed to be
+    # unique, so two trees on `issue-N-*` is a genuine ambiguity to report.
+    if [[ -n "$MATCHES" ]]; then
+        select_one "$MATCHES" "issue $ISSUE" || exit 1
+        exit 0
+    fi
 fi
 
 # 3. No hint and no issue: the caller's own tree. Unchanged behaviour for the
