@@ -15,6 +15,52 @@
 #      current branch (original heuristic) — covers repos without a
 #      develop/master/main branch.
 #   3. Last resort: first existing develop/master/main, even if not an ancestor.
+#
+# Usage:
+#   git-find-base-branch [repo-dir | --repo <dir>]
+#
+# Without an argument this reports on the current directory. With one it reports
+# on THAT worktree — necessary because an agent's working directory resets
+# between commands, so a caller working in a linked worktree would otherwise get
+# the base branch of whichever tree the session started in. Resolve the path with
+# git-resolve-worktree.sh rather than typing it out.
+#
+# --repo is the same argument, named, matching the other worktree-targeting
+# scripts (git-commit.sh, git-diff-base.sh, git-push-pr-merge.sh, git-verify.sh).
+# Naming the same tree twice is fine; naming two different ones is an error
+# rather than a silent pick.
+
+REPO_DIR=""
+
+set_repo() {
+    if [ -n "$REPO_DIR" ] && [ "$REPO_DIR" != "$1" ]; then
+        echo "Error: two different targets given ($REPO_DIR and $1)." >&2
+        exit 1
+    fi
+    REPO_DIR="$1"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo)
+            [ $# -ge 2 ] || { echo "Error: --repo needs a directory." >&2; exit 1; }
+            set_repo "$2"
+            shift 2
+            ;;
+        -*)
+            echo "Error: unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            set_repo "$1"
+            shift
+            ;;
+    esac
+done
+
+if [ -n "$REPO_DIR" ]; then
+    cd "$REPO_DIR" || { echo "Error: cannot cd into repo '$REPO_DIR'." >&2; exit 1; }
+fi
 
 current=$(git branch --show-current)
 

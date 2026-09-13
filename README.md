@@ -123,11 +123,70 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `git-find-base-branch` | `git-find-base-branch` | Detect the base branch of the current branch |
+| `git-find-base-branch` | `git-find-base-branch [--repo DIR \| repo-dir]` | Detect the base branch of the current branch, or of the given worktree |
+| `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
-| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). Repos without CI need `--no-ci-wait`. Creates the PR itself, so `gh pr create` hooks do not fire — see [failure modes](docs/git-script-failure-modes.md) |
+| `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
+| `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. Creates the PR itself, so `gh pr create` hooks do not fire — see [failure modes](docs/git-script-failure-modes.md) |
+
+`git-resolve-worktree.sh` exists because an agent's working directory resets
+between every Bash call, and so do exported variables. In a repository with
+linked worktrees nothing carries "work in that tree" from one command to the
+next, so a bare `git` or a repo-relative path quietly acts on whichever directory
+the session started in. The failure is silent: a commit can land on another
+session's branch, carrying that session's staged files, and exit 0.
+
+The script turns a short hint into the one absolute path that every following
+command must carry (`git -C <path>`, `git-commit.sh --repo <path>`, absolute
+Read/Edit paths). A hint is an exact worktree name, a unique case-insensitive
+substring of its path, or an absolute path.
+
+**An exact name beats a substring.** Worktree siblings are conventionally named
+by suffixing the main tree (`<repo>`, `<repo>-dev1`, `<repo>-dev2`), so the main
+tree's name appears inside every sibling's. Under a plain substring rule, typing
+the exact name of the main tree matches all of them and resolves to nothing,
+making the most common target the one tree you cannot name without an absolute
+path. Exact-beats-partial is how tab-completion already behaves.
+
+`--issue N` is the fallback when no hint resolves it: it finds the worktree on
+branch `issue-N-*`, so resumed work needs no argument at all. When no tree is on
+that branch — new work, before the branch exists — it reports the current
+worktree rather than failing, the same answer as no arguments at all. Detection
+that finds nothing is not an error; only a hint the user typed can be wrong.
+
+Ambiguity is the interesting case: a hint matching several trees, or none, exits
+non-zero with the candidates and their branches on stderr and **nothing on
+stdout**, so a `$(...)` capture cannot silently become a guess. Single-worktree
+projects never notice any of this.
+
+**`--repo` is the convention for every script that selects a git worktree**:
+`git-commit.sh`, `git-diff-base.sh`, `git-push-pr-merge.sh`, `git-verify.sh` and
+`git-find-base-branch` all take that same path, for the same reason — without it
+they read the start directory and act on the wrong tree. `git-push-pr-merge.sh`
+is the one with real teeth: it pushes, opens a PR, and on merge runs `checkout`
+and `branch -D`, so a wrong target is destructive to a tree nobody is watching.
+It validates the path itself and refuses before pushing; the others fail loudly
+through git. None of them fall back to the caller's directory.
+
+Deliberately *not* `-C`, despite the resemblance to `git -C`. That flag means
+"run as if git was started in `<path>`" — a chdir, which is why `git -C ""` is a
+no-op and why multiple `-C`s stack relative to each other. These scripts do
+something narrower: select a worktree, and refuse a path that is not one.
+Reusing the letter for different semantics is the wrong kind of consistency, and
+a single letter buys nothing when the caller is an agent rather than a typist.
+
+`git-verify.sh` and `git-find-base-branch` also still accept the path
+positionally, so existing calls keep working. Naming the same tree twice is fine;
+naming two different ones is an error rather than a silent pick, because the
+loser is a tree the caller believed they were asking about.
+
+Scripts that take a *scan path* rather than a worktree keep their positional
+argument: `deps-audit.sh`, `secret-scan.sh`, `env-audit.sh`, `docker-audit.sh`,
+`docker-health-check.sh` and `epic-prepare-context.sh`. `secret-scan.sh
+~/Downloads` is a meaningful thing to ask for, and calling that `--repo` would
+misdescribe the argument.
 
 ### Project audits
 
@@ -198,7 +257,9 @@ claude-code-toolkit/
 ├── bin/                       ← helper scripts (batch operations, git utilities)
 │   ├── batch-issue-view.sh    ← fetch multiple issues as JSON array
 │   ├── batch-issue-status.sh  ← fetch issue status as JSON array
-│   ├── git-find-base-branch   ← detect base branch of current branch
+│   ├── git-find-base-branch   ← detect base branch (of a given worktree)
+│   ├── git-verify.sh          ← read-only git status snapshot in one call
+│   ├── git-resolve-worktree.sh ← resolve a worktree hint to one absolute path
 │   ├── git-cleanup-merged-branch.sh ← cleanup after PR merge
 │   ├── git-commit.sh               ← commit via temp file (sub-agent safe)
 │   ├── git-push-pr-merge.sh        ← push, PR, merge, return to base

@@ -1,7 +1,7 @@
 ---
 name: implement-epic
 description: Automatically implement all sub-issues of an epic in dependency order
-argument-hint: <parent-issue>
+argument-hint: <parent-issue> [worktree]
 user-invocable: true
 ---
 
@@ -11,9 +11,70 @@ Automatically implement all sub-issues of a parent epic in dependency order. Eac
 
 ## Input
 
-The user provides a parent issue number: `$ARGUMENTS`
+The user provides a parent issue number, optionally followed by a worktree hint: `$ARGUMENTS`
 
 This skill runs autonomously — no confirmation stops between sub-issues.
+
+## Worktree
+
+The whole epic runs in ONE worktree, written here as `<worktree>`. Resolve it in
+Phase 0, before anything else, and pass it to every sub-agent.
+
+**Why this is explicit rather than assumed:** your working directory resets
+between every Bash call, and so do exported variables. Nothing carries the target
+path from one command to the next except this instruction, so a bare `git` or a
+repo-relative path silently acts on the directory the session started in. In an
+epic the blast radius is larger than elsewhere: the orchestrator and every
+sub-agent would each fall back to that same start directory, and a commit can
+land on another session's branch with that session's staged files, exit 0.
+
+### Resolving it
+
+```bash
+~/.claude/bin/git-resolve-worktree.sh --issue $ARGUMENTS <hint-if-given>
+```
+
+The hint is the second word of `$ARGUMENTS`, if given. It may be the exact name
+of a worktree (an exact name always wins over a longer sibling, so `<repo>` means
+the main tree, not `<repo>-dev1`), any unique substring of its path, or an
+absolute path.
+
+`--issue` is tried when no hint resolves it: it finds the worktree already on
+branch `issue-$ARGUMENTS-*`, which is how a resumed epic is picked up without
+typing a path. On new work that branch does not exist yet — that is normal, and
+the script then reports the current worktree, exactly as with no arguments at
+all. Single-worktree projects therefore never notice this skill has a worktree
+concept.
+
+One absolute path on stdout and exit 0, or nothing on stdout and exit non-zero.
+Non-zero means the user's own hint was wrong or ambiguous. **Then stop and show
+them its stderr** — it lists the candidates with their branches. Never pick one
+yourself; an autonomous run is exactly where an unnoticed wrong guess does the
+most damage before anyone looks.
+
+Report the resolved path before the first commit: `Working in: <worktree> [branch]`.
+
+### Rules that follow from it
+
+- **git** — always `git -C <worktree> ...`, never a bare `git`
+- **commits** — always `~/.claude/bin/git-commit.sh --repo <worktree> ...`
+- **Read / Edit / Write / Glob / Grep** — absolute paths under `<worktree>` only
+- **project scripts** — `<worktree>/bin/<script>`, not `bin/<script>`;
+  `~/.claude/bin/` scripts are shared and need no prefix
+- **sub-agents** — every prompt states `<worktree>` and the cwd-reset warning; a
+  sub-agent has its own context and inherits none of this
+
+All sub-agents share this one worktree, which is why they are spawned one at a
+time (see "Same-wave issues share one working tree"). Giving each its own
+worktree is a different design, noted there as an alternative — not what
+`<worktree>` means here.
+
+### Test containers
+
+A long-lived test container usually bind-mounts the **main** worktree. Running
+tests through it from a linked worktree tests the wrong source and can write
+files back into a tree nobody is working in. Prefer the project's isolated runner
+where one exists; otherwise record which tree the tests ran against.
 
 **HARD BOUNDARIES — NEVER cross these:**
 - NEVER merge PRs into `develop` or `main` — those merges are always done by the user
@@ -31,7 +92,7 @@ Main session (orchestrator):
 │   │   until #A has fully finished (merged/failed/skipped), even though both
 │   │   are in the same wave and `run_in_background: true` makes it *possible*
 │   │   to fire both at once
-│   ├── Poll progress every 30-45s via /tmp/epic-progress-<N>.txt
+│   ├── Poll progress every 30-45s via /tmp/<project>-epic-progress-<N>.txt
 │   │   └── Report phase + test results to user in real-time
 │   ├── On completion: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
 │   │   — if neither a result NOR a progress-file update arrives for an
@@ -51,20 +112,28 @@ Main session (orchestrator):
 The main session NEVER implements code itself. It only:
 - Parses the epic and determines execution order
 - Spawns background Task agents for each sub-issue
-- **Monitors progress via `/tmp/epic-progress-<N>.txt` and reports to user**
+- **Monitors progress via `/tmp/<project>-epic-progress-<N>.txt` and reports to user**
 - Handles results (success/failure/skip)
 - Updates the tracking PR
 - Creates bug issues on failure
 
 ## Phase 0: Setup
 
+### Step 0: Resolve the worktree
+
+Resolve `<worktree>` as described in the Worktree section above and report it to
+the user. Everything below assumes it is settled — do it before reading any
+source file or creating any branch.
+
 ### Step 1: Read parent issue
 
 ```bash
-~/.claude/bin/gh-save.sh /tmp/epic-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels
+~/.claude/bin/gh-save.sh /tmp/<project>-epic-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels
 ```
 
-Use the Read tool to read `/tmp/epic-$ARGUMENTS.json`.
+Use the Read tool to read `/tmp/<project>-epic-$ARGUMENTS.json`. The filename is
+per-project because parallel worktrees mean parallel sessions, and a shared
+`/tmp` name is overwritten by whichever writes last.
 
 ### Step 2: Parse sub-issues and implementation order
 
@@ -87,26 +156,33 @@ Issues within the same wave are implemented sequentially (each needs the branch 
 Copy the project's CLAUDE.md files to a temp location so sub-agents can lazy-load them (avoids embedding 20-30 KB of identical context in every sub-agent prompt):
 
 ```bash
-~/.claude/bin/epic-prepare-context.sh $ARGUMENTS
+~/.claude/bin/epic-prepare-context.sh $ARGUMENTS <worktree>
 ```
+
+Pass `<worktree>` — without it the script reads the session's start directory and
+every sub-agent prompt then points at another tree's CLAUDE.md, which is the
+"foreign architecture" failure the script's own docs warn about.
 
 The script prints the destination prefix on stdout — store it as `context_prefix` (e.g. `/tmp/epic-<project>-632-claude`). On stderr it lists which sections it copied and from which source path, because doc layouts differ per project (`backend/CLAUDE.md` vs `backend/app/CLAUDE.md`, `frontend/CLAUDE.md` vs `src/CLAUDE.md`).
 
 **Only list a section in a sub-agent prompt if the script reported copying it.** A missing context file is harmless — the sub-agent reads the repo's CLAUDE.md itself. Pointing an agent at a path that holds nothing, or worse another project's doc, makes it treat foreign architecture as this project's. The prefix is namespaced per project and epic, and stale destinations are cleared on every run, so cross-project contamination cannot occur through this path.
 
-Also read the root CLAUDE.md yourself to extract the **one-line tech stack summary** and **test/validation commands** — store these as `project_summary` (max 5 lines). This small summary goes into every sub-agent prompt; the full CLAUDE.md files are read by the sub-agent on demand.
+Also read `<worktree>/CLAUDE.md` yourself to extract the **one-line tech stack summary** and **test/validation commands** — store these as `project_summary` (max 5 lines). This small summary goes into every sub-agent prompt; the full CLAUDE.md files are read by the sub-agent on demand.
 
 ### Step 5: Check/create feature branch
 
 ```bash
-git fetch origin
-git branch -a --list "*issue-$ARGUMENTS*"
+git -C <worktree> fetch origin
+git -C <worktree> branch -a --list "*issue-$ARGUMENTS*"
 ```
 
 If the feature branch exists, check it out. Otherwise create it:
 ```bash
-git checkout -b issue-$ARGUMENTS-<description>
+git -C <worktree> checkout -b issue-$ARGUMENTS-<description>
 ```
+
+If `<worktree>` was resolved via `--issue` it is already on that branch — confirm
+with `git -C <worktree> branch --show-current` first.
 
 Store the feature branch name as `feature_branch`.
 
@@ -117,9 +193,9 @@ Find existing tracking PR:
 ~/.claude/bin/find-tracking-pr.sh <repo> $ARGUMENTS
 ```
 
-If no tracking PR exists, create a draft PR against `develop` using the Write tool to write the body to `/tmp/tracking-pr-body.md`, then:
+If no tracking PR exists, create a draft PR against `develop` using the Write tool to write the body to `/tmp/<project>-tracking-pr-body-$ARGUMENTS.md`, then:
 ```bash
-gh pr create --draft --title "<Epic title>" --base develop --body-file /tmp/tracking-pr-body.md
+gh pr create --draft --title "<Epic title>" --base develop --body-file /tmp/<project>-tracking-pr-body-$ARGUMENTS.md
 ```
 
 Store the tracking PR number as `tracking_pr`.
@@ -173,17 +249,17 @@ time is a demonstrated problem for a specific epic.
 Before spawning the sub-agent, ensure the feature branch is up to date:
 
 ```bash
-git checkout <feature_branch>
-git pull origin <feature_branch>
+git -C <worktree> checkout <feature_branch>
+git -C <worktree> pull origin <feature_branch>
 ```
 
 #### Step 2: Fetch issue details and classify
 
 ```bash
-~/.claude/bin/gh-save.sh /tmp/sub-issue-<N>.json issue view <N> --json title,body,labels
+~/.claude/bin/gh-save.sh /tmp/<project>-sub-issue-<N>.json issue view <N> --json title,body,labels
 ```
 
-Use the Read tool to read `/tmp/sub-issue-<N>.json`. Store the issue title, body, and labels.
+Use the Read tool to read `/tmp/<project>-sub-issue-<N>.json`. Store the issue title, body, and labels.
 
 **Classify the issue as `audit` or `implement`:**
 
@@ -229,14 +305,31 @@ Project policies are in these files — read them BEFORE writing code:
 - <context_prefix>-backend.md (backend architecture — read if modifying backend)
 List only the sections Phase 0 reported as copied. Read only the files relevant to your issue. Do NOT skip this step.
 
+## Worktree — read before running anything
+
+All work for this issue happens in `<worktree>`. That is NOT necessarily the
+directory you start in, and your working directory resets to the start directory
+between every Bash call — `cd` cannot fix it once, and exported variables do not
+survive either. Every command must carry the path:
+
+- `git -C <worktree> ...` — never a bare `git`
+- commits: `~/.claude/bin/git-commit.sh --repo <worktree> "..."`
+- Read/Edit/Write/Glob/Grep: absolute paths under `<worktree>` only
+- project scripts: `<worktree>/bin/<script>`; `~/.claude/bin/` scripts are shared
+  and need no prefix
+
+Getting this wrong is silent: both trees are valid checkouts, so a commit aimed
+at the wrong one lands on another session's branch and exits 0.
+
 ## Branch Setup
+- Worktree: <worktree>
 - Feature branch: <feature_branch>
 - Create sub-branch: issue-<N>-<description>
-- Base your work on the feature branch (already checked out)
+- Base your work on the feature branch (already checked out in `<worktree>`)
 - If this issue's body references another sub-issue's output (a column, a
   function signature, a shared module) as already existing, verify that
   assumption against the ACTUAL current state of the feature branch
-  (`git log <feature_branch> --oneline`, `Read`/`Grep` the real file) before
+  (`git -C <worktree> log <feature_branch> --oneline`, `Read`/`Grep` the real file) before
   writing code or tests against it — a same-wave sibling's PR may not have
   merged yet even if its issue number is mentioned as a dependency. If the
   referenced thing genuinely isn't there yet, treat it as blocked and report
@@ -245,8 +338,8 @@ List only the sections Phase 0 reported as copied. Read only the files relevant 
 
 ## Instructions
 
-1. Create and checkout branch: `git checkout -b issue-<N>-<description>`
-2. Read the codebase: use Glob, Grep, Read to understand relevant files.
+1. Create and checkout branch: `git -C <worktree> checkout -b issue-<N>-<description>`
+2. Read the codebase: use Glob, Grep, Read on absolute paths under `<worktree>`.
    **For E2E/Playwright tests:** also read the frontend components you are writing selectors for. Never guess heading text, aria-labels, CSS classes, or DOM structure — look them up in the React/Vue/Svelte source. Grep for the component name, read it, and extract the exact strings and attributes you need for locators.
 3. Implement the changes following the project policies above
 4. Write tests following the Test Quality Policy
@@ -255,21 +348,28 @@ List only the sections Phase 0 reported as copied. Read only the files relevant 
    component + its tests green → commit). **Push right after your FIRST commit**
    so the work exists remotely even if you die mid-task, and keep pushing after
    each later commit:
-   `~/.claude/bin/git-commit.sh "concise descriptive message"` then
-   `git push -u origin issue-<N>-<description>`
+   `~/.claude/bin/git-commit.sh --repo <worktree> "concise descriptive message"` then
+   `git -C <worktree> push -u origin issue-<N>-<description>`
    Multiple commits in the PR are fine and expected — a tidy single commit is not
    worth the risk. A sub-agent can die silently (no error, no FAILED response),
    and everything not yet pushed is lost; agents that had pushed lost nothing,
    agents that had not lost hours of work. This is the single highest-value habit
    in this prompt.
 6. Run ONLY the tests relevant to your changes — NEVER the full test suite:
-   `~/.claude/bin/project-test.sh tests/unit/test_<relevant>/ -v`
+   `~/.claude/bin/project-test.sh <worktree>/tests/unit/test_<relevant>/ -v`
    The full suite and project validation run after all sub-issues are done — not here.
+   If the project runs tests through a long-lived container, check what it
+   bind-mounts first: a container mounting the MAIN worktree tests the wrong
+   source when you are in a linked one, and can write files back into a tree
+   nobody is working in.
 7. If tests fail: fix and retry (up to 3 attempts total)
 8. If tests pass:
-   - Commit any remaining uncommitted work: `~/.claude/bin/git-commit.sh "concise descriptive message"`
-   - Write PR body to /tmp/pr-body.md using the Write tool, then push + PR + merge in one command:
-     `~/.claude/bin/git-push-pr-merge.sh --base <feature_branch> --title "<title>" --body-file /tmp/pr-body.md`
+   - Commit any remaining uncommitted work: `~/.claude/bin/git-commit.sh --repo <worktree> "concise descriptive message"`
+   - Write PR body to /tmp/<project>-pr-body-<N>.md using the Write tool, then push + PR + merge in one command:
+     `~/.claude/bin/git-push-pr-merge.sh --repo <worktree> --base <feature_branch> --title "<title>" --body-file /tmp/<project>-pr-body-<N>.md`
+   - `--repo` is not optional here: this script pushes, opens a PR, and on merge
+     runs `checkout` and `branch -D`. Without it those land in the session's
+     start directory, which after a merge is destructive to a tree nobody is watching.
    - This script pushes, creates the PR, waits for the CI checks, merges it, and returns to the feature branch automatically
    - The gate **fails closed**: it merges only on positive evidence that every check is green. Expect each sub-PR to take 1-2 minutes longer than a blind merge, and expect blocks where a red branch used to slip through silently — that is the gate working.
    - **If the script exits non-zero with `STATUS: CI_GATE_BLOCKED`:** the PR was left open. Read the `CI_GATE:` line to see why:
@@ -282,17 +382,17 @@ List only the sections Phase 0 reported as copied. Read only the files relevant 
 
 ## Auth Impact Check (only include if auth_impact is true)
 This issue changes user status/role/auth fields. BEFORE writing tests:
-1. Read auth/dependencies.py (or equivalent auth guard file)
+1. Read `<worktree>/…/auth/dependencies.py` (or the equivalent auth guard file)
 2. Check which statuses/roles the guard currently allows
 3. Determine: should the NEW status pass the guard or be blocked?
 4. Write a test that verifies this explicitly
 5. If the new status SHOULD pass but the guard blocks it: note this in the PR body as a required follow-up
 
 ## Playwright E2E Test Account Checklist (only for projects using Playwright)
-If this issue creates or modifies Playwright E2E tests that require test accounts, ensure ALL THREE files are in sync:
-1. `tests/e2e/fixtures/test-accounts.ts` — TS fixture with key, email, tier, storageState
-2. `playwright.config.ts` — project entry with testMatch and storageState path
-3. The Python seed script (e.g. `backend/app/scripts/seed_e2e_accounts.py`) — account with matching key, email, tier, and person data
+If this issue creates or modifies Playwright E2E tests that require test accounts, ensure ALL THREE files are in sync (all under `<worktree>`):
+1. `<worktree>/tests/e2e/fixtures/test-accounts.ts` — TS fixture with key, email, tier, storageState
+2. `<worktree>/playwright.config.ts` — project entry with testMatch and storageState path
+3. The Python seed script (e.g. `<worktree>/backend/app/scripts/seed_e2e_accounts.py`) — account with matching key, email, tier, and person data
 Missing any one of these three causes global-setup to fail with a login error at test runtime.
 
 ## HARD BOUNDARIES
@@ -307,7 +407,7 @@ Missing any one of these three causes global-setup to fail with a login error at
 
 ## Progress Reporting
 
-Write your current phase to `/tmp/epic-progress-<N>.txt` using the Write tool at each milestone.
+Write your current phase to `/tmp/<project>-epic-progress-<N>.txt` using the Write tool at each milestone.
 Format (one line per field, only PHASE is required):
 
 PHASE: <milestone-name>
@@ -362,6 +462,15 @@ Body: <full issue body>
 
 ## Project Context
 <project_summary — max 5 lines: tech stack, test command, validation command>
+
+## Worktree — read before running anything
+
+The code to audit lives in `<worktree>`. That is NOT necessarily the directory
+you start in, and your working directory resets between every Bash call. Use
+absolute paths under `<worktree>` for Glob/Grep/Read, and pass `<worktree>` to
+any audit script that takes a target directory. An audit of the wrong tree
+reports on code that is not under review — silently, since both trees are valid
+checkouts.
 
 Project policies are in these files — read them BEFORE starting your audit:
 - <context_prefix>-root.md (project overview, naming conventions)
@@ -419,8 +528,8 @@ You are performing a security AUDIT — your output is a structured report, NOT 
 ```
 
 5. Post the report as an issue comment:
-   - Write report to `/tmp/security-audit-report-<N>.md` using the Write tool
-   - Post: `gh issue comment <N> --body-file /tmp/security-audit-report-<N>.md`
+   - Write report to `/tmp/<project>-security-audit-report-<N>.md` using the Write tool
+   - Post: `gh issue comment <N> --body-file /tmp/<project>-security-audit-report-<N>.md`
 
 ## Tool Rules
 - Use Glob/Grep/Read instead of Bash equivalents (find, grep, cat, head, tail)
@@ -429,7 +538,7 @@ You are performing a security AUDIT — your output is a structured report, NOT 
 
 ## Progress Reporting
 
-Write your current phase to `/tmp/epic-progress-<N>.txt` using the Write tool at each milestone.
+Write your current phase to `/tmp/<project>-epic-progress-<N>.txt` using the Write tool at each milestone.
 Format (one line per field, only PHASE is required):
 
 PHASE: <milestone-name>
@@ -472,7 +581,7 @@ After spawning the background sub-agent:
 
 1. Store the `task_id` from the Task tool response
 2. **Poll every 30-45 seconds** until the agent completes:
-   a. Use the **Read tool** on `/tmp/epic-progress-<N>.txt` (ignore if file doesn't exist yet — agent is still starting)
+   a. Use the **Read tool** on `/tmp/<project>-epic-progress-<N>.txt` (ignore if file doesn't exist yet — agent is still starting)
    b. Parse the `PHASE:`, `DETAIL:`, and `TESTS:` fields
    c. **Report to the user** with a human-readable status message:
       ```
@@ -494,25 +603,27 @@ After spawning the background sub-agent:
 
 A sub-agent can die mid-task without ever sending a completion notification or writing a final progress line — the task ID simply stops resolving via `TaskOutput`. This is distinct from a `FAILED` response (which is an active, intentional report) and distinct from "still working, hasn't hit a milestone yet" (a fresh agent may take several minutes before its first progress-file write). Do not assume either of the other two cases — verify.
 
-**Also watch for a second, different failure signature:** a sub-agent that terminates after only 1-2 tool calls with a vague, self-referential, non-implementing response (e.g. "the agent is running in the background, I'll wait for it to complete") instead of actually doing the work or returning SUCCESS/FAILED. This is not a silent death — it sent a normal completion notification — but it is equally a non-result: no branch, no commits, no PR. Detect it the same way as a silent death (check `git log`/`git status` on the expected branch) since the response text alone is not trustworthy signal that real work happened.
+**Also watch for a second, different failure signature:** a sub-agent that terminates after only 1-2 tool calls with a vague, self-referential, non-implementing response (e.g. "the agent is running in the background, I'll wait for it to complete") instead of actually doing the work or returning SUCCESS/FAILED. This is not a silent death — it sent a normal completion notification — but it is equally a non-result: no branch, no commits, no PR. Detect it the same way as a silent death (the `git -C <worktree> log`/`status` checks in step 2 below) since the response text alone is not trustworthy signal that real work happened.
 
 **When either signature is suspected, before concluding anything is lost:**
 
 1. Call `TaskOutput` with `block: false` on the task ID. If it errors with "No task found", the process is confirmed gone (not just slow).
-2. Check the expected sub-branch for real work, in this order:
-   - `git log <expected-sub-branch> --oneline -5` — did it commit? Compare against the feature branch tip to see if there are new commits.
-   - `git branch -a | grep <N>` — does a remote-tracking branch exist (was anything pushed)?
+2. Check the expected sub-branch for real work, in this order. **Every command
+   here needs `-C <worktree>`** — this section stashes and deletes, so aiming it
+   at the wrong tree destroys work instead of rescuing it:
+   - `git -C <worktree> log <expected-sub-branch> --oneline -5` — did it commit? Compare against the feature branch tip to see if there are new commits.
+   - `git -C <worktree> branch -a | grep <N>` — does a remote-tracking branch exist (was anything pushed)?
    - `~/.claude/bin/gh-save.sh` + `gh pr list --search "<N> in:title"` — was a PR already opened?
-   - `git status --short` on the **currently checked-out branch** — same-wave sub-agents share one working tree (see above), so a dead agent's uncommitted work may be sitting on whatever branch happens to be checked out right now, not necessarily its own sub-branch.
+   - `git -C <worktree> status --short` on the **currently checked-out branch** — same-wave sub-agents share one working tree (see above), so a dead agent's uncommitted work may be sitting on whatever branch happens to be checked out right now, not necessarily its own sub-branch.
 3. **Never discard uncommitted work found this way.** If real, relevant changes are sitting uncommitted:
-   - `git stash push -u -m "orphaned #<N> work from dead sub-agent: <short description>"` — never `git checkout --` or `git clean` a dead agent's edits.
-   - Note the stash reference so it can be referenced when re-spawning.
-4. If a sub-branch has zero commits (identical tip to the feature branch) and nothing was stashed for it, it is safe to delete (`git branch -d <sub-branch>`) before re-spawning — nothing is lost.
+   - `git -C <worktree> stash push -u -m "orphaned #<N> work from dead sub-agent: <short description>"` — never `git checkout --` or `git clean` a dead agent's edits.
+   - Note the stash reference so it can be referenced when re-spawning. A stash belongs to the repository, not the tree, so say which worktree it was taken from.
+4. If a sub-branch has zero commits (identical tip to the feature branch) and nothing was stashed for it, it is safe to delete (`git -C <worktree> branch -d <sub-branch>`) before re-spawning — nothing is lost.
 5. **Re-spawn** with an explicit note in the prompt:
    - State plainly that a previous attempt died and this is a fresh attempt.
-   - If a stash exists, point to it by name/message and say it MAY be inspected for reference (`git stash show -p stash@{N}`) but must not be blindly applied — treat it as unverified, not a starting point to resume from.
+   - If a stash exists, point to it by name/message and say it MAY be inspected for reference (`git -C <worktree> stash show -p stash@{N}`) but must not be blindly applied — treat it as unverified, not a starting point to resume from.
    - If the second failure signature (confused non-response) was the trigger, add an explicit instruction to actually perform the implementation and not just describe or delegate it (see the hardened Response Format instruction below).
-6. After a sub-agent DOES complete successfully following a recovery, verify no stale duplicate files are left on the shared working tree from the dead attempt (`git status --short`) — diff any untracked leftovers against the new committed version; if byte-identical, they are safe to `git clean` away; if they differ, investigate before removing.
+6. After a sub-agent DOES complete successfully following a recovery, verify no stale duplicate files are left on the shared working tree from the dead attempt (`git -C <worktree> status --short`) — diff any untracked leftovers against the new committed version; if byte-identical, they are safe to `git clean` away; if they differ, investigate before removing.
 
 3. **Phase display mapping** (use these human-readable labels):
 
@@ -556,12 +667,13 @@ Parse the sub-agent's response:
 - Record: issue #N → ✅ Complete, PR #X
 
 **On failure** (response contains `FAILED`):
-1. **Create bug issue** — write body to `/tmp/bug-epic-<N>.md`:
+1. **Create bug issue** — write body to `/tmp/<project>-bug-epic-<N>.md`:
 
 ```markdown
 ## Context
 - Epic: #$ARGUMENTS
 - Sub-issue: #<N> — <title>
+- Worktree: <worktree>
 - Feature branch: <feature_branch>
 
 ## Error
@@ -579,14 +691,16 @@ Parse the sub-agent's response:
 ```
 
 ```bash
-gh issue create --title "🐛 [Epic #$ARGUMENTS] Bug: <description>" --label bug --body-file /tmp/bug-epic-<N>.md
+gh issue create --title "🐛 [Epic #$ARGUMENTS] Bug: <description>" --label bug --body-file /tmp/<project>-bug-epic-<N>.md
 ```
 
-2. **Clean up failed branch** (if it was pushed):
+2. **Clean up failed branch** (if it was pushed) — only after step 3 of
+   "Sub-agent Liveness & Recovery" has confirmed nothing uncommitted is left on
+   it. `-D` discards unmerged commits:
 
 ```bash
-git checkout <feature_branch>
-git branch -D issue-<N>-<description>
+git -C <worktree> checkout <feature_branch>
+git -C <worktree> branch -D issue-<N>-<description>
 ```
 
 3. **Mark dependent issues as skipped** — any issue in later waves that depends on this failed issue cannot proceed. Track which issues are skipped and why.
@@ -599,9 +713,9 @@ After each sub-issue (success or failure), update the tracking PR:
 - Add PR link for successful issues
 - Add bug issue link for failures
 
-Write updated body to `/tmp/tracking-pr-update.md`, then:
+Write updated body to `/tmp/<project>-tracking-pr-update-$ARGUMENTS.md`, then:
 ```bash
-gh pr edit <tracking_pr> --body-file /tmp/tracking-pr-update.md
+gh pr edit <tracking_pr> --body-file /tmp/<project>-tracking-pr-update-$ARGUMENTS.md
 ```
 
 ## Phase Final: Verification & Wrap-up
@@ -609,6 +723,23 @@ gh pr edit <tracking_pr> --body-file /tmp/tracking-pr-update.md
 **CRITICAL: NEVER merge PRs into `develop` or `main`. NEVER close the parent issue. NEVER push to `main` or `develop` directly. The tracking PR stays as a draft for the user to review and merge manually.**
 
 **CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after polling waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
+
+**Every prompt below opens with this block**, with `<worktree>` filled in. A
+fresh context window inherits none of the Worktree section above, and these
+agents commit to a shared branch:
+
+```
+## Worktree — read before running anything
+
+Everything you verify lives in `<worktree>`. That is NOT necessarily the
+directory you start in, and your working directory resets between every Bash
+call, so `cd` cannot fix it once and exported variables do not survive. Use
+`git -C <worktree> ...`, `~/.claude/bin/git-commit.sh --repo <worktree> ...`,
+absolute paths under `<worktree>` for Read/Edit/Write/Glob/Grep, and
+`<worktree>/bin/<script>` for project scripts. Verifying the wrong tree reports
+green for code that is not under review, and committing to it lands your changes
+on another session's branch — both silently, since both trees are valid checkouts.
+```
 
 ### Step 1: Spawn verification sub-agent — Validation & Tests
 
@@ -627,11 +758,15 @@ Project policies are in these files — read them BEFORE starting:
 ### Step 1: Run project validation
 
 ```bash
-git checkout <feature_branch>
-npm run validate:all
+git -C <worktree> checkout <feature_branch>
 ```
 
-If validation fails, fix issues and commit directly to the feature branch.
+Then run the project's validation chain (e.g. `npm run validate:all`) from
+`<worktree>` — many such chains resolve paths relative to the current directory,
+so running it elsewhere validates the wrong tree.
+
+If validation fails, fix issues and commit directly to the feature branch with
+`~/.claude/bin/git-commit.sh --repo <worktree> "..."`.
 
 **Before committing anything here, check WHAT the validation changed.** Chains
 like `validate:all` typically end in a formatter and a code generator, and both
@@ -641,11 +776,11 @@ instruction above says to commit directly to a shared branch — so it is exactl
 where churn gets committed under a plausible-looking message.
 
 ```bash
-git status --short          # anything you did not touch on purpose?
-git diff --stat             # churn is usually a large diff in a generated file
+git -C <worktree> status --short   # anything you did not touch on purpose?
+git -C <worktree> diff --stat      # churn is usually a large diff in a generated file
 ```
 
-Revert generated-file churn (`git checkout -- <file>`) and commit only real
+Revert generated-file churn (`git -C <worktree> checkout -- <file>`) and commit only real
 fixes. If the diff is genuine (you changed a backend schema), regenerate
 deliberately and say so in the commit message.
 
@@ -661,7 +796,7 @@ Instead, run only test files related to files changed by the epic:
 
 1. Get changed source files (not tests):
 ```bash
-git diff develop..<feature_branch> --name-only -- '*.py' '*.ts' '*.tsx' | grep -v test
+git -C <worktree> diff develop..<feature_branch> --name-only -- '*.py' '*.ts' '*.tsx' | grep -v test
 ```
 
 2. For each changed source file, find related test files using Glob/Grep:
@@ -669,9 +804,9 @@ git diff develop..<feature_branch> --name-only -- '*.py' '*.ts' '*.tsx' | grep -
    - `backend/app/api/foo.py` → `backend/tests/**/test_foo*`
    - `frontend/src/pages/FooPage.tsx` → `frontend/src/**/__tests__/Foo*`
 
-3. Run ONLY those test files with a generous timeout (tests may take minutes per file):
+3. Run ONLY those test files with a generous timeout (tests may take minutes per file), as absolute paths under `<worktree>`:
 ```bash
-~/.claude/bin/project-test.sh <test-file-1> <test-file-2> ... -v
+~/.claude/bin/project-test.sh <worktree>/<test-file-1> <worktree>/<test-file-2> ... -v
 ```
 Use `timeout: 600000` (10 minutes) on the Bash call.
 
@@ -682,7 +817,7 @@ Use `timeout: 600000` (10 minutes) on the Bash call.
 
 ### Step 3: Report
 
-Write progress to `/tmp/epic-verify-validation.txt`:
+Write progress to `/tmp/<project>-epic-verify-validation-$ARGUMENTS.txt`:
 
 PHASE: RUNNING_VALIDATION / RUNNING_TESTS / FIXING / DONE
 DETAIL: <what's happening>
@@ -713,7 +848,7 @@ Project policies are in these files — read them BEFORE starting:
 ### Step 0: Find the project's own commands
 
 This step is project-specific — never guess a container name or a script path.
-Read the root CLAUDE.md and the compose file to establish, before running
+Read `<worktree>/CLAUDE.md` and the compose file to establish, before running
 anything:
 
 - `api_container` — the service/container running the API (`docker compose ps`,
@@ -727,12 +862,20 @@ anything:
 If a project defines none of these, skip the steps below that depend on it and
 report SKIP with the reason. A step that cannot be run is not a failure.
 
+**Also establish which tree the containers actually serve.** Compose files
+commonly bind-mount the MAIN worktree, so a stack started from a linked one runs
+the wrong source and a restart can write files back into a tree nobody is working
+in. Check the mount paths in the compose file against `<worktree>`. If they point
+elsewhere, say so in your report rather than reporting a green runtime for code
+that is not under review — the containers are evidence about whichever tree they
+mount, not about this one.
+
 ### Step 1: Rebuild containers if dependencies changed
 
 Check if dependency files were modified:
 
 ```bash
-git diff develop..<feature_branch> --name-only | grep -E "(package\.json|package-lock\.json|requirements\.txt|pyproject\.toml|uv\.lock)"
+git -C <worktree> diff develop..<feature_branch> --name-only | grep -E "(package\.json|package-lock\.json|requirements\.txt|pyproject\.toml|uv\.lock)"
 ```
 
 If any dependency file changed, run `<restart_cmd>` — a dependency change needs
@@ -774,7 +917,7 @@ If the project has no such script, report SKIP.
 
 ### Step 6: Report
 
-Write progress to `/tmp/epic-verify-runtime.txt`:
+Write progress to `/tmp/<project>-epic-verify-runtime-$ARGUMENTS.txt`:
 
 PHASE: REBUILDING / HEALTH_CHECK / SMOKE_TEST / MIGRATION_CHECK / LOGIN_TEST / DONE
 DETAIL: <what's happening>
@@ -805,24 +948,25 @@ You are checking that new user statuses or roles introduced by epic #<epic_numbe
 
 Search the feature branch diff for new statuses/roles:
 ```bash
-git diff develop..<feature_branch>
+git -C <worktree> diff develop..<feature_branch>
 ```
 Look for: enum additions (Python `class ...Status`, `ALTER TYPE ADD VALUE`), new role constants, new permission levels.
 
 ### Step 2: Verify auth guards
 
 For each new status/role found:
-- Read the auth guard (e.g., `auth/dependencies.py`)
+- Read the auth guard (e.g., `<worktree>/…/auth/dependencies.py`)
 - Check if the guard explicitly handles the new status
 - Write a targeted test that creates a user with the new status and verifies expected behavior
 
 ### Step 3: Run tests
 
 ```bash
-~/.claude/bin/project-test.sh <test-file> -v
+~/.claude/bin/project-test.sh <worktree>/<test-file> -v
 ```
 
-If tests fail: fix on the feature branch and commit.
+If tests fail: fix on the feature branch and commit with
+`~/.claude/bin/git-commit.sh --repo <worktree> "..."`.
 If no new statuses/roles found: report SKIP.
 
 ## Response Format
@@ -858,7 +1002,7 @@ Based on the epic scope, classify what area was touched:
 
 ### Step 2: Write a targeted smoke test
 
-Create `tests/e2e/<epic-domain>-smoke.spec.ts`
+Create `<worktree>/tests/e2e/<epic-domain>-smoke.spec.ts`
 
 Read the actual frontend components you are writing selectors for — never guess headings, aria-labels, or DOM structure.
 
@@ -869,6 +1013,9 @@ Keep it minimal:
 
 ### Step 3: Run the smoke test
 
+Run it from `<worktree>` — Playwright resolves its config and test paths relative
+to the current directory, so running it elsewhere tests the wrong tree:
+
 ```bash
 npx playwright test tests/e2e/<epic-domain>-smoke.spec.ts --project=<project-name>
 ```
@@ -877,7 +1024,8 @@ If tests fail: fix and retry once.
 
 ### Step 4: Commit the smoke test
 
-The smoke test is a permanent artefact — commit it to the feature branch.
+The smoke test is a permanent artefact — commit it to the feature branch:
+`~/.claude/bin/git-commit.sh --repo <worktree> "..."`.
 
 ## Response Format
 

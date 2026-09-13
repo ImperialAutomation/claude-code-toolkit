@@ -26,12 +26,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$SCRIPT_DIR/git-push-pr-merge.sh"
 
+# One temp root for every scenario repo, removed on EXIT. The per-scenario
+# `rm -rf` only runs when that scenario completes, so under `set -e` a failing
+# assertion would leave the repo (and scenario 14's linked worktrees) behind.
+TEST_ROOT=$(mktemp -d)
+trap 'rm -rf "$TEST_ROOT"' EXIT
+
 pass=0
 fail=0
 
 make_repo() {
     local dir
-    dir=$(mktemp -d)
+    dir=$(mktemp -d -p "$TEST_ROOT")
     git -C "$dir" init -q
     git -C "$dir" config user.email "test@example.com"
     git -C "$dir" config user.name "Test"
@@ -479,6 +485,89 @@ assert_contains "zero poll: rejected" "--ci-poll-interval must be a positive int
 assert_exit "zero poll: exit code" "1" "$(cat "$repo13/last-exit.txt")"
 assert_file_absent "zero poll: no merge" "$repo13/merged"
 rm -rf "$repo13"
+
+# --- Scenario 14: --repo acts on the target worktree, not the caller's ---
+# The whole point of the flag. An agent's working directory resets between Bash
+# calls, so without --repo this script pushes whatever branch the session's start
+# directory happens to be on — and after a merge it also runs `checkout` and
+# `branch -D` there, which is destructive in a tree nobody is looking at.
+#
+# Every case below runs from a DIFFERENT worktree than the target, and the two
+# are on different branches. If --repo were ignored, the caller's branch name
+# would surface instead and each assertion fails.
+repo14=$(make_repo)
+make_fake_gh "$repo14"
+echo "Test PR body" > "$repo14/body.md"
+
+# A linked worktree of the same repo, on its own branch. This is the realistic
+# shape: two trees, one repository, two sessions.
+wt14="${repo14}-dev1"
+git -C "$repo14" worktree add -q -b issue-99-other-work "$wt14" main >/dev/null 2>&1
+
+# Run FROM the linked tree (on issue-99-other-work), TARGETING the main tree
+# (on issue-1-feature).
+set +e
+out14=$(cd "$wt14" && PATH="$repo14/bin:$PATH" "$TARGET" --repo "$repo14" \
+    --base main --title "Test PR" --body-file "$repo14/body.md" --no-merge 2>&1)
+exit14=$?
+set -e
+
+assert_contains "--repo: pushes the target's branch" "Pushing issue-1-feature" "$out14"
+assert_exit "--repo: exit code" "0" "$exit14"
+# The caller's own branch must not appear anywhere — that would mean the script
+# read the working directory after all.
+if echo "$out14" | grep -qF "issue-99-other-work"; then
+    echo "FAIL: --repo: caller's branch leaked into the run"
+    echo "--- output ---"; echo "$out14"; echo "--------------"
+    fail=$((fail + 1))
+else
+    echo "PASS: --repo: caller's branch never used"
+    pass=$((pass + 1))
+fi
+
+# The same-branch-as-base guard must also judge the TARGET tree, not the caller.
+# Targeting a tree that sits on `main` has to be refused even though the caller
+# is on a feature branch and looks fine.
+main14="${repo14}-mainwt"
+git -C "$repo14" worktree add -q --detach "$main14" main >/dev/null 2>&1
+git -C "$main14" checkout -q main 2>/dev/null || git -C "$main14" switch -q -c main-copy main
+set +e
+out14b=$(cd "$wt14" && PATH="$repo14/bin:$PATH" "$TARGET" --repo "$main14" \
+    --base "$(git -C "$main14" branch --show-current)" --title "Test PR" \
+    --body-file "$repo14/body.md" --no-merge 2>&1)
+exit14b=$?
+set -e
+assert_contains "--repo: base-equals-current judged on target" "same as base" "$out14b"
+assert_exit "--repo: base-equals-current exit code" "1" "$exit14b"
+
+# A bad path fails loudly. Falling back to the caller's directory here is exactly
+# the silent-wrong-tree bug the flag exists to prevent.
+set +e
+out14c=$(cd "$wt14" && PATH="$repo14/bin:$PATH" "$TARGET" --repo "${repo14}-nonexistent" \
+    --base main --title "Test PR" --body-file "$repo14/body.md" --no-merge 2>&1)
+exit14c=$?
+set -e
+assert_exit "--repo: nonexistent path exits non-zero" "1" "$exit14c"
+if echo "$out14c" | grep -qF "Pushing"; then
+    echo "FAIL: --repo: pushed despite a bad --repo path"
+    fail=$((fail + 1))
+else
+    echo "PASS: --repo: nothing pushed on a bad path"
+    pass=$((pass + 1))
+fi
+
+# Without --repo the behaviour is unchanged: the caller's own tree is used.
+set +e
+out14d=$(cd "$wt14" && PATH="$repo14/bin:$PATH" "$TARGET" \
+    --base main --title "Test PR" --body-file "$repo14/body.md" --no-merge 2>&1)
+exit14d=$?
+set -e
+assert_contains "no --repo: uses caller's tree" "Pushing issue-99-other-work" "$out14d"
+assert_exit "no --repo: exit code" "0" "$exit14d"
+
+git -C "$repo14" worktree remove --force "$wt14" >/dev/null 2>&1 || true
+git -C "$repo14" worktree remove --force "$main14" >/dev/null 2>&1 || true
+rm -rf "$repo14" "$wt14" "$main14"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
