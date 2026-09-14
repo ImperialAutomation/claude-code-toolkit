@@ -6,6 +6,7 @@
 #
 # Usage:
 #   git-push-pr-merge.sh --base <base-branch> --title "PR title" --body-file /tmp/pr-body.md
+#   git-push-pr-merge.sh --repo <worktree> --base ... --title ... --body-file ...
 #
 # What it does:
 #   1. Push current branch to origin (with -u)
@@ -29,7 +30,19 @@
 #   printed, and the script exits non-zero so callers can react. Re-running
 #   with the same arguments reuses the open PR and re-runs the gate.
 #
+# Worktree targeting:
+#   Without --repo this acts on the current directory. That is the right default
+#   for a human in a shell, but wrong for an agent: an agent's working directory
+#   resets between every command, so the current directory is whichever tree the
+#   session started in, not necessarily the one holding the work. This script
+#   pushes a branch, opens a PR, and on merge runs `checkout` and `branch -D` —
+#   aimed at the wrong worktree that is destructive to a tree nobody is watching.
+#   Pass --repo (resolve it with git-resolve-worktree.sh) to say which tree.
+#
 # Options:
+#   --repo <dir>               Run against the worktree at <dir> instead of the
+#                              current directory. A path that is not a worktree
+#                              is an error, never a fallback to the caller's tree
 #   --base <branch>            Target branch for the PR (required)
 #   --title <title>            PR title (required)
 #   --body-file <path>         File containing PR body (required)
@@ -44,6 +57,7 @@ set -euo pipefail
 BASE=""
 TITLE=""
 BODY_FILE=""
+REPO_DIR=""
 DO_MERGE=1
 CI_WAIT=1
 CI_TIMEOUT=900
@@ -52,6 +66,10 @@ CI_GRACE=120
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --repo)
+            REPO_DIR="$2"
+            shift 2
+            ;;
         --base)
             BASE="$2"
             shift 2
@@ -107,6 +125,28 @@ fi
 if [[ ! -f "$BODY_FILE" ]]; then
     echo "Error: Body file not found: $BODY_FILE" >&2
     exit 1
+fi
+
+# Switch into the target worktree before any git/gh call. One `cd` covers every
+# call site, including `gh`, which derives its repository from the working
+# directory the same way git does.
+#
+# Resolve the body file to an absolute path FIRST: a relative --body-file is
+# relative to where the caller stood, and moving afterwards would break it.
+if [[ -n "$REPO_DIR" ]]; then
+    BODY_FILE=$(cd "$(dirname "$BODY_FILE")" && pwd)/$(basename "$BODY_FILE")
+
+    # A path that is not a worktree is an error, never a silent fallback to the
+    # caller's tree — that fallback is the exact bug this flag exists to prevent.
+    if [[ ! -d "$REPO_DIR" ]]; then
+        echo "Error: --repo directory not found: $REPO_DIR" >&2
+        exit 1
+    fi
+    if ! git -C "$REPO_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
+        echo "Error: --repo is not inside a git worktree: $REPO_DIR" >&2
+        exit 1
+    fi
+    cd "$REPO_DIR" || { echo "Error: cannot cd into repo '$REPO_DIR'" >&2; exit 1; }
 fi
 
 # Both deadlines advance by CI_POLL_INTERVAL, so 0 (or a non-number) would spin

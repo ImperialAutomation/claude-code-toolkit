@@ -1,7 +1,7 @@
 ---
 name: implement
 description: Implement a GitHub issue with automated PR creation
-argument-hint: <issue-number>
+argument-hint: <issue-number> [worktree]
 user-invocable: true
 ---
 
@@ -11,9 +11,73 @@ Implement GitHub issue with automated workflow.
 
 ## Input
 
-The user provides an issue number: `$ARGUMENTS`
+The user provides an issue number, optionally followed by a worktree hint: `$ARGUMENTS`
 
-MUST use ~/.claude/bin/git-find-base-branch for base branch detection for the PR.
+MUST use `~/.claude/bin/git-find-base-branch --repo <worktree>` for base branch detection for the PR.
+
+## Worktree
+
+Everything below operates on ONE worktree, written here as `<worktree>`. Resolve
+it first, in Phase 1, before reading or changing anything.
+
+**Why this is explicit rather than assumed:** your working directory resets
+between every Bash call, and so do exported variables. Nothing carries the target
+path from one command to the next except this instruction. A repo-relative path
+or a bare `git` therefore silently acts on the directory the session started in —
+which is the right tree only by coincidence. The damage is quiet: a commit can
+land on another session's branch, carrying that session's staged files, and exit 0.
+
+### Resolving it
+
+```bash
+~/.claude/bin/git-resolve-worktree.sh --issue $ARGUMENTS <hint-if-given>
+```
+
+The hint is the second word of `$ARGUMENTS`, if the user gave one. It may be the
+exact name of a worktree (an exact name always wins over a longer sibling, so
+`<repo>` means the main tree, not `<repo>-dev1`), any unique substring of its
+path, or an absolute path.
+
+`--issue` is tried when no hint resolves it: it finds the worktree already on
+branch `issue-$ARGUMENTS-*`, which is how resumed work is picked up without
+anyone typing a path. On new work that branch does not exist yet — that is
+normal, and the script then simply reports the current worktree, exactly as it
+does with no arguments at all. Single-worktree projects therefore never notice
+this skill has a worktree concept.
+
+The script prints one absolute path and exits 0, or prints nothing to stdout and
+exits non-zero. Non-zero means the user's own hint was wrong or ambiguous.
+**Then stop and show them its stderr** — it lists the candidates with their
+branches. Do not pick one yourself and do not fall back to the current directory;
+an unresolved hint is a question for the user, not a guess to make.
+
+Then state the resolved path to the user, before the first commit:
+
+```
+Working in: <worktree>  [branch]
+```
+
+### Rules that follow from it
+
+Apply these everywhere below, wherever a command touches the repository:
+
+- **git** — always `git -C <worktree> ...`, never a bare `git`
+- **commits** — always `~/.claude/bin/git-commit.sh --repo <worktree> ...`
+- **Read / Edit / Write / Glob / Grep** — absolute paths under `<worktree>` only,
+  never repo-relative ones
+- **project scripts** — run `<worktree>/bin/<script>`, not `bin/<script>`;
+  `~/.claude/bin/` scripts are unaffected, they are the same files for every tree
+- **sub-agents** — pass `<worktree>` in the prompt; a sub-agent has its own
+  context and inherits none of this
+
+### Test containers
+
+A long-lived test container usually bind-mounts the **main** worktree. Run tests
+through it from a linked worktree and you test the wrong source, and it may write
+files back into a tree the user never touched. Where the project offers an
+isolated runner (a disposable container, a per-worktree compose project), use it
+and say so; where it does not, note in the PR body which tree the tests actually
+ran against.
 
 ## Tool Rules
 
@@ -25,13 +89,16 @@ MUST use ~/.claude/bin/git-find-base-branch for base branch detection for the PR
 
 ## Phase 1: Discovery & Planning
 
-1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/issue-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels`, then use the Read tool to read it
+0. **Resolve `<worktree>`** as described in the Worktree section above, and report
+   it to the user. Every path and git command in the phases below assumes this is
+   settled — do it before reading any source file, or you will read the wrong one.
+1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/<project>-issue-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels`, then use the Read tool to read it
 2. **Check for linked Sentry issues** in the issue body:
    * Look for Sentry issue references — short IDs of the form `<PROJECT>-<PLATFORM>-<SUFFIX>`, Sentry URLs, or "Sentry Issues" sections
    * If found, note the Sentry issue IDs — these will be referenced in commit messages and the PR body for automatic resolution
    * Store as a list, e.g. `SENTRY_ISSUES=["MYAPP-BACKEND-G", "MYAPP-BACKEND-H"]`
-3. Read AND verify understanding of existing code:
-   * Read all CLAUDE.md files (root, frontend, backend if they exist)
+3. Read AND verify understanding of existing code (all paths absolute, under `<worktree>`):
+   * Read all CLAUDE.md files (`<worktree>/CLAUDE.md`, and the frontend/backend ones if they exist)
    * Read the ACTUAL source files you plan to modify
    * Check what attributes/methods ACTUALLY exist on models you'll use
    * Find existing patterns for similar functionality (grep/search)
@@ -55,7 +122,10 @@ STOP HERE and ask for confirmation before proceeding to implementation.
 
 ## Phase 2: Branch & TDD Implementation
 
-1. Create and checkout branch: `issue-$ARGUMENTS-<descriptive-label>`
+1. Create and checkout branch in the target tree:
+   `git -C <worktree> checkout -b issue-$ARGUMENTS-<descriptive-label>`
+   If `<worktree>` was resolved via `--issue` it is already on that branch — check
+   with `git -C <worktree> branch --show-current` before creating it.
 2. Before writing new code, verify your assumptions:
    * If using model attributes, confirm they exist: `grep "attribute_name" models.py`
    * If importing classes, confirm they exist: `python -c "from module import Class"`
@@ -79,8 +149,11 @@ STOP HERE and ask for confirmation before proceeding to implementation.
 3. **REFACTOR — Clean up, then commit**
    * Remove duplication, improve naming if needed
    * Run tests again to confirm nothing broke
-   * Commit: `~/.claude/bin/git-commit.sh "descriptive message for this step"`
-   * If SENTRY_ISSUES were found in Phase 1, add `Fixes <ID>` to the **final commit only** (the last step before PR creation), e.g.: `~/.claude/bin/git-commit.sh "final step description" "" "Fixes MYAPP-BACKEND-G" "Fixes MYAPP-BACKEND-H"`
+   * Stage and commit in the target tree — `--repo` is not optional, without it
+     the commit is judged against the session's start directory:
+     `git -C <worktree> add <paths>` then
+     `~/.claude/bin/git-commit.sh --repo <worktree> "descriptive message for this step"`
+   * If SENTRY_ISSUES were found in Phase 1, add `Fixes <ID>` to the **final commit only** (the last step before PR creation), e.g.: `~/.claude/bin/git-commit.sh --repo <worktree> "final step description" "" "Fixes MYAPP-BACKEND-G" "Fixes MYAPP-BACKEND-H"`
 
 4. **Move on — Focus shifts to the next step**
    * Do not revisit completed steps unless a later test breaks them
@@ -145,9 +218,10 @@ churn you then have to revert and risk committing. Use the check-only variant
 ### Step 1: Gather context for the sub-agent
 
 Before spawning, collect:
-- `base_branch` — from `~/.claude/bin/git-find-base-branch`
+- `base_branch` — from `~/.claude/bin/git-find-base-branch --repo <worktree>`
 - `acceptance_criteria` — the AC list parsed in Phase 1 (or "none" if not found)
-- `modified_files` — `~/.claude/bin/git-diff-base.sh <base-branch>`
+- `modified_files` — `~/.claude/bin/git-diff-base.sh --repo <worktree> <base-branch>`
+- `worktree` — the absolute path resolved in Phase 1
 - `has_backend_endpoints` — true if any modified file matches `**/api/**`, `**/routes/**`, `**/endpoints/**`
 - `has_schema_changes` — true if any modified file matches `**/schemas/**`, `**/models/**`, `**/migrations/**`
 
@@ -163,16 +237,35 @@ Run each step below and report results in the structured format at the end.
 
 ## Context
 - Issue: #$ARGUMENTS
+- Worktree: <worktree>
 - Base branch: <base_branch>
 - Modified files: <modified_files>
 - Acceptance criteria: <acceptance_criteria or "none parsed">
 - Has backend endpoints: <true/false>
 - Has schema changes: <true/false>
 
+## Worktree — read before running anything
+
+The work under verification lives in `<worktree>`. That is NOT necessarily the
+directory you start in, and your working directory resets to the start directory
+between every Bash call, so `cd` cannot fix it once and exported variables do not
+survive either. Every command must carry the path:
+
+- `git -C <worktree> ...` — never a bare `git`
+- `~/.claude/bin/git-diff-base.sh --repo <worktree> <base_branch>`
+- `~/.claude/bin/git-find-base-branch --repo <worktree>`
+- commits (if a fix needs one): `~/.claude/bin/git-commit.sh --repo <worktree> "..."`
+- Read/Edit/Write/Glob/Grep: absolute paths under `<worktree>` only
+- project scripts: `<worktree>/bin/<script>`; `~/.claude/bin/` scripts are shared
+  and need no prefix
+
+A verification run against the wrong tree reports green for code that is not the
+code under review — silently, because both trees are valid checkouts.
+
 Project policies — read these BEFORE verifying:
-- ./CLAUDE.md (project root)
-- ./frontend/CLAUDE.md (if frontend changes)
-- ./backend/app/CLAUDE.md or ./backend/CLAUDE.md (if backend changes)
+- <worktree>/CLAUDE.md (project root)
+- <worktree>/frontend/CLAUDE.md (if frontend changes)
+- <worktree>/backend/app/CLAUDE.md or <worktree>/backend/CLAUDE.md (if backend changes)
 
 ## Tool Rules
 - Use Glob/Grep/Read instead of Bash equivalents (find, grep, cat, head, tail)
@@ -184,16 +277,22 @@ Project policies — read these BEFORE verifying:
 
 ### Step A: Targeted tests
 Run ONLY tests relevant to the modified files — never the full suite:
-`~/.claude/bin/project-test.sh tests/path/to/your_test.py -v`
+`~/.claude/bin/project-test.sh <worktree>/tests/path/to/your_test.py -v`
 If any test fails, fix at root cause and re-run.
 
+If the project runs tests through a long-lived container, check what that
+container bind-mounts before trusting the result: it commonly mounts the MAIN
+worktree, so a run started from a linked one tests the wrong source and can write
+files back into a tree nobody is working in. Prefer the project's isolated runner
+where it has one; otherwise report which tree the tests actually ran against.
+
 ### Step B: Project validation
-Check for one of: `npm run validate:all`, `make validate`, `./validate.sh`.
-If found, run it. If backend schemas changed, ensure OpenAPI is regenerated.
-Fix any errors before proceeding.
+Check for one of: `npm run validate:all`, `make validate`, `./validate.sh` — in
+`<worktree>`, and run it from there. If backend schemas changed, ensure OpenAPI is
+regenerated. Fix any errors before proceeding.
 
 ### Step C: Integration verification (conditional)
-Check the project's CLAUDE.md for an **Integration Verification** section.
+Check `<worktree>/CLAUDE.md` for an **Integration Verification** section.
 If it exists AND modified files match a trigger pattern, run the defined steps.
 Otherwise skip.
 
@@ -208,14 +307,14 @@ For UNVERIFIED items: write a test if testable, else flag for manual review.
 
 ### Step E: Self-review (max 2 fix iterations)
 Run the `/review` analysis on the branch diff:
-`~/.claude/bin/git-diff-base.sh --patch <base-branch>`
+`~/.claude/bin/git-diff-base.sh --repo <worktree> --patch <base-branch>`
 
 If findings with severity > INFO:
 - Fix automatically, re-run Step A, re-run review
 - Max 2 iterations — remaining findings go into the PR body as "Known Issues"
 
 ### Step F: API smoke test (skip if has_backend_endpoints = false)
-First establish the project's own names — read the root CLAUDE.md and the
+First establish the project's own names — read `<worktree>/CLAUDE.md` and the
 compose file for the API container, the restart command and the login helper.
 Never guess a container name or script path; if the project defines none, skip
 this step and report SKIP with the reason.
@@ -267,8 +366,11 @@ Before proceeding to PR creation:
 
 ## Phase 4: PR Creation
 
-1. Determine base branch: `~/.claude/bin/git-find-base-branch`
-2. Write PR body to `/tmp/pr-body.md` using the Write tool. Include:
+1. Determine base branch: `~/.claude/bin/git-find-base-branch --repo <worktree>`
+2. Write PR body to `/tmp/<project>-pr-body-$ARGUMENTS.md` using the Write tool —
+   a per-project, per-issue name, because parallel worktrees mean parallel
+   sessions and a shared `/tmp/pr-body.md` gets overwritten by whichever writes
+   last. Include:
    - `Closes #$ARGUMENTS`
    - Implementation summary
    - Test checklist (test counts from the verification sub-agent's TESTS line)
@@ -276,7 +378,7 @@ Before proceeding to PR creation:
    - If `AC_UNVERIFIED` from Phase 3 is not "none": add a `## Manual Review Needed` section listing the UNVERIFIED criteria
    - If SENTRY_ISSUES were found in Phase 1, add a `## Sentry` section: `Resolves: MYAPP-BACKEND-G, MYAPP-BACKEND-H`
 3. Push + create PR in one command:
-   `~/.claude/bin/git-push-pr-merge.sh --base <base-branch> --title "<concise description>" --body-file /tmp/pr-body.md --no-merge`
+   `~/.claude/bin/git-push-pr-merge.sh --repo <worktree> --base <base-branch> --title "<concise description>" --body-file /tmp/<project>-pr-body-$ARGUMENTS.md --no-merge`
    `--no-merge` means the CI gate is skipped — the PR is left open for human review regardless of check status
 4. Return PR URL for review
 
@@ -320,8 +422,8 @@ If no row exists for this issue, add one:
 
 **3c. Write updated body and apply:**
 ```bash
-# Write updated body to /tmp/pr_body.md using the Write tool
-gh pr edit [tracking-pr-number] --body-file /tmp/pr_body.md
+# Write updated body to /tmp/<project>-tracking-pr-body-$ARGUMENTS.md using the Write tool
+gh pr edit [tracking-pr-number] --body-file /tmp/<project>-tracking-pr-body-$ARGUMENTS.md
 ```
 
 ### Step 4: Confirm
