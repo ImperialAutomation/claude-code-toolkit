@@ -73,6 +73,12 @@ echo "$COMMAND" | grep -qE -- '-C[= ]|--git-dir[= ]' || exit 0
 # `git restore` is the modern spelling of `checkout --` and is included for the
 # same reason. `stash` is here because `stash push` REMOVES changes from the tree
 # (`stash list`/`show` are read-only and filtered out below).
+#
+# pop/apply/drop are excluded from this list and judged separately above, on the
+# entry's origin branch rather than on the target path. They do not remove
+# anything from the target tree — they ADD to it — so the cross-tree reasoning
+# here does not apply, and treating them as destructive-by-path blocked restoring
+# your own stash in your own worktree.
 DESTRUCTIVE_RE='(checkout[[:space:]]+--|checkout[[:space:]]+-f|restore\b|reset\b|clean\b|stash\b)'
 
 echo "$COMMAND" | grep -qE "$DESTRUCTIVE_RE" || exit 0
@@ -80,6 +86,82 @@ echo "$COMMAND" | grep -qE "$DESTRUCTIVE_RE" || exit 0
 # Read-only stash subcommands. Bare `git stash` is NOT here: it stashes the whole
 # tree, which is exactly the destructive case. Only the inspecting verbs are safe.
 echo "$COMMAND" | grep -qE 'stash[[:space:]]+(list|show)\b' && exit 0
+
+# --- Restoring a stash raised in another worktree ---------------------------
+#
+# refs/stash is ONE stack shared by every worktree of a repository; a linked
+# worktree gets no private copy under .git/worktrees/<name>/refs/stash. An entry
+# raised anywhere is therefore visible, and poppable, everywhere.
+#
+# That breaks the same-tree assumption further down. `git -C <own-tree> stash pop`
+# has target == caller, so the scope check would allow it — yet the entry it pops
+# may have been raised in a sibling tree, on a different branch, by another
+# session. Popping it applies those changes to the branch the caller is on and
+# removes the entry its owner was going to restore.
+#
+# Judged on the entry's ORIGIN rather than on the path: `stash list` records it as
+# "On <branch>: ...". Restoring an entry raised on the branch you are on is
+# ordinary work and stays allowed; restoring one raised elsewhere is the case
+# worth refusing.
+#
+# Deliberately NOT blocking `stash push` here. It is the common, mostly harmless
+# half — the entry becomes visible to siblings, but nothing is applied anywhere
+# and the owner can still restore it. Blocking it would forbid routine work in
+# every linked worktree to prevent a hazard that only materialises on restore.
+if echo "$COMMAND" | grep -qE 'stash[[:space:]]+(pop|apply|drop)\b'; then
+    STASH_TARGET=$(echo "$COMMAND" | grep -oE -- '-C[= ]+[^ ]+' | head -1 | sed -E 's/-C[= ]+//' || true)
+    STASH_TARGET="${STASH_TARGET%\"}"; STASH_TARGET="${STASH_TARGET#\"}"
+    STASH_TARGET="${STASH_TARGET%\'}"; STASH_TARGET="${STASH_TARGET#\'}"
+    case "$STASH_TARGET" in "~"/*) STASH_TARGET="$HOME/${STASH_TARGET#\~/}" ;; esac
+
+    if [ -n "$STASH_TARGET" ]; then
+        # Which entry: an explicit stash@{N} if named, otherwise the top of the
+        # stack, which is what a bare pop/apply/drop takes.
+        STASH_REF=$(echo "$COMMAND" | grep -oE 'stash@\{[0-9]+\}' | head -1 || true)
+        [ -z "$STASH_REF" ] && STASH_REF='stash@{0}'
+
+        # "On <branch>: <message>" — the branch the entry was raised on. Empty
+        # when the stack is empty or the ref does not resolve, in which case
+        # there is nothing to judge and git reports the real error itself.
+        STASH_ORIGIN=$(git -C "$STASH_TARGET" log -g --format='%gs' "$STASH_REF" 2>/dev/null \
+            | head -1 | sed -nE 's/^(On|WIP on) ([^:]+):.*/\2/p' || true)
+        CURRENT_BRANCH=$(git -C "$STASH_TARGET" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+
+        if [ -n "$STASH_ORIGIN" ] && [ -n "$CURRENT_BRANCH" ] \
+           && [ "$STASH_ORIGIN" != "$CURRENT_BRANCH" ]; then
+            cat >&2 <<EOF
+BLOCKED by hook-block-foreign-worktree-git.sh: this restores a stash entry that
+was raised somewhere else.
+
+  entry  : $STASH_REF, raised on branch '$STASH_ORIGIN'
+  you are on: '$CURRENT_BRANCH'
+
+refs/stash is shared by every worktree of this repository — there is no
+per-worktree stash stack. This entry may belong to another worktree or another
+session, and applying it here puts its changes on YOUR branch while removing the
+entry its owner was going to restore.
+
+Check whose it is first:
+  git -C $STASH_TARGET stash list
+
+If it is yours and you want it here, switch to '$STASH_ORIGIN' and restore it
+there. If you are cleaning up an entry you raised for a measurement, do that from
+the worktree that raised it.
+
+For A/B measurements, prefer a method that touches no worktree at all: copy the
+sources into a disposable container, or restore explicit paths with
+\`git checkout <ref> -- <path>\`.
+EOF
+            exit 2
+        fi
+    fi
+
+    # Same branch, empty stack, or no -C: the entry is the caller's own to
+    # restore. Exit here rather than falling through to the path-based rule
+    # below, which treats every `stash` as destructive-in-the-target and would
+    # block restoring your own stash in your own worktree.
+    exit 0
+fi
 
 # Extract the -C target. Only the first is considered: git applies them
 # cumulatively, and a command with several is unusual enough to warrant blocking
