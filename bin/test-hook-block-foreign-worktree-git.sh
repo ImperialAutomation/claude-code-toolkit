@@ -60,6 +60,40 @@ check 2 "destructive command later in a chain"  "cd /tmp && git -C $BASE/wt rese
 check 0 "stash list is read-only"               "git -C $BASE/wt stash list"
 check 0 "stash show is read-only"               "git -C $BASE/wt stash show"
 
+# --- Restoring a stash raised elsewhere -------------------------------------
+#
+# refs/stash is ONE stack shared by every worktree of the repository; a linked
+# worktree gets no private copy. So a stash raised in one tree is visible — and
+# poppable — from all the others, and `pop` applies it to whatever branch the
+# caller happens to be on.
+#
+# The same-tree rule below cannot cover this: at the moment of the pop the target
+# and the caller ARE the same tree. What makes it dangerous is the stash's
+# ORIGIN, which the entry records as "On <branch>: ...".
+#
+# Fixture: stash something while on branch `other` in the linked worktree, then
+# ask about popping it from `main`, which is on a different branch.
+(
+  cd "$BASE/wt" || exit 1
+  echo changed >> f.txt
+  git stash push -q -m "raised-in-wt"
+) >/dev/null 2>&1
+
+check 2 "pop a stash raised on another branch"   "git -C $BASE/main stash pop"
+check 2 "apply a stash raised on another branch" "git -C $BASE/main stash apply"
+check 2 "drop a stash raised on another branch"  "git -C $BASE/main stash drop"
+check 2 "pop by explicit ref"                    "git -C $BASE/main stash pop stash@{0}"
+
+# Not over-blocking: from the tree whose branch the stash was raised on, the
+# entry is the caller's own and restoring it is ordinary work.
+check 0 "pop from the branch it was raised on"   "git -C $BASE/wt stash pop"
+check 0 "apply from the branch it was raised on" "git -C $BASE/wt stash apply"
+
+# Inspecting the shared stack stays free from anywhere — that is how you find out
+# whose entry it is before touching it.
+check 0 "stash list from the other tree"         "git -C $BASE/main stash list"
+check 0 "stash show from the other tree"         "git -C $BASE/main stash show stash@{0}"
+
 # Allowed: out of scope.
 check 0 "same tree via explicit -C"             "git -C $BASE/main checkout -- f.txt"
 check 0 "no -C target at all"                   "git checkout -- f.txt"
@@ -71,6 +105,11 @@ check 0 "unrelated repository"                  "git -C $BASE/unrelated reset --
 check 0 "non-destructive verb"                  "git -C $BASE/wt status"
 check 0 "not a git command"                     "ls -la"
 check 0 "target path does not exist"            "git -C $BASE/nope reset --hard"
+
+# An empty stack has no origin to compare against, so there is nothing to judge;
+# git will report "No stash entries found" itself. Checked in the unrelated repo,
+# which never had a stash raised in it.
+check 0 "pop with an empty stash stack"        "git -C $BASE/unrelated stash pop"
 
 if [ $fail -eq 0 ]; then
   echo "all tests passed"
