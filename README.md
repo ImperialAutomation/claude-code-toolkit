@@ -211,9 +211,11 @@ misdescribe the argument.
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `docker-health-check.sh` | `docker-health-check.sh [project-dir] [--timeout S] [--filter PREFIX]` | Runtime Docker container health verification (status, restarts, error logs) |
+| `docker-health-check.sh` | `docker-health-check.sh [project-dir] [--timeout S] [--filter PREFIX]` | Runtime Docker container health verification (status, restarts, error logs). `--filter` names the container set directly and needs no compose file; without it the set comes from a compose file in the project root |
 | `smoke-test.sh` | `smoke-test.sh [base-url] [--health-token TOKEN]` | API endpoint smoke testing with auto-discovery |
 | `http-status.sh` | `http-status.sh [--body] [--max-time SECS] <url> [url...]` | HTTP status per URL as a single command. One URL prints the bare code; several print `<status>  <url>`. 4xx/5xx exit 0 (a valid answer); transport failures print `ERR` and exit 1 |
+
+`docker-health-check.sh` has two ways of deciding which containers to check, and on an `include:`-based compose set only one of them works. Without `--filter` it finds a compose file in the project root and asks `docker compose -f <file> ps`. A stack started from a top-level file that pulls the rest in via `include:` runs under a different compose project than that one file, so the lookup returns nothing and the check fails — on a stack that is running and healthy. Pass `--filter <prefix>` there: the prefix names the set directly, no compose file is consulted, and the containers come from `docker ps -a` (including stopped ones, which are findings rather than absences). Record the prefix as `Container prefix:` in the project CLAUDE.md's Integration Verification section, where `/verify` and `/pre-merge` both read it.
 
 `http-status.sh` exists for permission matching, not for curl features. `curl -s -o /dev/null -w "%{http_code}\n" <url>` is rarely wanted just once, and two on a line make a compound command — every segment after the `;` or `&&` goes unmatched and prompts, even with a broad `Bash(curl *)` rule allowlisted. Auth headers, retries and JSON parsing are deliberately absent: past that point it is not a smoke test and calling `curl` directly is clearer. For waiting until a service comes up, use `wait-for-pattern.sh` or `wait-for-healthy.sh`.
 

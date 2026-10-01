@@ -60,6 +60,15 @@ Record: passed/failed/skipped counts, verdict
 Run a quick runtime check (equivalent to `/verify quick`):
 
 1. **Container health** (if Docker detected):
+
+   Read the project CLAUDE.md's **Integration Verification** config first. When it
+   defines a `Container prefix:`, pass it — a stack started from an `include:` set
+   has no compose file that names its containers, so the bare call fails on a
+   healthy stack:
+   ```bash
+   ~/.claude/bin/docker-health-check.sh --filter <prefix>
+   ```
+   With no prefix configured, call it bare and let the compose lookup find the set:
    ```bash
    ~/.claude/bin/docker-health-check.sh
    ```
