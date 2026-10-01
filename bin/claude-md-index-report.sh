@@ -264,6 +264,7 @@ doc_summary() { # file -> first heading, else first non-empty prose line
 }
 
 echo "── Consolidation candidates ──"
+DOC_TOTAL=0
 if [[ -z "$DOCS_DIR" ]]; then
     echo "  no docs directory found (looked for docs/development/, docs/)"
     echo ""
@@ -271,7 +272,6 @@ if [[ -z "$DOCS_DIR" ]]; then
 else
     echo "  from: ${DOCS_DIR#"$PROJECT_DIR"/}"
     echo ""
-    DOC_TOTAL=0
     SHOWN=0
     while IFS= read -r doc; do
         [[ -n "$doc" ]] || continue
@@ -300,15 +300,24 @@ echo ""
 # helper into something a caller works around rather than reads, and the judgement
 # this informs (fold in, or justify a new doc) belongs to the caller.
 echo "── Summary ──"
+
+# Pointing at "the candidates above" when the list was empty is advice the reader
+# cannot act on, and it reads as a script that did not look.
+if [[ $DOC_TOTAL -gt 0 ]]; then
+    ADVICE="Fold the finding into one of the $DOC_TOTAL candidate docs above rather than adding an index entry."
+else
+    ADVICE="There are no existing docs to fold into yet, so the first entry is unavoidable. Keep it to one line."
+fi
+
 if [[ $TOTAL_LINES -gt $MAX_ALWAYS_LOADED_LINES ]]; then
     echo "WARNING: the always-loaded set is $TOTAL_LINES lines, over the $MAX_ALWAYS_LOADED_LINES-line threshold."
     echo "         Every line here is paid for in every session and every sub-agent."
-    echo "         Prefer consolidating a finding into one of the candidate docs above"
-    echo "         over adding an index entry. A new entry needs a reason why no"
-    echo "         existing doc fit."
+    echo "         $ADVICE"
+    if [[ $DOC_TOTAL -gt 0 ]]; then
+        echo "         A new entry needs a stated reason why no existing doc fit."
+    fi
 else
     echo "Always-loaded set: $TOTAL_LINES/$MAX_ALWAYS_LOADED_LINES lines, $ENTRY_COUNT index entries."
-    echo "Still check the candidates above before adding an entry: consolidating into an"
-    echo "existing doc costs no index line at all."
+    echo "$ADVICE"
 fi
 exit 0

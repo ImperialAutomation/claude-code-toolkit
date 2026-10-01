@@ -200,8 +200,9 @@ OUT=$(run "$T/under" 2>&1); RC=$?
 check "under threshold exits 0"   "0"  "$RC"
 check "under threshold is silent" "no" "$(contains "$OUT" "WARNING")"
 
-mkdir -p "$T/over"
+mkdir -p "$T/over/docs/development"
 { printf '# Root\n'; seq 1 $((THRESHOLD + 10)); } > "$T/over/CLAUDE.md"
+printf '# An existing mechanism\n' > "$T/over/docs/development/existing.md"
 # Assert the fixture before asserting the behaviour: a fixture that quietly came
 # out two lines long would make the "no warning" case pass for the wrong reason.
 check "over fixture is really over" "yes" \
@@ -212,7 +213,9 @@ check "over threshold warns" "yes" "$(contains "$OUT" "WARNING")"
 # information; a non-zero exit in a chain is a stop.
 check "over threshold still exits 0" "0" "$RC"
 check "warning names the threshold"  "yes" "$(contains "$OUT" "$THRESHOLD")"
-check "warning says what to do"      "yes" "$(contains "$OUT" "consolidat")"
+# A bare number is not actionable. The warning has to say what to do instead of
+# adding an entry, and this fixture has candidate docs to fold into.
+check "warning says what to do"      "yes" "$(contains "$OUT" "Fold the finding into")"
 
 echo "== 11. explicit --file replaces autodetection =="
 mkdir -p "$T/explicit"
@@ -240,6 +243,25 @@ mkdir -p "$T/bare"
 OUT=$(run "$T/bare" 2>&1); RC=$?
 check "bare project exits 0"  "0"   "$RC"
 check "says nothing is loaded" "yes" "$(contains "$OUT" "none found")"
+
+echo "== 13. the summary's advice matches whether candidates exist =="
+# Found on a real project: both summary branches pointed at "the candidates above"
+# even when the list was empty, which is advice the reader cannot act on.
+OUT=$(run "$T/proj" 2>&1)
+check "with candidates, says fold into them" "yes" "$(contains "$OUT" "Fold the finding into")"
+
+mkdir -p "$T/nodocs"
+printf '# Root\n' > "$T/nodocs/CLAUDE.md"
+OUT=$(run "$T/nodocs" 2>&1)
+check "without candidates, says so"          "yes" "$(contains "$OUT" "no existing docs to fold into")"
+check "without candidates, no dangling ref"  "no"  "$(contains "$OUT" "candidate docs above")"
+
+# Same must hold in the warning branch, which is the one a real project hit.
+mkdir -p "$T/overnodocs"
+{ printf '# Root\n'; seq 1 $((THRESHOLD + 10)); } > "$T/overnodocs/CLAUDE.md"
+OUT=$(run "$T/overnodocs" 2>&1)
+check "over threshold, no candidates, warns" "yes" "$(contains "$OUT" "WARNING")"
+check "over threshold, no dangling ref"      "no"  "$(contains "$OUT" "candidate docs above")"
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
