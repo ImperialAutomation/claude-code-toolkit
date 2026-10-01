@@ -43,47 +43,61 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   exit 2
 fi
 
-# Find compose file
-COMPOSE_FILE=""
-for candidate in \
-  "$PROJECT_DIR/docker-compose.yml" \
-  "$PROJECT_DIR/docker-compose.yaml" \
-  "$PROJECT_DIR/compose.yml" \
-  "$PROJECT_DIR/compose.yaml" \
-  "$PROJECT_DIR/backend/docker/docker-compose.yml" \
-  "$PROJECT_DIR/backend/docker/docker-compose.yaml"; do
-  if [[ -f "$candidate" ]]; then
-    COMPOSE_FILE="$candidate"
-    break
+# Determine the container set. Two routes, because a compose file cannot always
+# name the set: a stack started from a top-level file that pulls the rest in via
+# `include:` has no container belonging to the compose project of any single file
+# found here, so the compose lookup returns nothing for a stack that is running.
+# A caller that passes --filter has already named the set, so that route skips
+# the compose lookup entirely and never needs a compose file.
+if [[ -n "$FILTER" ]]; then
+  echo "Docker Runtime Health Check"
+  echo "=================================================="
+  echo "Container filter: $FILTER"
+  echo ""
+
+  # -a, not just running: an exited container of the stack must stay visible and
+  # become an issue, rather than disappearing into "no containers found".
+  # Docker's `name=` is a substring match, so this is a pre-selection only — the
+  # real prefix test is the name check in the loop below.
+  CONTAINERS_JSON=$(docker ps -a --filter "name=$FILTER" --format json 2>/dev/null || true)
+else
+  # Compose-Spec standard names in the project root. Nothing else: a file found
+  # somewhere deeper is as likely to be one member of an include: set as it is to
+  # be the top file, and guessing wrong gives a confidently empty answer.
+  COMPOSE_FILE=""
+  for candidate in \
+    "$PROJECT_DIR/docker-compose.yml" \
+    "$PROJECT_DIR/docker-compose.yaml" \
+    "$PROJECT_DIR/compose.yml" \
+    "$PROJECT_DIR/compose.yaml"; do
+    if [[ -f "$candidate" ]]; then
+      COMPOSE_FILE="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$COMPOSE_FILE" ]]; then
+    echo "Error: no docker-compose file found in $PROJECT_DIR" >&2
+    echo "If the stack is started from an include: set, pass --filter <prefix> instead." >&2
+    exit 2
   fi
-done
 
-if [[ -z "$COMPOSE_FILE" ]]; then
-  echo "Error: no docker-compose file found in $PROJECT_DIR" >&2
-  exit 2
-fi
+  COMPOSE_REL="${COMPOSE_FILE#"$PROJECT_DIR"/}"
 
-COMPOSE_DIR="$(dirname "$COMPOSE_FILE")"
-COMPOSE_REL="${COMPOSE_FILE#"$PROJECT_DIR"/}"
+  echo "Docker Runtime Health Check"
+  echo "=================================================="
+  echo "Compose file: $COMPOSE_REL"
+  echo ""
 
-echo "Docker Runtime Health Check"
-echo "=================================================="
-echo "Compose file: $COMPOSE_REL"
-echo ""
+  CONTAINERS_JSON=$(docker compose -f "$COMPOSE_FILE" ps --format json 2>/dev/null || true)
 
-# Get container list from compose project
-COMPOSE_PROJECT=""
-if [[ -f "$COMPOSE_DIR/.env" ]]; then
-  COMPOSE_PROJECT=$(grep -E '^COMPOSE_PROJECT_NAME=' "$COMPOSE_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"'"'" || true)
-fi
-
-# Get running containers via docker compose
-CONTAINERS_JSON=$(docker compose -f "$COMPOSE_FILE" ps --format json 2>/dev/null || true)
-
-if [[ -z "$CONTAINERS_JSON" ]]; then
-  echo "Error: no containers found for compose file $COMPOSE_REL" >&2
-  echo "Are the containers running? Try: docker compose -f $COMPOSE_REL up -d" >&2
-  exit 1
+  if [[ -z "$CONTAINERS_JSON" ]]; then
+    echo "Error: no containers found for compose file $COMPOSE_REL" >&2
+    echo "Are the containers running? Try: docker compose -f $COMPOSE_REL up -d" >&2
+    echo "If the stack is started from an include: set, its containers belong to a" >&2
+    echo "different compose project than this file — pass --filter <prefix> instead." >&2
+    exit 1
+  fi
 fi
 
 # Parse containers (docker compose ps --format json outputs one JSON object per line)
@@ -99,11 +113,11 @@ while IFS= read -r line; do
   name=$(echo "$line" | jq -r '.Name // .Names // empty' 2>/dev/null)
   state=$(echo "$line" | jq -r '.State // empty' 2>/dev/null)
   health=$(echo "$line" | jq -r '.Health // empty' 2>/dev/null)
-  status_full=$(echo "$line" | jq -r '.Status // empty' 2>/dev/null)
 
   [[ -z "$name" ]] && continue
 
-  # Apply filter if specified
+  # Docker's `name=` filter matches a substring, so `other_myapp_api` arrives in
+  # a `--filter myapp_` set. This is the real prefix test.
   if [[ -n "$FILTER" && "$name" != "$FILTER"* ]]; then
     continue
   fi
@@ -112,6 +126,17 @@ while IFS= read -r line; do
 
   # Get restart count
   restarts=$(docker inspect --format '{{.RestartCount}}' "$name" 2>/dev/null || echo "?")
+
+  # `docker ps --format json` carries no .Health field — only .State and a
+  # free-text .Status — so in the filter route health comes from inspect.
+  # Empty is the honest answer for a container without a healthcheck, and the
+  # checks below treat it as neither healthy nor unhealthy.
+  # The `if` guard matters: without it Docker fails the whole template with
+  # "map has no entry for key Health" on a container that has no healthcheck,
+  # which is a normal case rather than an error.
+  if [[ -n "$FILTER" ]]; then
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name" 2>/dev/null || echo "")
+  fi
 
   # Determine status display
   status_display="$state"

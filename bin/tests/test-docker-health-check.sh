@@ -59,17 +59,29 @@ lookup() { # table name default
 
 case "$sub" in
   ps)
+    # Record that `docker ps` was reached at all, so a test can assert the
+    # compose route never consults it.
+    [[ -n "${STUB_PS_CALLED:-}" ]] && echo "ps $*" >> "$STUB_PS_CALLED"
     # Honour --filter name=<substring> the way Docker does: a substring match,
     # not a prefix match. The script must not rely on this being a prefix.
-    want=""
+    want=""; all=""
     for a in "$@"; do
-        case "$a" in name=*) want="${a#name=}" ;; esac
+        case "$a" in
+          name=*) want="${a#name=}" ;;
+          -a|--all) all=1 ;;
+        esac
     done
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        if [[ -z "$want" ]]; then printf '%s\n' "$line"; continue; fi
         name=$(printf '%s' "$line" | jq -r '.Names // empty')
-        case "$name" in *"$want"*) printf '%s\n' "$line" ;; esac
+        state=$(printf '%s' "$line" | jq -r '.State // empty')
+        # Without -a, Docker lists only running containers. Modelling this is the
+        # point: it is what makes an exited container vanish from the set.
+        [[ -z "$all" && "$state" != "running" ]] && continue
+        if [[ -n "$want" ]]; then
+            case "$name" in *"$want"*) ;; *) continue ;; esac
+        fi
+        printf '%s\n' "$line"
     done <<< "${STUB_PS:-}"
     ;;
   compose)
@@ -118,13 +130,18 @@ c() { # name state status -> one docker ps json line
     printf '{"Names":"%s","State":"%s","Status":"%s"}\n' "$1" "$2" "$3"
 }
 
+# Command substitution strips trailing newlines, so "$(c a)$(c b)" would glue two
+# JSON objects onto one line and every jq field would come back doubled. Join
+# rows through this instead of concatenating them.
+rows() { printf '%s\n' "$@"; }
+
 run() { # runs the script with the stub docker first on PATH
     PATH="$T/bin:$PATH" bash "$SCRIPT" "$@"
 }
 
 echo "== 1. --filter needs no compose file =="
 # The bug: a healthy include:-set stack reported as "no containers found".
-STUB_PS="$(c myapp_api running 'Up 6 hours (healthy)')$(c myapp_db running 'Up 6 hours')"
+STUB_PS=$(rows "$(c myapp_api running 'Up 6 hours (healthy)')" "$(c myapp_db running 'Up 6 hours')")
 STUB_HEALTH="myapp_api=healthy"
 export STUB_PS STUB_HEALTH
 OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
@@ -137,7 +154,7 @@ check "no compose-file error"    "no"  "$(contains "$OUT" "no docker-compose fil
 
 echo "== 2. the filter route reads docker ps -a, so an exited container is in the set =="
 # Not "no containers found": an exited container of the stack is the finding.
-STUB_PS="$(c myapp_api running 'Up 6 hours (healthy)')$(c myapp_worker exited 'Exited (1) 2 minutes ago')"
+STUB_PS=$(rows "$(c myapp_api running 'Up 6 hours (healthy)')" "$(c myapp_worker exited 'Exited (1) 2 minutes ago')")
 STUB_HEALTH="myapp_api=healthy"
 export STUB_PS STUB_HEALTH
 OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
@@ -145,11 +162,22 @@ check "exited container exits 1"      "1"   "$RC"
 check "exited container is listed"    "yes" "$(contains "$OUT" "myapp_worker")"
 check "counted as an issue"           "yes" "$(contains "$OUT" "CONTAINER ISSUE")"
 check "not reported as empty set"     "no"  "$(contains "$OUT" "No containers found")"
+# The stub lists only running containers unless -a is passed, so an exited
+# container reaching the report at all is the evidence that -a was used. Asserted
+# on the invocation too, because a future refactor could keep the behaviour by
+# accident while losing the flag.
+STUB_PS_CALLED="$T/ps-called-2"
+: > "$STUB_PS_CALLED"
+export STUB_PS_CALLED
+run "$T/no-compose" --filter myapp_ >/dev/null 2>&1
+check "docker ps is called with -a" "yes" \
+    "$(contains "$(cat "$STUB_PS_CALLED")" " -a ")"
+unset STUB_PS_CALLED
 
 echo "== 3. the prefix match is a real prefix, not Docker's substring =="
 # docker ps --filter name= matches anywhere in the name, so a foreign container
 # carrying the prefix mid-name arrives in the set and must be dropped.
-STUB_PS="$(c myapp_api running 'Up 6 hours (healthy)')$(c other_myapp_api exited 'Exited (1) ago')"
+STUB_PS=$(rows "$(c myapp_api running 'Up 6 hours (healthy)')" "$(c other_myapp_api exited 'Exited (1) ago')")
 STUB_HEALTH="myapp_api=healthy"
 export STUB_PS STUB_HEALTH
 OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
@@ -215,13 +243,20 @@ unset STUB_COMPOSE
 
 echo "== 8. zero containers without --filter is a hard failure that names the fix =="
 STUB_COMPOSE=""
-export STUB_COMPOSE
+STUB_PS=$(rows "$(c stray_container running 'Up 6 hours')")
+STUB_PS_CALLED="$T/ps-called-8"
+: > "$STUB_PS_CALLED"
+export STUB_COMPOSE STUB_PS STUB_PS_CALLED
 OUT=$(run "$T/with-compose" 2>&1); RC=$?
 check "empty compose set exits 1"   "1"   "$RC"
 check "error mentions --filter"     "yes" "$(contains "$OUT" "--filter")"
-# Falling back to every container on the host would be a silently wrong answer.
+# Falling back to every container on the host would be a silently wrong answer:
+# it would report on containers that have nothing to do with this project.
 check "no fallback to all containers" "no" "$(contains "$OUT" "HEALTHY")"
-unset STUB_COMPOSE
+check "stray container not reported"  "no" "$(contains "$OUT" "stray_container")"
+check "compose route never calls docker ps" "0" \
+    "$(wc -l < "$STUB_PS_CALLED" | tr -d ' ')"
+unset STUB_COMPOSE STUB_PS_CALLED
 
 echo "== 9. the compose candidate list is the Compose-Spec names in the root =="
 # backend/docker/docker-compose.yml used to be a candidate. A project whose only
