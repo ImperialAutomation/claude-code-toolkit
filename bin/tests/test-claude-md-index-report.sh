@@ -6,12 +6,12 @@
 #
 # Drives the real script against fixture project trees in a temp dir. The global
 # CLAUDE.md is redirected with CLAUDE_HOME so no test ever reads or reports on the
-# machine's actual ~/.claude — a report that measured the developer's own always-
+# machine's actual ~/.claude. A report that measured the developer's own always-
 # loaded set would pass or fail depending on whose laptop ran it.
 #
 # What is deliberately NOT mocked: the script. The behaviour under test is which
 # files it decides are always loaded, which list items it calls index entries, and
-# when it warns — so every assertion goes through the real discovery and parsing.
+# when it warns, so every assertion goes through the real discovery and parsing.
 
 set -uo pipefail
 
