@@ -87,7 +87,9 @@ if (( COMMIT_AGE > 120 )); then
     exit 0
 fi
 
-if git -C "$REPO_DIR" commit --amend --no-edit --no-verify \
+# --allow-empty: without it git refuses to amend an empty commit (a tracking-PR
+# opener, for one), so exactly those commits would silently stay unlabelled.
+if git -C "$REPO_DIR" commit --amend --no-edit --no-verify --allow-empty \
         --trailer "$TRAILER" &>/dev/null; then
     echo "hook: added missing '$TRAILER' to HEAD (agent-authored label depends on it)" >&2
 else
