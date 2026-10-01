@@ -118,6 +118,44 @@ Create in the project's `scripts/` directory. Requirements:
 - Error handling with clear messages
 - Referenced from CLAUDE.md
 
+### Consolidation gate: run this BEFORE proposing any new document
+
+Mandatory, for every finding that would get its own document, in `docs/development/`
+or in memory. No exceptions for "this one is clearly new".
+
+```bash
+~/.claude/bin/claude-md-index-report.sh
+```
+
+The report gives three things: the line count of the always-loaded `CLAUDE.md` set,
+every index entry in it, and every existing doc with its subject on one line. It warns
+above a fixed line threshold and never blocks; the judgement below is yours, not the
+script's.
+
+Read the candidate list and answer, in the summary, out loud:
+
+**Which existing document describes the same mechanism as this finding?** Name it, or
+state that you read the list and none did.
+
+The list is complete rather than keyword-matched, and that is the point: the document
+you are looking for probably states the same lesson in different words, about a
+different incident. "A test that was already green on the old code proves nothing" and
+"the fix was verified against a suite that never covered the path" are one mechanism
+and one document. Grep would have called them unrelated.
+
+**The default outcome when a mechanism already has a document is: append to it.** The
+finding goes in as a short example with its issue number, two or three lines under a
+heading like `## Seen again`. No new file, and crucially **no new index line**: the
+document is already indexed, so the lesson gets richer at zero recurring cost.
+
+**A proposal for a new document must carry a justification.** State which candidates you
+examined and why none of them fit: a different mechanism, not merely a different
+incident. A proposal without that justification is not ready; go back to the list.
+
+Above the threshold the report says so, and then consolidation is the expected
+answer. Adding an entry there needs the justification above *plus* a reason the index
+should grow despite already being over budget.
+
 ### For docs/development/ files (when directory exists)
 
 Write operational findings to `docs/development/` using the project's existing structure:
@@ -148,16 +186,19 @@ If the explanation does not fit in the hint, it belongs in the doc. The doc is o
 when relevant and can be as long as it needs to be; the index is read always.
 
 Before adding an entry, check the section for a doc that already covers the topic and
-update that entry instead of adding a near-duplicate. Never let the section exceed a
-scannable size — if a section passes roughly 15 entries, propose splitting it by
-subtopic rather than growing the list.
+update that entry instead of adding a near-duplicate. The consolidation gate above is
+how that check is actually performed: the report's candidate list is the complete set
+to check against, so the answer does not depend on remembering what is already there.
+Never let the section exceed a scannable size. If a section passes roughly 15 entries,
+propose splitting it by subtopic rather than growing the list.
 
 **Index each doc in exactly one place.** A project may also have scoped CLAUDE.md files
 (`frontend/CLAUDE.md`, `backend/app/CLAUDE.md`). Those load on demand — reading any file
 under `frontend/` pulls in `frontend/CLAUDE.md`, and a backend session never pays for it.
-So before adding an entry to the root index, grep the scoped files too: a doc listed
+So before adding an entry to the root index, check the scoped files too: a doc listed
 there must NOT be repeated in the root. Checking only the root is how a doc ends up
-indexed twice.
+indexed twice. The report lists the scoped files and their entries in a separate
+section, under "already indexed here", so this no longer needs a manual grep.
 
 Two caveats before moving entries out of the root to buy that saving. The trigger is a
 **Read** on a path inside the tree — directory listings and content searches do not fire
@@ -173,11 +214,15 @@ Write to the project's auto-memory directory (`~/.claude/projects/*/memory/`) wh
 1. The finding is about Claude Code tool behaviour (permissions, Bash workarounds, native tool quirks) — **always**, regardless of `docs/development/` existence
 2. `docs/development/` does NOT exist — **all** findings go here as fallback
 
+`MEMORY.md` is always loaded into context, so it is the same index problem as the root
+CLAUDE.md and the consolidation gate applies here too: run the report, name the existing
+topic file that covers the mechanism, and append to it.
+
 Steps:
 - Create topic-specific files for detailed findings (e.g. `auth-patterns.md`, `deployment-notes.md`, `debugging-db.md`)
 - Add a one-line link in `MEMORY.md` pointing to the topic file (e.g. `- See [auth-patterns.md](auth-patterns.md) for session auth flow`)
 - Keep `MEMORY.md` entries brief — it has a 200-line limit and is always loaded into context
-- If a relevant topic file already exists, append to it rather than creating a new one
+- If a relevant topic file already exists, append to it rather than creating a new one. That is the default outcome, not the exception
 
 ### For toolkit candidates
 
@@ -224,6 +269,12 @@ Group output into sections:
 ```
 ## Session Retro Summary
 
+### Consolidation check
+- Always-loaded CLAUDE.md: <before> → <after> lines (net <+N / +0>), <N> index entries
+- Candidates examined: <doc-a>, <doc-b>, <doc-c> (<N> total in the report)
+- Folded into existing docs: <doc> ← <finding> (no new index line)
+- New documents proposed: <doc>; none of <candidates> fit because <reason>
+
 ### Project artefacts
 - CLAUDE.md: added/updated <section> with <description>
 - docs/development/<file>.md: <what was captured> (if docs/development/ exists)
@@ -236,6 +287,16 @@ Group output into sections:
 ### Permission friction (if any recurring patterns found)
 - <pattern>: seen in N sessions → proposed remedy (allowlist rule / bin/ wrapper / hook change)
 ```
+
+The consolidation section is not optional and `net +0` is the good outcome, not a sign
+the retro found nothing. A retro that folded three findings into existing documents and
+grew the always-loaded set by nothing captured exactly as much as one that added three
+files, and costs nothing in every future session.
+
+Get the before-number by running the report before making changes and the after-number
+by running it again afterwards. If "New documents proposed" is non-empty, each line must
+name the candidates that were examined and why they did not fit: a different mechanism,
+not just a different incident.
 
 **Wait for confirmation before making any changes.**
 
@@ -252,6 +313,8 @@ Artefacts:
 
 - Never store credentials or secrets. Always reference environment variables.
 - Prefer updating existing procedures over creating duplicates. Check CLAUDE.md and `docs/development/` first.
+- Run `~/.claude/bin/claude-md-index-report.sh` before proposing any new document, and name the candidates examined in the summary. Appending to the document that already describes the mechanism is the default; a new document needs a stated reason why none fit.
+- The always-loaded `CLAUDE.md` set is paid for in every session and every sub-agent. Report its net line growth in the summary; `+0` is a good retro, not an empty one.
 - Keep procedures concise. Future sessions need to scan them quickly.
 - If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.
