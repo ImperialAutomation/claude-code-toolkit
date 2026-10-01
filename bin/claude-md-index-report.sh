@@ -213,3 +213,84 @@ if [[ ${#EXPLICIT_FILES[@]} -eq 0 ]]; then
         fi
     fi
 fi
+
+# --- consolidation candidates -------------------------------------------------
+# Every doc already on disk, indexed or not, with its subject on one line. This is
+# the list the caller reads to answer "does one of these already describe the same
+# mechanism as my finding". It is deliberately complete and deliberately not
+# keyword-matched: a doc that states the same lesson in different words is exactly
+# the one that must not drop out of the list as "no match".
+#
+# One line per doc, truncated. The subject is enough to decide whether to open it;
+# the body is what the doc is for.
+
+DOCS_DIR=""
+if [[ -n "$DOCS_DIR_ARG" ]]; then
+    if [[ "$DOCS_DIR_ARG" = /* ]]; then
+        DOCS_DIR="$DOCS_DIR_ARG"
+    else
+        DOCS_DIR="$PROJECT_DIR/$DOCS_DIR_ARG"
+    fi
+    if [[ ! -d "$DOCS_DIR" ]]; then
+        echo "Error: docs directory not found: $DOCS_DIR" >&2
+        exit 2
+    fi
+else
+    # docs/development/ is where the retro convention writes; docs/ is the fallback
+    # for a project that keeps them one level up.
+    for candidate in "$PROJECT_DIR/docs/development" "$PROJECT_DIR/docs"; do
+        if [[ -d "$candidate" ]]; then
+            DOCS_DIR="$candidate"
+            break
+        fi
+    done
+fi
+
+doc_summary() { # file -> first heading, else first non-empty prose line
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        line="${line#"${line%%[![:space:]]*}"}"
+        # A heading is the doc's own statement of its subject, so prefer it; but a
+        # doc without one still has a subject in its opening line.
+        if [[ "$line" == '#'* ]]; then
+            line="${line##*#}"
+            line="${line#"${line%%[![:space:]]*}"}"
+        fi
+        printf '%s\n' "$line"
+        return 0
+    done < "$1"
+    printf '(empty)\n'
+}
+
+echo "── Consolidation candidates ──"
+if [[ -z "$DOCS_DIR" ]]; then
+    echo "  no docs directory found (looked for docs/development/, docs/)"
+    echo ""
+    echo "The first finding written here starts the index; there is nothing to fold into yet."
+else
+    echo "  from: ${DOCS_DIR#"$PROJECT_DIR"/}"
+    echo ""
+    DOC_TOTAL=0
+    SHOWN=0
+    while IFS= read -r doc; do
+        [[ -n "$doc" ]] || continue
+        DOC_TOTAL=$((DOC_TOTAL + 1))
+        [[ $SHOWN -ge $MAX_CANDIDATES ]] && continue
+        SHOWN=$((SHOWN + 1))
+        summary="$(doc_summary "$doc")"
+        if [[ ${#summary} -gt $MAX_SUMMARY_CHARS ]]; then
+            summary="${summary:0:$MAX_SUMMARY_CHARS}..."
+        fi
+        printf '  %-44s  %s\n' "${doc#"$PROJECT_DIR"/}" "$summary"
+    done < <(find "$DOCS_DIR" -type f -name '*.md' 2>/dev/null | sort)
+
+    if [[ $DOC_TOTAL -eq 0 ]]; then
+        echo "  none"
+    elif [[ $DOC_TOTAL -gt $SHOWN ]]; then
+        echo "  ... and $((DOC_TOTAL - SHOWN)) more (list capped at $MAX_CANDIDATES)"
+    fi
+    echo ""
+    echo "Candidate docs: $DOC_TOTAL"
+fi
+echo ""

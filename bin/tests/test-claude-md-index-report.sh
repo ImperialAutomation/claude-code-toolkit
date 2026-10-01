@@ -110,11 +110,12 @@ check "inline prose link is not an entry" "no" "$(contains "$OUT" "inline link")
 check "table link is not an entry"        "no" "$(contains "$OUT" "table-link")"
 check "reports an entry count"            "yes" "$(contains "$OUT" "Index entries")"
 
-echo "== 4. one entry per output line =="
-# A multi-entry line in the source is still one entry per report line, because the
-# agent reads this list to decide "does one of these already cover my finding".
-ENTRY_LINES=$(run "$T/proj" 2>&1 | grep -c 'docs/development/')
-check "three project entries listed" "3" "$ENTRY_LINES"
+echo "== 4. the reported entry count is the real number of entries =="
+# The agent reads this count to decide whether the index has outgrown a lookup
+# table. Three entries across the root and its include is three, not the number of
+# lines that happen to mention a docs path elsewhere in the report.
+ENTRY_COUNT=$(run "$T/proj" 2>&1 | grep 'Index entries (always loaded):' | tr -dc '0-9')
+check "three project entries counted" "3" "$ENTRY_COUNT"
 
 echo "== 5. scoped CLAUDE.md files are listed separately, not counted as loaded =="
 # frontend/CLAUDE.md loads only when a file under frontend/ is read, so its lines
@@ -132,6 +133,58 @@ check "scoped section is labelled"     "yes" "$(contains "$OUT" "already indexed
 SCOPED_TOTAL=$(run "$T/scoped" 2>&1 | grep 'Total always-loaded lines' | tr -dc '0-9 ' | awk '{print $1}')
 ROOT_LINES=$(wc -l < "$T/scoped/CLAUDE.md" | tr -d ' ')
 check "scoped lines excluded from total" "$ROOT_LINES" "$SCOPED_TOTAL"
+
+echo "== 6. consolidation candidates: one truncated line per existing doc =="
+OUT=$(run "$T/proj" 2>&1)
+check "candidates section present"  "yes" "$(contains "$OUT" "Consolidation candidates")"
+check "lists an indexed doc"        "yes" "$(contains "$OUT" "docker-restart.md")"
+# A doc on disk that nothing indexes is the most consolidatable of all -- it is
+# already costing nothing, so folding a finding into it is free.
+check "lists an unindexed doc"      "yes" "$(contains "$OUT" "headless.md")"
+check "shows a doc's first heading" "yes" "$(contains "$OUT" "A green test proves nothing")"
+# No heading means the first prose line, so the agent still gets a subject.
+check "falls back to the intro line" "yes" "$(contains "$OUT" "No heading here")"
+check "reports a candidate count"    "yes" "$(contains "$OUT" "Candidate docs")"
+
+echo "== 7. a candidate is one line, never a file dump =="
+mkdir -p "$T/fat/docs/development"
+{
+    echo "# Fat doc"
+    echo ""
+    printf 'secret-sauce-line-%s\n' $(seq 1 200)
+} > "$T/fat/docs/development/fat.md"
+printf '# Root\n' > "$T/fat/CLAUDE.md"
+OUT=$(run "$T/fat" 2>&1)
+check "does not dump the body" "no" "$(contains "$OUT" "secret-sauce-line-7")"
+FAT_LINES=$(printf '%s\n' "$OUT" | grep -c 'fat.md')
+check "one line for the doc" "1" "$FAT_LINES"
+# A long heading is truncated rather than wrapped, so the list stays scannable.
+mkdir -p "$T/longhead/docs/development"
+printf '# %s\n' "$(printf 'x%.0s' $(seq 1 300))" > "$T/longhead/docs/development/long.md"
+printf '# Root\n' > "$T/longhead/CLAUDE.md"
+LONGEST=$(run "$T/longhead" 2>&1 | grep 'long.md' | wc -c | tr -d ' ')
+check "long heading is truncated" "yes" "$([[ $LONGEST -lt 200 ]] && echo yes || echo no)"
+
+echo "== 8. a large docs directory is capped, not dumped =="
+mkdir -p "$T/many/docs/development"
+printf '# Root\n' > "$T/many/CLAUDE.md"
+for i in $(seq 1 90); do
+    printf '# Doc %s\n' "$i" > "$T/many/docs/development/doc-$i.md"
+done
+OUT=$(run "$T/many" 2>&1)
+LISTED=$(printf '%s\n' "$OUT" | grep -c 'docs/development/doc-')
+check "candidate list is capped"  "yes" "$([[ $LISTED -le 60 ]] && echo yes || echo no)"
+check "says how many were hidden" "yes" "$(contains "$OUT" "more")"
+check "still reports the true total" "yes" "$(contains "$OUT" "90")"
+
+echo "== 9. --docs overrules the autodetected docs directory =="
+mkdir -p "$T/custom/handbook" "$T/custom/docs/development"
+printf '# Root\n' > "$T/custom/CLAUDE.md"
+printf '# Handbook entry\n' > "$T/custom/handbook/hb.md"
+printf '# Default entry\n' > "$T/custom/docs/development/def.md"
+OUT=$(run "$T/custom" --docs handbook 2>&1)
+check "uses the given docs dir"      "yes" "$(contains "$OUT" "hb.md")"
+check "ignores the autodetected one" "no"  "$(contains "$OUT" "def.md")"
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
