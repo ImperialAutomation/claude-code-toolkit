@@ -294,3 +294,21 @@ else
     echo "Candidate docs: $DOC_TOTAL"
 fi
 echo ""
+
+# --- the verdict --------------------------------------------------------------
+# A warning, never a block. Exit 0 either way: a non-zero exit here would turn the
+# helper into something a caller works around rather than reads, and the judgement
+# this informs (fold in, or justify a new doc) belongs to the caller.
+echo "── Summary ──"
+if [[ $TOTAL_LINES -gt $MAX_ALWAYS_LOADED_LINES ]]; then
+    echo "WARNING: the always-loaded set is $TOTAL_LINES lines, over the $MAX_ALWAYS_LOADED_LINES-line threshold."
+    echo "         Every line here is paid for in every session and every sub-agent."
+    echo "         Prefer consolidating a finding into one of the candidate docs above"
+    echo "         over adding an index entry. A new entry needs a reason why no"
+    echo "         existing doc fit."
+else
+    echo "Always-loaded set: $TOTAL_LINES/$MAX_ALWAYS_LOADED_LINES lines, $ENTRY_COUNT index entries."
+    echo "Still check the candidates above before adding an entry: consolidating into an"
+    echo "existing doc costs no index line at all."
+fi
+exit 0

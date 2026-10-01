@@ -186,6 +186,61 @@ OUT=$(run "$T/custom" --docs handbook 2>&1)
 check "uses the given docs dir"      "yes" "$(contains "$OUT" "hb.md")"
 check "ignores the autodetected one" "no"  "$(contains "$OUT" "def.md")"
 
+echo "== 10. the threshold warns and never blocks =="
+# The threshold is a fixed constant in the script, so the test reads it from there
+# rather than hardcoding a second copy that drifts when the constant is tuned.
+THRESHOLD=$(grep -E '^MAX_ALWAYS_LOADED_LINES=' "$SCRIPT" | cut -d= -f2)
+check "threshold is a number" "yes" "$([[ "$THRESHOLD" =~ ^[0-9]+$ ]] && echo yes || echo no)"
+
+mkdir -p "$T/under"
+{ printf '# Root\n'; seq 1 $((THRESHOLD - 10)); } > "$T/under/CLAUDE.md"
+check "under fixture is really under" "yes" \
+    "$([[ $(wc -l < "$T/under/CLAUDE.md") -lt $THRESHOLD ]] && echo yes || echo no)"
+OUT=$(run "$T/under" 2>&1); RC=$?
+check "under threshold exits 0"   "0"  "$RC"
+check "under threshold is silent" "no" "$(contains "$OUT" "WARNING")"
+
+mkdir -p "$T/over"
+{ printf '# Root\n'; seq 1 $((THRESHOLD + 10)); } > "$T/over/CLAUDE.md"
+# Assert the fixture before asserting the behaviour: a fixture that quietly came
+# out two lines long would make the "no warning" case pass for the wrong reason.
+check "over fixture is really over" "yes" \
+    "$([[ $(wc -l < "$T/over/CLAUDE.md") -gt $THRESHOLD ]] && echo yes || echo no)"
+OUT=$(run "$T/over" 2>&1); RC=$?
+check "over threshold warns" "yes" "$(contains "$OUT" "WARNING")"
+# Blocking would make the helper something a caller routes around. A warning is
+# information; a non-zero exit in a chain is a stop.
+check "over threshold still exits 0" "0" "$RC"
+check "warning names the threshold"  "yes" "$(contains "$OUT" "$THRESHOLD")"
+check "warning says what to do"      "yes" "$(contains "$OUT" "consolidat")"
+
+echo "== 11. explicit --file replaces autodetection =="
+mkdir -p "$T/explicit"
+printf '# Root\n\n- [root-only](docs/root-only.md)\n' > "$T/explicit/CLAUDE.md"
+printf '# Elsewhere\n\n- [elsewhere-doc](docs/elsewhere-doc.md)\n' > "$T/explicit/other.md"
+OUT=$(run "$T/explicit" --file "$T/explicit/other.md" 2>&1)
+check "uses the explicit file"      "yes" "$(contains "$OUT" "elsewhere-doc")"
+# Not "in addition to": the issue asks for an override, and a caller measuring a
+# specific set must not silently get the autodetected one folded in.
+check "drops the autodetected root" "no"  "$(contains "$OUT" "root-only")"
+
+OUT=$(run "$T/explicit" --file "$T/explicit/nope.md" 2>&1); RC=$?
+check "missing explicit file is an error" "2"   "$RC"
+check "error names the path"              "yes" "$(contains "$OUT" "nope.md")"
+
+OUT=$(run "$T/explicit" --file 2>&1); RC=$?
+check "--file without a value is an error" "2" "$RC"
+OUT=$(run "$T/explicit" --bogus 2>&1); RC=$?
+check "unknown option is an error"         "2" "$RC"
+
+echo "== 12. runs in a project with no CLAUDE.md at all =="
+# A report that errored here would fire on any project that has not started one,
+# which is exactly when the index is still cheap to keep honest.
+mkdir -p "$T/bare"
+OUT=$(run "$T/bare" 2>&1); RC=$?
+check "bare project exits 0"  "0"   "$RC"
+check "says nothing is loaded" "yes" "$(contains "$OUT" "none found")"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
