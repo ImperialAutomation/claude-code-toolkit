@@ -33,7 +33,10 @@ If MODE is `browser`, skip to Layer 4.
 
 ## Layer 1: Container Health
 
-**Skip if:** no docker-compose file found in the project.
+**Skip if:** no compose file in the project root AND no `Container prefix:` in the
+Integration Verification config. A configured prefix is enough on its own — an
+`include:`-based stack has no compose file that names its containers, and the check
+takes the set from the prefix instead.
 
 Run the runtime container health check:
 
