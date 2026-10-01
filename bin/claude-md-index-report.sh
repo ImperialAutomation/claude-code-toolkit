@@ -142,3 +142,74 @@ done
 echo ""
 echo "Total always-loaded lines: $TOTAL_LINES (threshold: $MAX_ALWAYS_LOADED_LINES)"
 echo ""
+
+# --- index entries ------------------------------------------------------------
+# An index entry is a list item carrying a markdown link. Deliberately not scoped
+# to a heading name: the project names its own sections ("Operational Guidelines",
+# "Learned Procedures", a Dutch heading), and a report that only understood one
+# name would confidently find zero entries in a project that grew the problem.
+#
+# A list item is the discriminator that keeps prose out. An inline link in a
+# paragraph, or a link in a table cell, is a reference, not an index line someone
+# could consolidate away.
+INDEX_ENTRY_RE='^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+.*\[[^]]+\]\([^)]+\)'
+
+list_entries() { # file...  -> "<file>:<lineno>\t<text>" per entry
+    local f lineno line
+    for f in "$@"; do
+        lineno=0
+        while IFS= read -r line; do
+            lineno=$((lineno + 1))
+            [[ "$line" =~ $INDEX_ENTRY_RE ]] || continue
+            # Strip the list marker and leading space; the entry itself is what the
+            # agent reads, the location is for finding it again.
+            local text="${line#"${line%%[![:space:]]*}"}"
+            text="${text#* }"
+            printf '%s:%s\t%s\n' "$f" "$lineno" "$text"
+        done < "$f"
+    done
+}
+
+echo "── Index entries in the always-loaded set ──"
+ENTRIES=$(list_entries "${ALWAYS_LOADED[@]}")
+if [[ -z "$ENTRIES" ]]; then
+    ENTRY_COUNT=0
+    echo "  none"
+else
+    ENTRY_COUNT=$(printf '%s\n' "$ENTRIES" | wc -l | tr -d ' ')
+    while IFS=$'\t' read -r loc text; do
+        printf '  %s\n      %s\n' "$text" "$loc"
+    done <<< "$ENTRIES"
+fi
+echo ""
+echo "Index entries (always loaded): $ENTRY_COUNT"
+echo ""
+
+# --- scoped CLAUDE.md files ---------------------------------------------------
+# These load on demand (reading a file under their directory pulls them in), so
+# their lines are not a per-session cost and stay out of the total above. They are
+# reported anyway for one reason: a doc indexed here must not be indexed in the
+# root as well, and checking only the root is how a doc ends up listed twice.
+if [[ ${#EXPLICIT_FILES[@]} -eq 0 ]]; then
+    SCOPED=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        [[ "$f" == "$PROJECT_DIR/CLAUDE.md" ]] && continue
+        SCOPED+=("$f")
+    done < <(find "$PROJECT_DIR" -name CLAUDE.md -not -path '*/.git/*' -not -path '*/node_modules/*' 2>/dev/null | sort)
+
+    if [[ ${#SCOPED[@]} -gt 0 ]]; then
+        echo "── Scoped CLAUDE.md files (load on demand; already indexed here) ──"
+        for f in "${SCOPED[@]}"; do
+            printf '  %s\n' "${f#"$PROJECT_DIR"/}"
+        done
+        echo ""
+        SCOPED_ENTRIES=$(list_entries "${SCOPED[@]}")
+        if [[ -n "$SCOPED_ENTRIES" ]]; then
+            while IFS=$'\t' read -r loc text; do
+                printf '  %s\n      %s\n' "$text" "${loc#"$PROJECT_DIR"/}"
+            done <<< "$SCOPED_ENTRIES"
+            echo ""
+        fi
+    fi
+fi
