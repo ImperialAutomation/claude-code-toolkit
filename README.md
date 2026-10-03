@@ -118,6 +118,24 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
 | `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
+| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] <output-file> <command> [args...]` | Save any command's output to a file. Reports the command's own exit status and the byte count written |
+
+`cmd-save.sh` is the general case; `gh-save.sh` is the `gh`-shaped shorthand and delegates to it. Reach for it whenever output belongs on disk: to `diff` two captures, to feed one command's output into another, or because the output is too long to be worth putting through the model's context.
+
+```bash
+cmd-save.sh /tmp/pods.json kubectl get pods -o json
+cmd-save.sh /tmp/inspect.json docker inspect my-container
+cmd-save.sh /tmp/schema.sql docker exec db psql -U postgres -d app -t -A -c "SELECT ..."
+cmd-save.sh --stderr merge /tmp/build.log npm run build
+```
+
+Three details it gets right that a bare redirect does not:
+
+- **The exit status is the command's own.** `cmd ... > file` reports whether the *redirect* worked, so a failed command still writes a file and looks like a success, and the caller reads an error message as data.
+- **stderr stays out of the capture by default.** A command that warns on stderr would otherwise corrupt what the caller reads back as clean data; a deprecation notice inside a JSON capture makes it unparseable, and nothing reports that. The warning still reaches your terminal. Use `--stderr merge` when the capture exists to diagnose a failure rather than to carry data.
+- **The byte count is printed.** A zero-byte capture is the signature of a command that produced nothing, and it is otherwise invisible until something downstream behaves strangely.
+
+Flag parsing stops at the output file, so everything after it belongs to the command and a command's own flags are never eaten as the wrapper's.
 
 ### Git utilities
 
@@ -282,6 +300,7 @@ claude-code-toolkit/
 │   ├── owasp-zap-scan.sh          ← OWASP ZAP baseline security scan
 │   ├── gh-issues-export.sh        ← export GitHub issues to JSON file
 │   ├── gh-save.sh                 ← save gh command output to file
+│   ├── cmd-save.sh                ← save any command's output to file
 │   ├── sync-toolkit.sh            ← sync toolkit from configured git sources
 │   ├── json-find-key.sh           ← search for keys in nested JSON files
 │   ├── odt2txt.sh                 ← convert ODT to plain text via pandoc
