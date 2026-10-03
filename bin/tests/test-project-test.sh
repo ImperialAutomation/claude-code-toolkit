@@ -143,6 +143,33 @@ else echo "  FAIL: multi-root run exits non-zero (got exit 0)"; FAIL=$((FAIL+1))
 check_contains "names both roots when refusing" "$out" "multiple"
 check_lacks "refusal runs no tests at all" "$out" "ran-from:"
 
+
+# --- relative paths survive the move to the root ----------------------------
+# Deriving the root means the script changes directory before running pytest,
+# and a relative path means something different after that cd. Resolving the
+# root must not silently change which file the caller asked for: from a
+# subdirectory, `tests/test_y.py` is <subdir>/tests/..., not <root>/tests/...
+# pytest reports a missing path as an error, but one that reads like a typo
+# rather than like the wrapper having rewritten the argument.
+mkdir -p "$A/sub/tests"
+: > "$A/sub/tests/test_y.py"
+cat > "$A/.venv/bin/pytest" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+    [[ "$a" == -* ]] && continue
+    [[ -e "$a" ]] && echo "collected:$a" || echo "missing:$a"
+done
+STUB
+chmod +x "$A/.venv/bin/pytest"
+
+out=$(run_in "$A/sub" tests/test_y.py)
+check_contains "relative path from a subdirectory still resolves" "$out" "collected:"
+check_lacks "relative path from a subdirectory is not lost" "$out" "missing:"
+
+# And it must point at the file the caller meant, not a same-named one that
+# happens to exist at the root.
+check_contains "resolves to the subdirectory's file" "$out" "$A/sub/tests/test_y.py"
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [[ $FAIL -eq 0 ]]

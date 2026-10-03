@@ -68,19 +68,38 @@ fi
 #
 # Paths from two different roots cannot both be satisfied by one venv. That is a
 # mistake worth an exit code, not a tree to pick between.
+# Path arguments are made absolute as they are inspected, because running from
+# the derived root changes what a relative path means. Rewriting the argument is
+# the whole point: a relative path keeps naming the file the caller meant, not
+# the same-named one that may sit at the root. pytest would otherwise report it
+# missing, in wording that reads like the caller's typo rather than like this
+# wrapper having moved underneath them.
 TEST_ROOT=""
 TEST_ROOT_SOURCE=""
+ARGS=()
 for arg in "$@"; do
-  [[ "$arg" == -* ]] && continue
-  # Only real paths carry tree information; `-k expr`, node ids and bare words do not.
+  if [[ "$arg" == -* ]]; then
+    ARGS+=("$arg")
+    continue
+  fi
+  # Only real paths carry tree information; `-k expr`, bare words and the node
+  # id suffix after `::` do not. A node id keeps its suffix when rewritten.
   candidate="${arg%%::*}"
-  [[ -e "$candidate" ]] || continue
+  suffix="${arg#"$candidate"}"
+  if [[ ! -e "$candidate" ]]; then
+    ARGS+=("$arg")
+    continue
+  fi
 
   if [[ -d "$candidate" ]]; then
     arg_dir="$candidate"
+    abs="$(cd "$candidate" && pwd)"
   else
     arg_dir=$(dirname "$candidate")
+    abs="$(cd "$arg_dir" && pwd)/$(basename "$candidate")"
   fi
+  ARGS+=("$abs$suffix")
+
   arg_root=$(git -C "$arg_dir" rev-parse --show-toplevel 2>/dev/null) || arg_root=""
   [[ -n "$arg_root" ]] || arg_root=$(cd "$arg_dir" && pwd)
 
@@ -95,6 +114,7 @@ for arg in "$@"; do
     exit 1
   fi
 done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 # Run from the derived root so pytest's rootdir, conftest.py discovery and the
 # paths it prints all refer to the same tree the venv came from.
