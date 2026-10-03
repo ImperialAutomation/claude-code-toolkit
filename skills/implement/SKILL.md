@@ -206,6 +206,11 @@ plus any repo-wide scanner tests, which read the whole tree and so are not
 selected by `--changed`. Skip the sub-agent when the above fits in a handful of
 calls; run the probes inline and report them.
 
+The collection check in Step A is not part of what this class skips — run it
+here too. Renaming a fixture or helper is a test-only diff that breaks the
+imports of test files you never opened, which is the exact class collection
+exists to catch.
+
 **Everything else** — anything that reaches a container, a user, an API, a
 schema or a migration. Full Phase 3 below applies unchanged, including the
 container check: a green suite is not a claim that the running app works.
@@ -280,6 +285,32 @@ Run ONLY tests relevant to the modified files — never the full suite:
 `~/.claude/bin/project-test.sh <worktree>/tests/path/to/your_test.py -v`
 If any test fails, fix at root cause and re-run.
 
+Then verify the whole test tree still **loads**, which is a different and far
+cheaper question than whether it passes:
+`~/.claude/bin/project-test.sh --collect-only -q`
+
+A test that imports a symbol you removed or renamed is by definition a file you
+did not touch, so "relevant to the modified files" excludes it at precisely the
+moment it became relevant. Name-matching does not find it either: the coupling
+is the import, not the filename. Collection imports every test module without
+running a single test, so it catches exactly that class in seconds. Treat a
+collection error as a hard failure, not a warning: it aborts the whole suite, so
+the thousands of tests that *would* have passed never run either — which is also
+why such a break can sit unnoticed for months.
+
+The cost does not scale with the diff: two changed files or twenty, collection
+costs the same, so the reason to skip it never arrives.
+
+The command above is pytest's form. Use the project's equivalent — the question
+is "can the test tree still be loaded", not pytest:
+
+| Ecosystem | Collection-only check |
+|---|---|
+| pytest | `~/.claude/bin/project-test.sh --collect-only -q` |
+| vitest / jest | `npx vitest run --reporter=dot --passWithNoTests` |
+| TypeScript | `npx tsc --noEmit` |
+| Go | `go vet ./...` |
+
 If the project runs tests through a long-lived container, check what that
 container bind-mounts before trusting the result: it commonly mounts the MAIN
 worktree, so a run started from a linked one tests the wrong source and can write
@@ -334,6 +365,7 @@ Respond with EXACTLY this format ONLY once you have actually performed the verif
 
 VERIFICATION_COMPLETE:
 TESTS: PASS/FAIL — <passed>/<total> tests (e.g., 12/12)
+COLLECTION: PASS/FAIL — <collected count, errors> (e.g., 6032 collected, 0 errors)
 VALIDATION: PASS/FAIL/SKIP — <validate command used or reason for skip>
 INTEGRATION: PASS/FAIL/SKIP — <what was verified or reason for skip>
 AC_VERIFIED: <verified count>/<total count> or SKIP — <one-line summary>
@@ -351,7 +383,10 @@ LAST_OUTPUT: <relevant error output>
 ### Step 3: Handle sub-agent result
 
 **On VERIFICATION_COMPLETE:**
-- If any of TESTS/VALIDATION/INTEGRATION/REVIEW/SMOKE_TEST is FAIL → fix the issue at root cause, then re-run Step 2 (spawn a fresh verification sub-agent — do NOT proceed to Phase 4 with failures)
+- If any of TESTS/COLLECTION/VALIDATION/INTEGRATION/REVIEW/SMOKE_TEST is FAIL → fix the issue at root cause, then re-run Step 2 (spawn a fresh verification sub-agent — do NOT proceed to Phase 4 with failures)
+- A COLLECTION failure is never a "known issue" to carry into the PR body: an
+  unloadable test tree means no test in the project runs, so there is no green
+  evidence for anything else in this report
 - If all are PASS/WARN/SKIP → store `KNOWN_ISSUES` and `AC_UNVERIFIED` for inclusion in the PR body, proceed to Phase 4
 
 **On FAILED:**
