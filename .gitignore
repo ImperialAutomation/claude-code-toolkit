@@ -8,3 +8,9 @@ __pycache__/
 
 # Codex-managed skills, not part of this toolkit
 skills/.system/
+
+# Claude Code's cache of the Anthropic-published skills (pdf, docx, xlsx, ...).
+# It lands here because ~/.claude/skills is a symlink into this repo, not
+# because the toolkit put it there. Regenerated on sync, and the bucket name
+# holds a per-account UUID, so it is machine-specific either way.
+skills/synced/
