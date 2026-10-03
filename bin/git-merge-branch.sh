@@ -96,13 +96,13 @@ for protected in $PROTECTED_BRANCHES; do
 done
 
 # Verify the source ref exists.
-if ! git rev-parse --verify --quiet "$SOURCE^{commit}" >/dev/null; then
+if ! git_filtered rev-parse --verify --quiet "$SOURCE^{commit}" >/dev/null; then
     echo "Error: source ref '$SOURCE' not found (did you fetch?)" >&2
     exit 1
 fi
 
 # Require a clean working tree so the merge isn't tangled with uncommitted work.
-if ! git diff --quiet || ! git diff --cached --quiet; then
+if ! git_filtered diff --quiet || ! git_filtered diff --cached --quiet; then
     echo "Error: working tree has uncommitted changes — commit or stash first" >&2
     exit 1
 fi
