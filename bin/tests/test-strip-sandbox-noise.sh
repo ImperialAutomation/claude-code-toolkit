@@ -209,6 +209,40 @@ for w in git-commit.sh git-diff-base.sh git-cleanup-merged-branch.sh \
             _ "$T/binlink/$w" >/dev/null 2>&1; echo $?)"
 done
 
+echo "== 8. no wrapper reintroduces an unfiltered git call =="
+# This check exists because the manual audit missed the same thing twice. The
+# first pass looked for unredirected `git`, so it skipped command substitutions
+# ($(git branch --show-current) captures stdout and leaks stderr). The second
+# pass excluded --quiet calls, on the assumption they were silent — but --quiet
+# suppresses git's OWN output, not the sandbox warning.
+#
+# So the rule is encoded instead of remembered: in these six wrappers, every
+# `git` invocation is either routed through git_filtered or has its stderr
+# explicitly discarded. A new leak fails this test rather than reaching an agent.
+WRAPPERS=(git-commit.sh git-diff-base.sh git-cleanup-merged-branch.sh
+          git-merge-branch.sh git-push-pr-merge.sh git-verify.sh)
+BIN_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+
+leaks=""
+for w in "${WRAPPERS[@]}"; do
+    [[ -f "$BIN_DIR/$w" ]] || { leaks+="$w:MISSING "; continue; }
+    while IFS= read -r line; do
+        # A git call counts as handled when it goes through the helper or sends
+        # stderr somewhere other than the agent. Comments and echoed strings that
+        # merely contain the word "git" are not invocations.
+        case "$line" in
+            *git_filtered*) continue ;;
+            *"2>/dev/null"*|*"2>&1"*|*"&>/dev/null"*|*"2>&-"*) continue ;;
+        esac
+        stripped="${line#*:}"
+        case "${stripped#"${stripped%%[![:space:]]*}"}" in
+            "#"*|"echo "*) continue ;;
+        esac
+        leaks+="$w:${line%%:*} "
+    done < <(grep -nE '(^|[^_[:alnum:]])git ' "$BIN_DIR/$w" || true)
+done
+check "every git call in the wrappers is filtered or silenced" "" "$leaks"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
