@@ -140,6 +140,26 @@ check "command flags are not wrapper flags" "--stderr" \
 check "-- ends flag parsing" "hi" \
     "$(run -- "$T/ddash.txt" echo hi >/dev/null 2>&1; cat "$T/ddash.txt")"
 
+echo "== 9. paths and arguments survive intact =="
+# A missing parent directory is the common case when writing into a per-task
+# scratch path, so the wrapper creates it rather than failing the capture.
+run "$T/nested/deeper/out.txt" echo nested >/dev/null 2>&1
+check "parent directories created" "nested" "$(cat "$T/nested/deeper/out.txt")"
+# Unquoted expansions inside the wrapper would split these; the capture would
+# land somewhere else or vanish.
+run "$T/has space/out.txt" echo spaced >/dev/null 2>&1
+check "space in output path" "spaced" "$(cat "$T/has space/out.txt")"
+check "space in command argument" "two words" \
+    "$(run "$T/arg.txt" echo "two words" >/dev/null 2>&1; cat "$T/arg.txt")"
+check "empty argument preserved" "2" \
+    "$(run "$T/empty-arg.txt" printf '%s\n' "" "" >/dev/null 2>&1; wc -l < "$T/empty-arg.txt" | tr -d ' ')"
+# A bare filename has no directory part; dirname gives ".", which must not break.
+check "relative filename works" "relative" \
+    "$(cd "$T" && run rel.txt echo relative >/dev/null 2>&1; cat "$T/rel.txt")"
+# Binary-ish output must not be mangled: captures get diffed and fed back in.
+run "$T/tabs.txt" printf 'a\tb\n' >/dev/null 2>&1
+check "tabs preserved" "$(printf 'a\tb')" "$(cat "$T/tabs.txt")"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
