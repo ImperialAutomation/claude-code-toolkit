@@ -815,6 +815,25 @@ Use `timeout: 600000` (10 minutes) on the Bash call.
    - If the Bash call times out: report WARN with "tests still running after timeout, likely too many test files scoped" and stop. Do NOT retry.
    - If tests fail: check if failures are pre-existing (run same test on develop). Only fix regressions introduced by this epic.
 
+5. Verify the whole test tree still **loads**, which is cheap (seconds) and
+   independent of how many test files step 2 scoped:
+```bash
+~/.claude/bin/project-test.sh --collect-only -q
+```
+Use the project's equivalent in other ecosystems (`npx tsc --noEmit`,
+`go vet ./...`); the question is "can the test tree still be loaded", not pytest.
+
+This is the one check an epic needs more than a single issue does. Sub-issue A
+removes a symbol that a test added by sub-issue B imports, and neither agent
+sees it: each scoped its tests to its own diff, and the breakage only exists
+once both are merged into `<feature_branch>`. The per-issue runs were honestly
+green; the merged tree is not. A collection error aborts the entire suite, so
+leaving it in place means no test in the project runs at all.
+
+Treat a collection error as FAIL, never as a warning to pass along: fix the
+import or delete the test whose behaviour the epic removed, then commit to the
+feature branch as above.
+
 ### Step 3: Report
 
 Write progress to `/tmp/<project>-epic-verify-validation-$ARGUMENTS.txt`:
@@ -827,6 +846,7 @@ DETAIL: <what's happening>
 VALIDATION_COMPLETE:
 VALIDATE_ALL: PASS/FAIL — <details>
 TEST_SUITE: PASS/FAIL — <passed>/<total> tests (scoped to changed files)
+COLLECTION: PASS/FAIL — <collected count, errors> (e.g., 6032 collected, 0 errors)
 FIXES_COMMITTED: <number of fix commits, 0 if none>
 
 FAILED:
@@ -1063,6 +1083,7 @@ Display a final report:
 |-------|--------|---------|
 | Validation | PASS/FAIL | validate:all result |
 | Test Suite | PASS/FAIL | X/Y passed |
+| Test Collection | PASS/FAIL | N collected, M errors |
 | Dep Rebuild | PASS/SKIP | containers rebuilt for new deps |
 | Containers | PASS/WARN/FAIL/SKIP | X/Y healthy |
 | API Health | PASS/WARN/FAIL/SKIP | endpoints summary |
