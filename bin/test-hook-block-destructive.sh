@@ -145,6 +145,28 @@ run "grep -n foo file.sql && psql -c 'DROP SCHEMA public CASCADE'"  BLOCK
 # re-scan the full string anyway, quietly undoing the skip above.
 run "git log --oneline | grep 'DROP SCHEMA'"                        ALLOW
 run "echo 'DROP OWNED BY is now blocked' && git status"             ALLOW
+# sed and awk lead the read-only list although both CAN write (sed -i). They
+# cannot execute SQL, and per-segment classification means leading with one
+# never shields a real statement elsewhere on the line — which is the property
+# that makes their presence in that list safe. Pinned here so it stays true.
+run "sed -n '/DROP SCHEMA/p' schema.sql"                            ALLOW
+run "sed -n 1,5p f.sql && psql -c 'DROP SCHEMA public CASCADE'"     BLOCK
+run "awk '{print}' f.sql; psql -c 'DROP TABLE users'"               BLOCK
+
+# --- SQL: boundaries and delivery forms ---
+# Identifiers that merely CONTAIN a keyword are ordinary table names. Without
+# the word-boundary anchors these block, and a guard that stops SELECT is one
+# people switch off.
+run "psql -c 'SELECT * FROM truncated_reports'"                     ALLOW
+run "psql -c 'SELECT * FROM dropped_tables'"                        ALLOW
+run "psql -c 'SELECT count(*) FROM users'"                          ALLOW
+run "psql -c 'CREATE TABLE users (id int)'"                         ALLOW
+run "alembic upgrade head"                                          ALLOW
+# A statement reaches psql by more routes than -c. Both of these arrive as one
+# command string with the statement on its own line, so segment splitting on
+# ; && || | alone would miss them if the match were anchored per line.
+run "$(printf 'psql -c "SELECT 1"\npsql -c "DROP SCHEMA public CASCADE"')"  BLOCK
+run "$(printf 'psql -d app <<SQL\nDROP SCHEMA public CASCADE;\nSQL')"       BLOCK
 
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK
