@@ -97,6 +97,49 @@ check "byte count matches file on disk" "yes" \
          *"($bytes bytes"*) echo yes ;; *) echo no ;;
        esac)"
 
+echo "== 6. stderr stays out of the file by default =="
+# The reason separation is the default: a command that warns on stderr would
+# otherwise silently corrupt what the caller reads back as clean data. Here the
+# "data" is valid JSON and the warning would make it unparseable.
+NOISY='printf "{\"ok\": true}\n"; printf "WARNING: deprecated flag\n" >&2'
+run "$T/noisy.json" sh -c "$NOISY" >/dev/null 2>&1
+check "file holds only stdout" '{"ok": true}' "$(cat "$T/noisy.json")"
+check "captured data still parses" "ok" \
+    "$(python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("ok")' "$T/noisy.json" 2>&1)"
+# Separated is not discarded: the diagnostic must still reach the caller, or a
+# failure becomes unexplainable.
+check "stderr reaches the caller" "yes" \
+    "$(case "$(run "$T/noisy.json" sh -c "$NOISY" 2>&1 >/dev/null)" in
+         *"WARNING: deprecated flag"*) echo yes ;; *) echo no ;;
+       esac)"
+
+echo "== 7. --stderr merge folds stderr into the file =="
+run --stderr merge "$T/merged.txt" sh -c "$NOISY" >/dev/null 2>&1
+check "stdout present"   "1" "$(grep -c '{"ok": true}' "$T/merged.txt")"
+check "stderr present"   "1" "$(grep -c 'WARNING: deprecated flag' "$T/merged.txt")"
+# Merging is what you want when the capture exists to diagnose a failure.
+run --stderr merge "$T/diag.txt" sh -c 'printf "boom\n" >&2; exit 5' >/dev/null 2>&1
+check "diagnostic captured on failure" "boom" "$(cat "$T/diag.txt")"
+check "merge still propagates status" "5" \
+    "$(run --stderr merge "$T/diag.txt" sh -c 'exit 5' >/dev/null 2>&1; echo $?)"
+check "--stderr separate is the default spelling" '{"ok": true}' \
+    "$(run --stderr separate "$T/sep.json" sh -c "$NOISY" >/dev/null 2>&1; cat "$T/sep.json")"
+
+echo "== 8. flag validation =="
+check "--stderr without value exits 2" "2" \
+    "$(run --stderr >/dev/null 2>&1; echo $?)"
+check "--stderr with bad value exits 2" "2" \
+    "$(run --stderr sideways "$T/x.txt" echo hi >/dev/null 2>&1; echo $?)"
+check "unknown option exits 2" "2" \
+    "$(run --nope "$T/x.txt" echo hi >/dev/null 2>&1; echo $?)"
+# Everything after the output file is the command, so a flag belonging to the
+# command must not be eaten as a wrapper flag. `printf %s --stderr` would exit 2
+# if the wrapper kept parsing past the output file.
+check "command flags are not wrapper flags" "--stderr" \
+    "$(run "$T/dash.txt" printf '%s' --stderr >/dev/null 2>&1; cat "$T/dash.txt")"
+check "-- ends flag parsing" "hi" \
+    "$(run -- "$T/ddash.txt" echo hi >/dev/null 2>&1; cat "$T/ddash.txt")"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
