@@ -130,6 +130,18 @@ STOP HERE and ask for confirmation before proceeding to implementation.
    * If using model attributes, confirm they exist: `grep "attribute_name" models.py`
    * If importing classes, confirm they exist: `python -c "from module import Class"`
    * If ANY verification fails, STOP and reassess your approach
+3. **Removing or renaming a public symbol** (function, class, module, route)?
+   Grep the whole test tree for the old name BEFORE you commit. For every hit,
+   decide which of two things it is:
+   * the coverage moves with the symbol — migrate the test in this same commit;
+   * the covered behaviour no longer exists — delete the test and **write down in
+     the PR body which behaviour lapsed**. "The test no longer imports" is not a
+     reason; "this behaviour is gone, deliberately" is.
+
+   The collection check in Phase 3 catches the broken import. It cannot catch the
+   test whose import still resolves but whose subject is gone: that one stays
+   vacuously green while asserting nothing, which is worse than red because
+   nothing ever reports it.
 
 ### Execute each plan step using the TDD cycle:
 
@@ -409,6 +421,9 @@ Before proceeding to PR creation:
    - `Closes #$ARGUMENTS`
    - Implementation summary
    - Test checklist (test counts from the verification sub-agent's TESTS line)
+   - If the diff removed or renamed a public symbol and tests were deleted as a
+     result (Phase 2 step 3): add a `## Removed Behaviour` section naming each
+     behaviour that no longer exists and the test that covered it
    - If `KNOWN_ISSUES` from Phase 3 is not "none": add a `## Known Issues` section listing them
    - If `AC_UNVERIFIED` from Phase 3 is not "none": add a `## Manual Review Needed` section listing the UNVERIFIED criteria
    - If SENTRY_ISSUES were found in Phase 1, add a `## Sentry` section: `Resolves: MYAPP-BACKEND-G, MYAPP-BACKEND-H`
