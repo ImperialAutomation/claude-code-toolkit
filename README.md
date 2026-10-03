@@ -223,8 +223,8 @@ misdescribe the argument.
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/) |
-| `venv-run.sh` | `venv-run.sh <cmd> [args...]` | Run any venv binary (python, pip, alembic) with auto-detection |
+| `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/). The venv follows the test path's project root, so a path in another worktree uses that worktree's interpreter |
+| `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, pip, alembic) with auto-detection. `--repo` picks the project root when it is not the current directory |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |

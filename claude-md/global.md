@@ -45,6 +45,20 @@ Deze scripts:
 - Detecteren automatisch de project venv (.venv, backend/.venv, etc.)
 - Valideren dat je binnen ~/Projects/ draait
 
+**Meerdere worktrees: zeg welke boom je bedoelt.** De venv wordt gezocht vanaf de
+projectroot, en welke root dat is hangt af van wat je meegeeft:
+
+- `project-test.sh` leidt de root af uit het testpad. Een pad in worktree B
+  gebruikt de venv van B, ook als je shell in A staat; het script meldt het
+  verschil. Paden uit twee roots tegelijk weigert het.
+- `venv-run.sh` krijgt een commando, geen pad, en kan dus niets afleiden. Werk je
+  in een andere boom dan `$PWD`, geef dan `--repo <dir>` mee:
+  `~/.claude/bin/venv-run.sh --repo <worktree> alembic upgrade head`
+
+Zonder dat draait de opdracht op de interpreter en dependency-set van de boom
+waar je shell toevallig staat. Twee worktrees die maanden uit elkaar zijn
+aangemaakt hebben zelden dezelfde Python-minorversie, en niets meldt dat.
+
 ### Git commits
 
 ALTIJD `~/.claude/bin/git-commit.sh` — NOOIT raw `git commit`.

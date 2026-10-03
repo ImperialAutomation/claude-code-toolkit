@@ -78,6 +78,98 @@ check_lacks "no warning for --co" "$out" "$WARNING"
 out=$(cd "$T" && "$SCRIPT" --collect-only -q 2>/dev/null)
 check_contains "collection flag is passed through to pytest" "$out" "--collect-only"
 
+
+# --- which tree the run resolves to -----------------------------------------
+# The bug this guards: the venv search walked `.venv`, `backend/.venv`, `../.venv`
+# ... relative to $PWD, so the caller's shell location decided which interpreter
+# ran the tests. Give a path in another worktree and the right FILE is collected
+# against the wrong VENV — and nothing says so. Two sibling trees with
+# deliberately different stub pytests make that visible: the stub prints which
+# tree it came from, so the assertion is "B's interpreter ran", not "a pytest ran".
+
+A="$T/billing-api"          # the tree the shell stands in
+B="$T/billing-api-dev1"     # the tree the test path points at
+
+for tree in "$A" "$B"; do
+    mkdir -p "$tree/.venv/bin" "$tree/tests"
+    name=$(basename "$tree")
+    cat > "$tree/.venv/bin/pytest" <<STUB
+#!/bin/bash
+echo "ran-from:$name args: \$*"
+STUB
+    chmod +x "$tree/.venv/bin/pytest"
+    : > "$tree/tests/test_invoice_rounding.py"
+    git -C "$tree" init -q 2>/dev/null
+done
+
+run_in() { # dir args... -> stdout+stderr combined
+    local dir="$1"; shift
+    (cd "$dir" && "$SCRIPT" "$@" 2>&1)
+}
+
+echo
+echo "project-test.sh: root is taken from the path argument, not from PWD"
+
+# The headline case from the issue: absolute path into B, shell sitting in A.
+out=$(run_in "$A" "$B/tests/test_invoice_rounding.py")
+check_contains "absolute path in B uses B's venv" "$out" "ran-from:billing-api-dev1"
+check_lacks "absolute path in B does not use A's venv" "$out" "ran-from:billing-api "
+
+# The chosen venv must be identifiable. `.venv` names no tree, so a wrong-tree
+# run looks identical to a right-tree one in the log.
+check_contains "reports the venv as an absolute path" "$out" "$B/.venv"
+
+# Silence is what let this bug live. Diverging from PWD is worth a line.
+# Note "$A" alone is a prefix of "$B" here, so it would match the B path as well;
+# the notice has to be asserted as the whole phrase to mean anything.
+check_contains "announces that the root differs from PWD" "$out" "(PWD is $A)"
+
+# A relative path resolves within PWD, which is the tree the caller stands in.
+out=$(run_in "$B" tests/test_invoice_rounding.py)
+check_contains "relative path from B runs against B" "$out" "ran-from:billing-api-dev1"
+check_lacks "relative path from B does not reach A" "$out" "ran-from:billing-api "
+check_lacks "no divergence notice when root matches PWD" "$out" "PWD is"
+
+# No path argument: nothing to derive a root from, so PWD stays in charge.
+out=$(run_in "$B" -x)
+check_contains "no path argument keeps PWD behaviour" "$out" "ran-from:billing-api-dev1"
+
+# Paths from two trees in one command cannot both be right. Refuse rather than
+# silently picking one and testing half the arguments against a foreign venv.
+out=$(run_in "$A" "$A/tests/test_invoice_rounding.py" "$B/tests/test_invoice_rounding.py")
+rc=$?
+if [[ $rc -ne 0 ]]; then echo "  PASS: multi-root run exits non-zero"; PASS=$((PASS+1))
+else echo "  FAIL: multi-root run exits non-zero (got exit 0)"; FAIL=$((FAIL+1)); fi
+check_contains "names both roots when refusing" "$out" "multiple"
+check_lacks "refusal runs no tests at all" "$out" "ran-from:"
+
+
+# --- relative paths survive the move to the root ----------------------------
+# Deriving the root means the script changes directory before running pytest,
+# and a relative path means something different after that cd. Resolving the
+# root must not silently change which file the caller asked for: from a
+# subdirectory, `tests/test_y.py` is <subdir>/tests/..., not <root>/tests/...
+# pytest reports a missing path as an error, but one that reads like a typo
+# rather than like the wrapper having rewritten the argument.
+mkdir -p "$A/sub/tests"
+: > "$A/sub/tests/test_y.py"
+cat > "$A/.venv/bin/pytest" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+    [[ "$a" == -* ]] && continue
+    [[ -e "$a" ]] && echo "collected:$a" || echo "missing:$a"
+done
+STUB
+chmod +x "$A/.venv/bin/pytest"
+
+out=$(run_in "$A/sub" tests/test_y.py)
+check_contains "relative path from a subdirectory still resolves" "$out" "collected:"
+check_lacks "relative path from a subdirectory is not lost" "$out" "missing:"
+
+# And it must point at the file the caller meant, not a same-named one that
+# happens to exist at the root.
+check_contains "resolves to the subdirectory's file" "$out" "$A/sub/tests/test_y.py"
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [[ $FAIL -eq 0 ]]
