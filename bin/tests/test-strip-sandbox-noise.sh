@@ -149,16 +149,38 @@ check "no arguments is not an error" "ARGS: []" \
     "$(bash -c 'set -uo pipefail; . "$1"; git_filtered' _ "$LIB" 2>/dev/null)"
 
 echo "== 6. the library is safe to source =="
+# Section 5 replaced the stub with an argument-echoing one that ignores
+# GIT_STUB_EXIT. Restore the behaviour-controlled stub, or the exit-status
+# assertions below silently test a git that can never fail.
+cat > "$T/bin/git" <<'STUB'
+#!/bin/bash
+if [[ -n "${GIT_STUB_STDERR:-}" ]]; then printf '%s\n' "$GIT_STUB_STDERR" >&2; fi
+if [[ -n "${GIT_STUB_STDOUT:-}" ]]; then printf '%s\n' "$GIT_STUB_STDOUT"; fi
+exit "${GIT_STUB_EXIT:-0}"
+STUB
+chmod +x "$T/bin/git"
 # The wrappers source it from arbitrary working directories, so resolution must
 # not depend on cwd, and sourcing must not emit anything of its own.
 check "sourcing is silent" "" \
     "$(cd / && bash -c '. "$1"' _ "$LIB" 2>&1)"
 check "sourcing from an unrelated cwd works" "0" \
     "$(cd "$T" && bash -c '. "$1"; declare -F git_filtered >/dev/null' _ "$LIB" >/dev/null 2>&1; echo $?)"
-# `set -e` is the wrappers' prevailing mode; the helper must not trip it, and a
-# git failure must still be visible to the caller as a non-zero status.
+# `set -e -o pipefail` is the wrappers' prevailing mode; the helper must not
+# trip it, and a git failure must still be visible as a non-zero status.
 check "survives set -e in the caller" "1" \
     "$(GIT_STUB_EXIT=1 bash -c 'set -euo pipefail; . "$1"; shift; git_filtered "$@"' _ "$LIB" status >/dev/null 2>&1; echo $?)"
+# The case that matters more, and the one that bit: grep exits 1 when it filters
+# nothing out, so under pipefail the pipeline status is 1 and `set -e` aborts the
+# caller on a SUCCESSFUL git call. Anything after git_filtered must still run.
+check "a successful call under set -e returns 0" "0" \
+    "$(GIT_STUB_EXIT=0 bash -c 'set -euo pipefail; . "$1"; shift; git_filtered "$@"' _ "$LIB" status >/dev/null 2>&1; echo $?)"
+check "the caller continues past a successful call under set -e" "reached" \
+    "$(GIT_STUB_EXIT=0 bash -c 'set -euo pipefail; . "$1"; shift; git_filtered "$@" >/dev/null; echo reached' _ "$LIB" status 2>/dev/null)"
+# Same again with noise present, since that is when grep DOES output and the
+# status differs for a different reason.
+check "the caller continues when noise was filtered" "reached" \
+    "$(GIT_STUB_EXIT=0 GIT_STUB_STDERR="$SANDBOX_LINE" \
+        bash -c 'set -euo pipefail; . "$1"; shift; git_filtered "$@" >/dev/null; echo reached' _ "$LIB" status 2>/dev/null)"
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"

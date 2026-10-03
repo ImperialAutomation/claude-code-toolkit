@@ -79,7 +79,16 @@ git_filtered() {
     #
     # grep exits 1 when it prints nothing, so its status is meaningless here;
     # reading PIPESTATUS[0] rather than `$?` reports git's own status.
-    { { git "$@" 2>&1 1>&3; } | grep -v -E "$_SANDBOX_NOISE_RE" >&2; } 3>&1
+    #
+    # `|| true` is load-bearing, not defensive noise. The wrappers run under
+    # `set -e -o pipefail`, and grep's status-1-on-no-output would otherwise make
+    # the pipeline status 1, which `set -e` treats as fatal — aborting the script
+    # at the call site on a SUCCESSFUL git call. PIPESTATUS is captured before
+    # `|| true` resolves, so git's real status still survives.
+    # `|| true` sits INSIDE the second pipeline stage, not around the group: at
+    # group level it would also mask git's status before PIPESTATUS is read, and
+    # every git failure would report success. Here it only neutralises grep.
+    { { git "$@" 2>&1 1>&3; } | { grep -v -E "$_SANDBOX_NOISE_RE" >&2 || true; }; } 3>&1
     pipe_status=("${PIPESTATUS[@]}")
 
     return "${pipe_status[0]}"
