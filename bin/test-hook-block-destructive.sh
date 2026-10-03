@@ -86,6 +86,29 @@ run "psql -c 'drop schema public cascade'"        BLOCK
 run "docker compose exec -T db psql -U app -d app -c 'DROP SCHEMA public CASCADE'"  BLOCK
 run "mysql -u root -e 'DROP DATABASE staging'"    BLOCK
 
+# --- SQL: an unqualified DELETE empties the table ---
+# The pattern this replaces was "DELETE FROM.*WITHOUT.*WHERE", which matches the
+# literal word WITHOUT and so matched nothing anyone types. A pattern that reads
+# as covered while matching nothing real is worse than an honest gap. The intent
+# was "DELETE FROM <table> with no WHERE clause", which needs two steps: find the
+# statement, then check whether it is qualified.
+run "psql -c 'DELETE FROM users'"                      BLOCK
+run "psql -c 'DELETE FROM users;'"                     BLOCK
+run "psql -c 'delete from audit_log'"                  BLOCK
+# A qualified delete is ordinary data work and must stay allowed, or the guard
+# becomes noise people route around.
+run "psql -c 'DELETE FROM users WHERE id = 42'"        ALLOW
+run "psql -c 'delete from sessions where expires_at < now()'"  ALLOW
+# Qualified by a subquery rather than a literal: still a WHERE clause.
+run "psql -c 'DELETE FROM carts WHERE user_id IN (SELECT id FROM users WHERE banned)'"  ALLOW
+# Each statement is judged separately: one qualified delete does not cover an
+# unqualified one sharing the command line. The WHERE must be in the SAME
+# statement as the DELETE, which is why the check runs per segment rather than
+# over the whole command string — a WHERE anywhere on the line would otherwise
+# vouch for a bare delete somewhere else on it.
+run "psql -c 'DELETE FROM a WHERE id = 1; DELETE FROM b'"  BLOCK
+run "psql -c 'SELECT * FROM a WHERE id = 1' && psql -c 'DELETE FROM audit_log'"  BLOCK
+
 # --- SQL: naming a statement is not running one ---
 # The patterns match anywhere in the command string, so investigating the guard
 # trips the guard: grepping FOR a pattern, or writing a commit message that names
@@ -95,11 +118,20 @@ run "mysql -u root -e 'DROP DATABASE staging'"    BLOCK
 run "grep -n 'DROP TABLE' bin/hook-block-destructive.sh"            ALLOW
 run "rg 'DROP SCHEMA' bin/"                                         ALLOW
 run "cat bin/hook-block-destructive.sh"                             ALLOW
+# SC2088 is intentional: the tilde is fixture TEXT, the command string a wrapper
+# script arrives as. Expanding it would stop testing what the hook actually sees.
+# shellcheck disable=SC2088
 run "~/.claude/bin/git-commit.sh 'fix(hook): catch DROP SCHEMA and DROP OWNED BY'"  ALLOW
 run "echo 'TRUNCATE is blocked by this hook'"                       ALLOW
 # A read-only leader must not launder a real statement later in the pipeline.
 run "cat schema.sql | psql -d app"                                  ALLOW
 run "grep -n foo file.sql && psql -c 'DROP SCHEMA public CASCADE'"  BLOCK
+# Both halves read-only: the search term names a statement, and nothing runs it.
+# This is the shape that fails if the destructive find ever widens from the
+# segment to the whole command line, which would skip the grep segment and then
+# re-scan the full string anyway, quietly undoing the skip above.
+run "git log --oneline | grep 'DROP SCHEMA'"                        ALLOW
+run "echo 'DROP OWNED BY is now blocked' && git status"             ALLOW
 
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK

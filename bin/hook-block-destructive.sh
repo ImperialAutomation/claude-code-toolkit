@@ -92,19 +92,31 @@ _SQL_DESTRUCTIVE_RE='(^|[^[:alnum:]_])(DROP[[:space:]]+(TABLE|DATABASE|SCHEMA)|D
 # in a later segment, because each segment is classified on its own.
 _SQL_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
 
+# An unqualified DELETE empties the table. The pattern this replaces was
+# "DELETE FROM.*WITHOUT.*WHERE", which matched the literal word WITHOUT and so
+# matched nothing anyone types — it read as covered while covering nothing, which
+# is worse than an honest gap. The intent cannot be written as one regex: it
+# takes two steps, finding the statement and then asking whether it is qualified.
+_SQL_DELETE_RE='(^|[^[:alnum:]_])DELETE[[:space:]]+FROM([^[:alnum:]_]|$)'
+_SQL_WHERE_RE='(^|[^[:alnum:]_])WHERE([^[:alnum:]_]|$)'
+
 _sql_destructive_hit() {
     local segment
     while IFS= read -r segment; do
         # Classify each segment independently, so one read-only leader does not
-        # excuse the rest of the command line.
+        # excuse the rest of the command line, and a qualified delete does not
+        # excuse an unqualified one sharing it.
         echo "$segment" | grep -qE "$_SQL_READONLY_LEADER_RE" && continue
         echo "$segment" | grep -qiE "$_SQL_DESTRUCTIVE_RE" && return 0
+        if echo "$segment" | grep -qiE "$_SQL_DELETE_RE"; then
+            echo "$segment" | grep -qiE "$_SQL_WHERE_RE" || return 0
+        fi
     done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
     return 1
 }
 
 if _sql_destructive_hit; then
-    echo "BLOCKED by hook-block-destructive.sh: refusing a destructive SQL statement (DROP TABLE/DATABASE/SCHEMA, DROP OWNED BY, TRUNCATE). All of these destroy data irreversibly, including the forms that avoid the word DATABASE. If this targets a throwaway database, say so and ask the user to confirm — do not rephrase the statement to get past this check." >&2
+    echo "BLOCKED by hook-block-destructive.sh: refusing a destructive SQL statement (DROP TABLE/DATABASE/SCHEMA, DROP OWNED BY, TRUNCATE, or a DELETE FROM with no WHERE clause). All of these destroy data irreversibly, including the forms that avoid the word DATABASE. Adding a WHERE clause is fine if that is what you meant. If this targets a throwaway database, say so and ask the user to confirm — do not rephrase the statement to get past this check." >&2
     exit 2
 fi
 
