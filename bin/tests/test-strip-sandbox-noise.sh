@@ -182,6 +182,33 @@ check "the caller continues when noise was filtered" "reached" \
     "$(GIT_STUB_EXIT=0 GIT_STUB_STDERR="$SANDBOX_LINE" \
         bash -c 'set -euo pipefail; . "$1"; shift; git_filtered "$@" >/dev/null; echo reached' _ "$LIB" status 2>/dev/null)"
 
+echo "== 7. reachable the way the agent actually calls it =="
+# bin/ is a directory symlink (~/.claude/bin -> <repo>/bin), and the wrappers are
+# invoked through that symlink from arbitrary working directories. A lib/
+# subdirectory is a new shape for this repo — nothing in bin/ sourced anything
+# before — so the path has to be proven, not assumed.
+#
+# The symlink is tested through a locally built one rather than $HOME/.claude/bin,
+# so the suite passes on a checkout where the toolkit is not installed.
+ln -s "$(cd "$SCRIPT_DIR/.." && pwd)" "$T/binlink"
+check "helper sources through a directory symlink" "0" \
+    "$(cd / && bash -c '. "$1/lib/strip-sandbox-noise.sh"; declare -F git_filtered >/dev/null' \
+        _ "$T/binlink" >/dev/null 2>&1; echo $?)"
+# The wrappers resolve it BASH_SOURCE-relative; confirm that expression yields a
+# real file when the script itself is reached via the symlink.
+check "BASH_SOURCE-relative resolve lands on the helper" "0" \
+    "$(cd "$T" && bash -c 'd=$(cd "$(dirname "$1")" && pwd); [[ -f "$d/lib/strip-sandbox-noise.sh" ]]' \
+        _ "$T/binlink/git-commit.sh" >/dev/null 2>&1; echo $?)"
+# Each wrapper that adopted the helper must actually resolve it when run from an
+# unrelated cwd through the symlink — the failure mode is a wrapper that worked
+# in the repo and breaks once installed.
+for w in git-commit.sh git-diff-base.sh git-cleanup-merged-branch.sh \
+         git-merge-branch.sh git-push-pr-merge.sh git-verify.sh; do
+    check "$w resolves the helper via the symlink" "0" \
+        "$(cd / && bash -c 'd=$(cd "$(dirname "$1")" && pwd); . "$d/lib/strip-sandbox-noise.sh"; declare -F git_filtered >/dev/null' \
+            _ "$T/binlink/$w" >/dev/null 2>&1; echo $?)"
+done
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
