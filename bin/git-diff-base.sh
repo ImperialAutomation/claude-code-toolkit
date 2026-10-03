@@ -17,6 +17,11 @@
 # upstream, since resolution only inspects local branches.
 set -euo pipefail
 
+# Resolved from BASH_SOURCE, not the cwd: these scripts run from arbitrary
+# working directories and bin/ is reached through a symlink.
+# shellcheck source=bin/lib/strip-sandbox-noise.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+
 base=""
 mode="--name-only"
 repo=""
@@ -42,6 +47,6 @@ if [[ -z "$base" ]]; then
   base="$("$script_dir/git-find-base-branch")" || { echo "Error: could not auto-detect base branch — pass one explicitly" >&2; exit 1; }
 fi
 
-mb="$(git merge-base HEAD "$base")"
+mb="$(git_filtered merge-base HEAD "$base")"
 # shellcheck disable=SC2086  # $mode is intentionally word-split (may be empty)
-git diff $mode "$mb"..HEAD
+git_filtered diff $mode "$mb"..HEAD

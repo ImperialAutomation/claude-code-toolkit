@@ -25,6 +25,11 @@
 
 set -euo pipefail
 
+# Resolved from BASH_SOURCE, not the cwd: these scripts run from arbitrary
+# working directories and bin/ is reached through a symlink.
+# shellcheck source=bin/lib/strip-sandbox-noise.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+
 PROTECTED_BRANCHES="develop master main"
 
 SOURCE=""
@@ -67,7 +72,7 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "Error: not inside a git work tree" >&2
     exit 1
 fi
-REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_ROOT=$(git_filtered rev-parse --show-toplevel)
 case "$REPO_ROOT" in
     "$HOME"/Projects/*) ;;
     *)
@@ -76,7 +81,7 @@ case "$REPO_ROOT" in
         ;;
 esac
 
-TARGET=$(git branch --show-current)
+TARGET=$(git_filtered branch --show-current)
 if [[ -z "$TARGET" ]]; then
     echo "Error: detached HEAD — checkout a branch before merging" >&2
     exit 1
@@ -107,5 +112,5 @@ if [[ -z "$MSG" ]]; then
 fi
 
 echo "=== Merging $SOURCE into $TARGET ($FF_MODE) ==="
-git merge "$FF_MODE" "$SOURCE" -m "$MSG"
+git_filtered merge "$FF_MODE" "$SOURCE" -m "$MSG"
 echo "=== Done: $TARGET now contains $SOURCE ==="
