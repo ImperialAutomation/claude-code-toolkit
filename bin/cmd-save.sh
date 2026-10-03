@@ -24,4 +24,19 @@ OUTFILE="$1"; shift
 
 mkdir -p "$(dirname "$OUTFILE")"
 
-"$@" > "$OUTFILE"
+# Run the command, then report. The status reported is the command's own, not
+# the redirect's: a failing command that still wrote a file would otherwise look
+# like a successful capture, and the caller would read an error message as data.
+if "$@" > "$OUTFILE"; then
+    STATUS=0
+else
+    STATUS=$?
+fi
+
+# The byte count makes an empty capture visible. A zero-byte file is the
+# signature of a command that produced nothing, and it is otherwise invisible
+# until something downstream behaves strangely.
+BYTES=$(wc -c < "$OUTFILE" | tr -d ' ')
+
+printf '%s (%s bytes, exit %d)\n' "$OUTFILE" "$BYTES" "$STATUS"
+exit "$STATUS"
