@@ -68,6 +68,67 @@ _rm_hits_protected_path() {
     return 1
 }
 
+# Guard: destructive SQL, in whatever form carries the same effect.
+#
+# The patterns this replaces blocked DROP TABLE / DROP DATABASE / TRUNCATE but
+# not DROP SCHEMA ... CASCADE or DROP OWNED BY, which destroy the same data. That
+# inconsistency is worse than a uniform gap: the loud form gets refused, so the
+# next thing reached for is the quiet equivalent, and the guard trains rephrasing
+# instead of asking. It happened in a real session (issue #67) — a blocked
+# DROP DATABASE was followed by DROP SCHEMA public CASCADE against the same
+# database, with no second prompt.
+#
+# Kept as a function rather than entries in BLOCKED_PATTERNS so all SQL forms
+# share ONE mechanism: segment splitting (below), the no-WHERE delete check that
+# needs two steps, and the read-only-leader skip. Adding a bare pattern to the
+# array would have reproduced the self-match nuisance for each new form.
+#
+# On scope: this does produce false positives on legitimate throwaway work — test
+# databases, disposable containers, a schema reset between fixtures — and that is
+# a real cost, not an acceptable one. The aim is NOT to block more. It is that the
+# loud form and the quiet equivalent get the same answer, because an inconsistent
+# guard teaches rephrasing rather than asking. When a block is a false positive,
+# the fix is to ask the user, not to find the phrasing that slips past; if a
+# throwaway target starts tripping this routinely, narrow the guard here rather
+# than working around it at the call site.
+_SQL_DESTRUCTIVE_RE='(^|[^[:alnum:]_])(DROP[[:space:]]+(TABLE|DATABASE|SCHEMA)|DROP[[:space:]]+OWNED[[:space:]]+BY|TRUNCATE)([^[:alnum:]_]|$)'
+
+# Commands that only READ or PRINT text. A statement appearing as an argument to
+# one of these is being searched for or quoted, not executed — grepping for a
+# pattern tripped the guard, and so did a commit message naming one. Both were
+# hit while fixing issue #67. Anchored to the segment's LEADING word, mirroring
+# the git-merge guard below: a read-only leader cannot launder a real statement
+# in a later segment, because each segment is classified on its own.
+_SQL_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
+
+# An unqualified DELETE empties the table. The pattern this replaces was
+# "DELETE FROM.*WITHOUT.*WHERE", which matched the literal word WITHOUT and so
+# matched nothing anyone types — it read as covered while covering nothing, which
+# is worse than an honest gap. The intent cannot be written as one regex: it
+# takes two steps, finding the statement and then asking whether it is qualified.
+_SQL_DELETE_RE='(^|[^[:alnum:]_])DELETE[[:space:]]+FROM([^[:alnum:]_]|$)'
+_SQL_WHERE_RE='(^|[^[:alnum:]_])WHERE([^[:alnum:]_]|$)'
+
+_sql_destructive_hit() {
+    local segment
+    while IFS= read -r segment; do
+        # Classify each segment independently, so one read-only leader does not
+        # excuse the rest of the command line, and a qualified delete does not
+        # excuse an unqualified one sharing it.
+        echo "$segment" | grep -qE "$_SQL_READONLY_LEADER_RE" && continue
+        echo "$segment" | grep -qiE "$_SQL_DESTRUCTIVE_RE" && return 0
+        if echo "$segment" | grep -qiE "$_SQL_DELETE_RE"; then
+            echo "$segment" | grep -qiE "$_SQL_WHERE_RE" || return 0
+        fi
+    done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
+    return 1
+}
+
+if _sql_destructive_hit; then
+    echo "BLOCKED by hook-block-destructive.sh: refusing a destructive SQL statement (DROP TABLE/DATABASE/SCHEMA, DROP OWNED BY, TRUNCATE, or a DELETE FROM with no WHERE clause). All of these destroy data irreversibly, including the forms that avoid the word DATABASE. Adding a WHERE clause is fine if that is what you meant. If this targets a throwaway database, say so and ask the user to confirm — do not rephrase the statement to get past this check." >&2
+    exit 2
+fi
+
 if _rm_hits_protected_path; then
     echo "BLOCKED by hook-block-destructive.sh: refusing a force-recursive rm of an absolute path outside /tmp. Deleting scratch files UNDER /tmp (e.g. /tmp/my-workdir) is allowed; wiping /tmp itself, a home path, or any other absolute path needs the user's explicit go-ahead." >&2
     exit 2
@@ -83,11 +144,9 @@ BLOCKED_PATTERNS=(
     "git reset.*--hard"
     "git checkout -- \\."
     "git clean.* -f( |$)"
-    # Database destruction
-    "DROP TABLE"
-    "DROP DATABASE"
-    "TRUNCATE"
-    "DELETE FROM.*WITHOUT.*WHERE"
+    # Database destruction is handled by _sql_destructive_hit() above, which
+    # covers the DROP SCHEMA / DROP OWNED BY forms these patterns missed and the
+    # unqualified DELETE a single regex cannot express.
     # Process/system
     "kill -9 1$"
     "killall"
