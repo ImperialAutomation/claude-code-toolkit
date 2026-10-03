@@ -67,10 +67,43 @@ run "rm -rf node_modules"                ALLOW
 # Without -f it is not a force-removal; the guard requires both flags.
 run "rm -r /tmp/mutdir"                  ALLOW
 
+# --- SQL: the loud form and its quiet equivalents must agree ---
+# The point is consistency, not volume. A guard that stops DROP DATABASE while
+# DROP SCHEMA public CASCADE passes teaches rephrasing rather than asking, which
+# is how the real-session bypass in issue #67 happened: the obvious form was
+# refused, so the next thing reached for was the equivalent the guard missed.
+run "psql -c 'DROP TABLE users'"                  BLOCK
+run "psql -c 'DROP DATABASE myapp'"               BLOCK
+run "psql -c 'TRUNCATE users'"                    BLOCK
+# Destroys every object in the schema: same effect as dropping the database.
+run "psql -c 'DROP SCHEMA public CASCADE'"        BLOCK
+run "psql -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'"  BLOCK
+# Destroys everything a role owns, across every schema in the database.
+run "psql -c 'DROP OWNED BY report_writer'"       BLOCK
+# SQL keywords are case-insensitive; so is the guard.
+run "psql -c 'drop schema public cascade'"        BLOCK
+# Realistic shapes these arrive in, not just bare statements.
+run "docker compose exec -T db psql -U app -d app -c 'DROP SCHEMA public CASCADE'"  BLOCK
+run "mysql -u root -e 'DROP DATABASE staging'"    BLOCK
+
+# --- SQL: naming a statement is not running one ---
+# The patterns match anywhere in the command string, so investigating the guard
+# trips the guard: grepping FOR a pattern, or writing a commit message that names
+# one, got blocked. Low severity on its own, but it pushes toward working around
+# the hook, which is the same pressure that produced the DROP SCHEMA bypass.
+# These cases are not hypothetical: all three were hit while fixing issue #67.
+run "grep -n 'DROP TABLE' bin/hook-block-destructive.sh"            ALLOW
+run "rg 'DROP SCHEMA' bin/"                                         ALLOW
+run "cat bin/hook-block-destructive.sh"                             ALLOW
+run "~/.claude/bin/git-commit.sh 'fix(hook): catch DROP SCHEMA and DROP OWNED BY'"  ALLOW
+run "echo 'TRUNCATE is blocked by this hook'"                       ALLOW
+# A read-only leader must not launder a real statement later in the pipeline.
+run "cat schema.sql | psql -d app"                                  ALLOW
+run "grep -n foo file.sql && psql -c 'DROP SCHEMA public CASCADE'"  BLOCK
+
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK
 run "git reset --hard origin/main"       BLOCK
-run "DROP TABLE users"                   BLOCK
 run "git branch -D feature"              BLOCK
 run "git status"                         ALLOW
 run "npm run build"                      ALLOW
