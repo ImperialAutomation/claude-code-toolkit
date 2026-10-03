@@ -32,12 +32,21 @@ for arg in "$@"; do
   # Relative paths are fine — they resolve within PWD which is already validated
 done
 
-# Warn if no test path specified (likely unintentional full suite run)
+# Warn if no test path specified (likely unintentional full suite run).
+# Collection-only runs are exempt: they import every test module without
+# running a single test, so "no path given" is deliberate there and costs
+# seconds. Warning about a full suite on the one invocation that runs zero
+# tests only teaches the reader to ignore this warning.
 has_path_arg=false
+is_collect_only=false
 for arg in "$@"; do
-  [[ "$arg" != -* ]] && has_path_arg=true && break
+  case "$arg" in
+    --collect-only|--co) is_collect_only=true ;;
+    -*) ;;
+    *) has_path_arg=true ;;
+  esac
 done
-if [[ "$has_path_arg" == false ]]; then
+if [[ "$has_path_arg" == false && "$is_collect_only" == false ]]; then
   echo "[project-test.sh] WARNING: No test path specified — running full suite. Use a specific path for faster runs." >&2
 fi
 

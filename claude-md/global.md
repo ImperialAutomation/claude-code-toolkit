@@ -80,7 +80,7 @@ Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug
 - DRY: check if similar logic already exists before implementing; create shared functions instead of duplicating
 - SOLID: single responsibility per class/module, open for extension but closed for modification, depend on abstractions not concretions. Apply pragmatically — don't over-engineer for hypothetical future requirements
 - No magic strings/numbers: use constants, enums, or configuration for all business logic values
-- Remove obsolete code always. Never keep old files "just in case" — a replacement removes the old version in the same PR (no dead parallel paths)
+- Remove obsolete code always. Never keep old files "just in case" — a replacement removes the old version in the same PR (no dead parallel paths). **Hetzelfde geldt voor de tests die het dekten:** een test die een verwijderd symbool importeert breekt de hele suite (collection error: geen enkele test draait meer, ook de gezonde niet), en een test die een verdwenen gedraging beschrijft staat vacuüm groen. Beide horen in dezelfde PR opgelost. Grep de testboom op de oude naam vóór je commit
 - Always read a model/class file before assuming its attributes
 - Never skip validation because "it should work"
 - Never commit code that hasn't been tested
