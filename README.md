@@ -236,7 +236,7 @@ misdescribe the argument.
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
 | `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool |
-| `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, DROP TABLE, etc.) |
+| `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
 
@@ -290,6 +290,7 @@ claude-code-toolkit/
 │   ├── hook-auto-approve-bash.py  ← real implementation: shlex-tokenized compound-command approval
 │   ├── test-hook-auto-approve-bash.py ← standalone tests for the above
 │   ├── hook-block-destructive.sh  ← PreToolUse hook: block destructive commands
+│   ├── test-hook-block-destructive.sh ← standalone tests for the above
 │   ├── hook-block-foreign-worktree-git.sh ← PreToolUse hook: block cross-worktree git destruction
 │   ├── test-hook-block-foreign-worktree-git.sh ← standalone tests for the above
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
@@ -369,7 +370,9 @@ The global settings include three `PreToolUse` hooks that run **in all permissio
 
    Each deny is deliberately narrow, so that work with no wrapper to point at keeps falling through to a normal prompt rather than being blocked: a real `sed` stream edit, Python doing calculation or writing a file, and wait loops polling anything other than a file (an HTTP status, a container state, a command's exit status) are all left alone. `while` loops are not matched either: `while [ -f X ]` waits for a file to *disappear*, which `wait-for-pattern.sh` cannot express.
 
-2. **`hook-block-destructive.sh`** — Blocks destructive patterns: `rm -rf /`, `git push --force`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `git clean -f`, `dd if=... of=/dev/`, and more. When blocked, Claude sees the reason and adjusts its approach.
+2. **`hook-block-destructive.sh`** — Blocks destructive patterns: `rm -rf /`, `git push --force`, `git reset --hard`, `git clean -f`, `dd if=... of=/dev/`, and more. When blocked, Claude sees the reason and adjusts its approach.
+
+   Destructive SQL is checked as a group rather than as a list of substrings, so the statements that drop a table, a database or a schema, the role-level drop, the truncate and an unqualified `DELETE` all get the same answer. That consistency is the point: when only the obvious phrasing was refused, the equivalent one became the workaround. A `DELETE` with a `WHERE` clause stays allowed, and a statement that merely appears as an argument to a read-only command (searching a file for one, or naming one in a commit message) is not treated as running it.
 
 3. **`hook-block-foreign-worktree-git.sh`** — Blocks a destructive git command (`checkout --`, `checkout -f`, `restore`, `reset`, `clean`, `stash`) that targets a *different* worktree via `-C`/`--git-dir`. Linked worktrees share one repository but hold independent uncommitted work, so restoring a sibling tree to HEAD silently destroys whatever another session was editing there. Only cross-worktree operations are blocked: inside your own tree these commands stay untouched, and unrelated checkouts (a different `.git`) are left alone. Read-only `git stash list`/`show` pass through. Set `WORKTREE_GUARD_HINT` from a small project wrapper to append a repo-specific alternative (e.g. an isolated test runner) to the block message.
 

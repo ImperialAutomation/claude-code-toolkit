@@ -82,6 +82,15 @@ _rm_hits_protected_path() {
 # share ONE mechanism: segment splitting (below), the no-WHERE delete check that
 # needs two steps, and the read-only-leader skip. Adding a bare pattern to the
 # array would have reproduced the self-match nuisance for each new form.
+#
+# On scope: this does produce false positives on legitimate throwaway work — test
+# databases, disposable containers, a schema reset between fixtures — and that is
+# a real cost, not an acceptable one. The aim is NOT to block more. It is that the
+# loud form and the quiet equivalent get the same answer, because an inconsistent
+# guard teaches rephrasing rather than asking. When a block is a false positive,
+# the fix is to ask the user, not to find the phrasing that slips past; if a
+# throwaway target starts tripping this routinely, narrow the guard here rather
+# than working around it at the call site.
 _SQL_DESTRUCTIVE_RE='(^|[^[:alnum:]_])(DROP[[:space:]]+(TABLE|DATABASE|SCHEMA)|DROP[[:space:]]+OWNED[[:space:]]+BY|TRUNCATE)([^[:alnum:]_]|$)'
 
 # Commands that only READ or PRINT text. A statement appearing as an argument to

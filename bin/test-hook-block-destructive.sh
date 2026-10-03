@@ -11,6 +11,19 @@
 # patterns could not express: they blocked every /tmp scratch cleanup (a false
 # positive agents hit routinely) while letting `rm -rf /tmp/a /usr` through on
 # the strength of its first operand.
+#
+# The SQL cases are paired on purpose: each destructive statement sits next to
+# the form that must still be allowed (an unqualified delete against a qualified
+# one, a statement being executed against the same statement being grepped for).
+# A guard is only as good as its agreement across equivalent phrasings — the
+# issue #67 bypass was not a missing pattern so much as two phrasings of one
+# action getting two different answers.
+#
+# When adding a case, check it actually constrains the hook: break the matching
+# line in hook-block-destructive.sh, confirm THIS test goes red, then revert. A
+# case that stays green under that mutation documents an intention without
+# testing it. Two cases here exist only because that check caught them passing
+# for the wrong reason.
 
 set -uo pipefail
 
