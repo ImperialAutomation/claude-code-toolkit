@@ -47,6 +47,27 @@
 #   printed, and the script exits non-zero so callers can react. Re-running
 #   with the same arguments reuses the open PR and re-runs the gate.
 #
+#   --allow-failing-check <name> (repeatable) exempts ONE named check from
+#   blocking. It exists for a check that is red repo-wide for a cause unrelated
+#   to the diff — typically a dependency audit after a new advisory lands on a
+#   pinned package, which otherwise blocks every PR in the repo, including the
+#   sub-PRs of an epic. Everything else about the gate still applies: the head
+#   must still match the pushed commit, pending checks are still waited for, and
+#   any OTHER red check still blocks. The PASS line becomes
+#   `CI_GATE: PASS (allowed failing: <names>)`, naming the checks that were
+#   actually red rather than the ones permitted, so the bypass is in the log.
+#
+#   Prefer it over --no-ci-wait, which is not a narrower version of the same
+#   thing: --no-ci-wait stops waiting for pending checks and stops looking at
+#   any check at all, so it merges on no evidence. This flag keeps the gate and
+#   subtracts one check from it.
+#
+#   The match is the exact, whole check name: allowing `audit` does not allow
+#   `audit-critical`. A name that no check carries is not an error — check names
+#   vary per branch, and refusing an unmatched name would block a merge for a
+#   reason unrelated to the diff, which is the problem this flag exists to solve.
+#   The cost of that choice is that a typo reads as "allowed" and still blocks.
+#
 # Worktree targeting:
 #   Without --repo this acts on the current directory. That is the right default
 #   for a human in a shell, but wrong for an agent: an agent's working directory

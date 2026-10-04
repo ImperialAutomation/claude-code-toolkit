@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71).
+# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71, #75).
 #
 # Covers:
 #    1. No checks reported at all      -> CI_GATE: FAIL after grace, no merge (fail closed)
@@ -23,6 +23,15 @@
 #   16. Previous head RED, new head green  -> PASS in one invocation
 #   17. Head never catches up              -> FAIL after grace, no merge
 #   18. Unparseable `gh pr view` output     -> FAIL closed, no merge
+#   19. --allow-failing-check, that check red -> PASS names the bypass, merges
+#   20. Allowed red + another red            -> blocks, FAIL names only the other
+#   21. Allowed red + another pending        -> keeps waiting, no early merge
+#  21b. Allowed check cancelled              -> allowed too (cancel counts as red)
+#   22. Same red check, no flag              -> FAIL, no merge (the list is opt-in)
+#   23. Allowed name is a substring only     -> still blocks (exact match)
+#   24. Flag repeated, one allowed check green -> PASS names only the red one
+#   25. All green with the flag set          -> bare PASS, no bypass note
+#   26. --allow-failing-check with no name   -> rejected before anything is pushed
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
