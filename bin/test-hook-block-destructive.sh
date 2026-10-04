@@ -168,6 +168,100 @@ run "alembic upgrade head"                                          ALLOW
 run "$(printf 'psql -c "SELECT 1"\npsql -c "DROP SCHEMA public CASCADE"')"  BLOCK
 run "$(printf 'psql -d app <<SQL\nDROP SCHEMA public CASCADE;\nSQL')"       BLOCK
 
+# --- pattern list: naming a destructive command is not running one (issue #70) ---
+# BLOCKED_PATTERNS and CASE_SENSITIVE_PATTERNS used to grep the whole command
+# string, so a keyword appearing only as DATA blocked the command: a search term,
+# a word in an echo, a commit message subject. Three of these were hit in a single
+# session, the third being a grep over this hook's own source — the guard blocked
+# the investigation INTO the guard, with no phrasing available that got past it.
+#
+# The fix reuses what _sql_destructive_hit() already does rather than stripping
+# quotes: split into segments, and skip a segment whose LEADING word is read-only.
+# Quote-stripping was the obvious move and is wrong here — see the "quotes do not
+# launder a real operand" block below for the two patterns it would have opened.
+run "grep -n 'git push --force' bin/hook-block-destructive.sh"       ALLOW
+run "echo 'killall is in the blocked list'"                          ALLOW
+run "grep -rn 'mkfs' docs/"                                          ALLOW
+run "echo 'shutdown the service gracefully'"                         ALLOW
+# SC2088 is intentional: the tilde is fixture TEXT, exactly as a wrapper-script
+# command string reaches the hook. Expanding it would stop testing what it sees.
+# shellcheck disable=SC2088
+run "~/.claude/bin/git-commit.sh 'fix: do not reboot the machine'"    ALLOW
+
+# One ALLOW case per pattern the hook knows (AC: shown per pattern). These are
+# the searches that must stay possible — without them a pattern cannot be looked
+# up, documented or tested without tripping the thing being looked up.
+run "grep -n 'rm -rf \$HOME' bin/hook-block-destructive.sh"          ALLOW
+run "grep -n 'git push.*--force' bin/hook-block-destructive.sh"      ALLOW
+run "grep -n 'git push -f' bin/hook-block-destructive.sh"            ALLOW
+run "grep -n 'git reset --hard' bin/hook-block-destructive.sh"       ALLOW
+run "grep -n 'git checkout -- .' bin/hook-block-destructive.sh"      ALLOW
+run "grep -n 'git clean -f' bin/hook-block-destructive.sh"           ALLOW
+run "grep -n 'kill -9 1' bin/hook-block-destructive.sh"              ALLOW
+run "grep -n 'killall' bin/hook-block-destructive.sh"                ALLOW
+run "grep -n 'shutdown' bin/hook-block-destructive.sh"               ALLOW
+run "grep -n 'reboot' bin/hook-block-destructive.sh"                 ALLOW
+run "grep -n 'mkfs' bin/hook-block-destructive.sh"                   ALLOW
+run "grep -n 'dd if=.* of=/dev/' bin/hook-block-destructive.sh"      ALLOW
+run "grep -n 'git branch.*-D' bin/hook-block-destructive.sh"         ALLOW
+
+# --- pattern list: the real operation still blocks, per pattern ---
+# The mirror of the block above. Each ALLOW case there is only safe because the
+# bare form here still fires; a relaxation is a gap unless both sides are pinned.
+run "git push --force origin main"                                   BLOCK
+run "git push -f origin main"                                        BLOCK
+run "git reset --hard origin/main"                                   BLOCK
+run "git checkout -- ."                                              BLOCK
+run "git clean -fd"                                                  BLOCK
+run "killall node"                                                   BLOCK
+run "shutdown -h now"                                                BLOCK
+run "reboot"                                                         BLOCK
+run "mkfs.ext4 /dev/sda1"                                            BLOCK
+run "dd if=/dev/zero of=/dev/sda"                                     BLOCK
+run "git branch -D feature"                                          BLOCK
+# Case-sensitive by design: -d refuses to delete an unmerged branch, -D forces it.
+run "git branch -d feature"                                          ALLOW
+
+# --- pattern list: data AND a real operation in one command still blocks ---
+# Per-segment classification is what makes this work: a read-only leader excuses
+# its OWN segment only. Were the skip applied to the whole command string, the
+# search term in the first half would vouch for the operation in the second.
+run "grep -n 'git push --force' README.md && git push --force origin main"  BLOCK
+run "echo 'about to force push' && git push --force origin main"      BLOCK
+run "echo 'killall note'; killall node"                              BLOCK
+run "grep -rn 'reboot' docs/ | head -5 && reboot"                    BLOCK
+
+# --- pattern list: quotes do not launder a real operand ---
+# This is the case that rules out stripping quoted segments before matching, the
+# first thing to reach for and a false negative in two places. Quoting an operand
+# is normal shell hygiene, not a signal that the text is data: both commands below
+# destroy exactly as much with the quotes as without them. The leader is what
+# distinguishes data from operation, so the leader is what the skip looks at.
+run "rm -rf \"\$HOME\""                                              BLOCK
+run "rm -rf '\$HOME'"                                                BLOCK
+run "dd if=/dev/zero of=\"/dev/sda\""                                BLOCK
+run "git push \"--force\" origin main"                               BLOCK
+
+# --- pattern list: a heredoc body is input to a program, not a command ---
+# Text between the delimiters is data for whatever reads stdin. The leader of such
+# a segment is the heredoc body itself, which matches no read-only command, so
+# fail-closed is the default and these cases pin the exception as narrow.
+run "$(printf 'cat <<EOF\nkillall and reboot are blocked\nEOF')"     ALLOW
+run "$(printf 'python3 - <<%s\nprint("git push --force is blocked")\n%s' "'PY'" "PY")"  ALLOW
+# A heredoc does not shield a real command on another line.
+run "$(printf 'cat <<EOF\njust text\nEOF\nkillall node')"            BLOCK
+
+# --- pattern list: fail closed on anything not recognised as read-only ---
+# At the boundary the answer must be BLOCK, not ALLOW. An unknown leader gets no
+# skip, so a keyword inside quotes under one still blocks — noisier than ideal and
+# deliberately so: a false negative here is a destroyed working tree, a false
+# positive is one rephrasing. Pinned so a later widening of the leader list has
+# to break a test rather than pass silently.
+run "mystery-tool 'git push --force'"                                BLOCK
+run "eval 'killall node'"                                            BLOCK
+run "bash -c 'git reset --hard origin/main'"                         BLOCK
+run "xargs -I{} git push --force {}"                                 BLOCK
+
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK
 run "git reset --hard origin/main"       BLOCK

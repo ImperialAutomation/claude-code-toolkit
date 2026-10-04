@@ -262,18 +262,41 @@ if echo "$COMMAND" | grep -qE '(^|[;&|]|&&|\|\|)[[:space:]]*gh[[:space:]]+pr[[:s
     esac
 fi
 
-for pattern in "${CASE_SENSITIVE_PATTERNS[@]}"; do
-    if echo "$COMMAND" | grep -E "$pattern" > /dev/null 2>&1; then
-        echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$pattern'. Rephrase or ask the user for explicit permission." >&2
-        exit 2
-    fi
-done
+# Match the pattern lists per segment, skipping the segments whose leading word
+# only reads or prints (see _READONLY_LEADER_RE). These loops used to grep the
+# whole command string, so a keyword present only as DATA blocked the command:
+# a search term, a word in an echo, a commit subject. Issue #70 collected three
+# such blocks from one session, the sharpest being a grep over this file —
+# looking the pattern up was impossible without tripping it.
+#
+# Echoes the matched SEGMENT, not the whole command line, so the message points
+# at the part that actually matched; with a multi-segment command the pattern
+# alone left you guessing which half was the problem.
+_pattern_hit() { # _pattern_hit <grep-flags> <pattern>...
+    local flags="$1" segment pattern
+    shift
+    while IFS= read -r segment; do
+        grep -qE "$_READONLY_LEADER_RE" <<< "$segment" && continue
+        for pattern in "$@"; do
+            if grep -q"$flags" -- "$pattern" <<< "$segment" 2>/dev/null; then
+                _PATTERN_HIT_PATTERN="$pattern"
+                _PATTERN_HIT_SEGMENT="$segment"
+                return 0
+            fi
+        done
+    done < <(_split_segments)
+    return 1
+}
 
-for pattern in "${BLOCKED_PATTERNS[@]}"; do
-    if echo "$COMMAND" | grep -iE "$pattern" > /dev/null 2>&1; then
-        echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$pattern'. Rephrase or ask the user for explicit permission." >&2
-        exit 2
-    fi
-done
+_PATTERN_HIT_PATTERN=""
+_PATTERN_HIT_SEGMENT=""
+
+# Case-sensitive list first: it distinguishes -D from -d, so folding case would
+# make the two indistinguishable and block the safe form along with the forced one.
+if _pattern_hit E "${CASE_SENSITIVE_PATTERNS[@]}" ||
+   _pattern_hit iE "${BLOCKED_PATTERNS[@]}"; then
+    echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$_PATTERN_HIT_PATTERN' in '$_PATTERN_HIT_SEGMENT'. Rephrase or ask the user for explicit permission. Note that a keyword appearing only as data — a grep pattern, a word inside echo, a commit message — is NOT blocked; if you are reading this, the match is outside quotes or under a command this hook does not recognise as read-only." >&2
+    exit 2
+fi
 
 exit 0
