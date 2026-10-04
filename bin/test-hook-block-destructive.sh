@@ -248,6 +248,16 @@ run "git push \"--force\" origin main"                               BLOCK
 # fail-closed is the default and these cases pin the exception as narrow.
 run "$(printf 'cat <<EOF\nkillall and reboot are blocked\nEOF')"     ALLOW
 run "$(printf 'python3 - <<%s\nprint("git push --force is blocked")\n%s' "'PY'" "PY")"  ALLOW
+# An UNQUOTED delimiter lets the shell expand the body before the interpreter
+# reads it, so a command really can hide in there. Quoted is data, unquoted is
+# not — this pair is the whole reason the delimiter's quoting is a condition and
+# not a stylistic detail.
+run "$(printf 'python3 - <<PY\nprint("ok")\nPY\n')"                   ALLOW
+run "$(printf 'python3 - <<PY\nkillall node\nPY\n')"                  BLOCK
+# A heredoc fed to something that EXECUTES the body is not data: psql runs every
+# statement in it. Pinned in the SQL section above too, and repeated here because
+# this is the case that caught a leader-blind version of the stripping step.
+run "$(printf 'psql -d app <<SQL\nDROP SCHEMA public CASCADE;\nSQL')"  BLOCK
 # A heredoc does not shield a real command on another line.
 run "$(printf 'cat <<EOF\njust text\nEOF\nkillall node')"            BLOCK
 

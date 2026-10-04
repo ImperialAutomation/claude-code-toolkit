@@ -37,8 +37,112 @@ fi
 # its own source of bugs, and the failure mode of being too shallow is extra
 # segments that match no read-only leader — i.e. a block. Erring toward more
 # segments therefore errs toward refusing, which is the direction to err in.
+# Commands that only READ or PRINT text. A destructive keyword appearing as an
+# argument to one of these is being searched for or quoted, not executed —
+# grepping for a pattern tripped the guard, and so did a commit message naming
+# one. Anchored to the segment's LEADING word, mirroring the git-merge guard
+# below: a read-only leader cannot launder a real command in a later segment,
+# because each segment is classified on its own.
+#
+# This started as an SQL-only skip (issue #67) and now serves the pattern lists
+# too (issue #70), where the same false positive was three times as common: a
+# grep for a pattern name, a word inside an echo, a commit subject. The worst of
+# those was a grep over THIS FILE — the guard blocked the investigation into the
+# guard, with no phrasing available that got past it.
+#
+# Why a leader check and not stripping quoted text, which is the obvious move:
+# quoting an operand is ordinary shell hygiene, not a signal that the text is
+# data. `rm -rf "$HOME"` and `dd if=/dev/zero of="/dev/sda"` destroy exactly as
+# much with the quotes as without, so a strip-then-match pass would have read
+# them as safe. Both were in fact already slipping through for a related reason
+# (the quote broke a literal-text pattern); see the dd/rm notes below. The leader
+# is what separates naming a command from running one, so the leader is what
+# this looks at.
+#
+# Everything not listed here gets no skip, which is the fail-closed half: an
+# unrecognised leader (eval, xargs, bash -c, a project wrapper) still blocks on a
+# quoted keyword. That is noisier than ideal and deliberately so — a false
+# negative here is a destroyed working tree, a false positive is one rephrasing.
+_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
+
+# Leaders whose heredoc body is a program in ANOTHER language, with a QUOTED
+# delimiter. Both halves are required, and each rules out a different mistake.
+#
+# Another language: the body of `python3 - <<'PY'` is Python, so a shell pattern
+# matched against it is matching prose. Issue #70's first observed false positive
+# was exactly this — a Python heredoc printing a sentence that happened to contain
+# a blocked word. These leaders are NOT in _READONLY_LEADER_RE and must not be:
+# python3 runs arbitrary code, so its own command line is judged like any other.
+# Only the body is exempt, and only from the SHELL patterns this hook knows.
+#
+# Quoted delimiter: with `<<PY` the shell expands $(...) and `...` inside the body
+# before the interpreter ever sees it, so a shell command really can hide there.
+# With `<<'PY'` no substitution happens and the body reaches the interpreter
+# verbatim. That is the difference between data and a disguised command line, so
+# the quote is the condition, not a stylistic detail.
+#
+# What this does NOT claim: that the body is safe. Python can shell out, and this
+# hook cannot read Python. It claims only that matching bash patterns against
+# non-bash source produces noise rather than safety — the guard against what the
+# script then does is the interpreter's own command line, which is still judged.
+_INTERPRETER_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(python3?|perl|ruby|node|osascript|Rscript)([[:space:]]|$)'
+
+# Drop heredoc bodies before splitting, but ONLY where the line opening the
+# heredoc is itself read-only. Without this step the body arrives as its own
+# segment whose leading word is the body text, which matches no read-only command
+# and therefore blocks — so a `cat <<EOF` of prose, or a Python script that prints
+# a sentence, trips the guard on a word it merely contains.
+#
+# The leader condition is what keeps this honest, and it is not a refinement: a
+# heredoc body is stdin, and whether stdin is DATA or a PROGRAM depends entirely
+# on what reads it. `cat <<EOF` and `python3 - <<PY` print and interpret text that
+# this hook has no business classifying as shell. `psql -d app <<SQL` EXECUTES
+# every statement in the body, so dropping it would hide a DROP SCHEMA from the
+# SQL guard — which is exactly the test that caught an earlier, leader-blind
+# version of this function.
+#
+# The heredoc's OWN line is always kept, so the command introducing it is judged
+# regardless, and a real command on a line after the closing delimiter is judged
+# on itself. Only the body in between can go.
+#
+# Both `<<DELIM` and `<<'DELIM'` are handled, and the `<<-` tab-stripping form.
+# The quoted delimiter is the one that guarantees no substitution, but that
+# distinction does not matter here: what the body means is settled by its reader,
+# not by its quoting.
+#
+# An unterminated heredoc runs to end of input. Since only a read-only leader can
+# open a stripped body at all, the most that hides is the tail of a `cat` — and
+# the opening line is still judged, so there is nothing to launder a real command
+# with.
+_strip_heredoc_bodies() {
+    local delim body_open=0 line out=""
+    while IFS= read -r line; do
+        if [ "$body_open" -eq 1 ]; then
+            # Closing delimiter: `<<-` allows leading tabs before it.
+            if [ "$(printf '%s' "$line" | sed 's/^[[:space:]]*//')" = "$delim" ]; then
+                body_open=0
+            fi
+            continue
+        fi
+        out+="$line"$'\n'
+        # Opening redirect: capture the delimiter, quoted or bare. A body may be
+        # hidden only under a read-only leader (see the psql note above), or under
+        # an interpreter whose delimiter is QUOTED, which is what stops the shell
+        # expanding a command into the body before the interpreter reads it.
+        if { grep -qE "$_READONLY_LEADER_RE" <<< "$line" ||
+             { grep -qE "$_INTERPRETER_LEADER_RE" <<< "$line" &&
+               grep -qE '<<-?[[:space:]]*('"'"'[^'"'"']+'"'"'|"[^"]+")' <<< "$line"; }; } &&
+           grep -qE '<<-?[[:space:]]*('"'"'[^'"'"']+'"'"'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)' <<< "$line"; then
+            delim=$(grep -oE '<<-?[[:space:]]*('"'"'[^'"'"']+'"'"'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)' <<< "$line" |
+                    tail -1 | sed 's/^<<-\?[[:space:]]*//; s/^['"'"'"]//; s/['"'"'"]$//')
+            [ -n "$delim" ] && body_open=1
+        fi
+    done <<< "$COMMAND"
+    printf '%s' "$out"
+}
+
 _split_segments() {
-    sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g' <<< "$COMMAND"
+    _strip_heredoc_bodies | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g'
 }
 
 # Guard: force-recursive rm of an absolute path, EXCEPT below /tmp.
@@ -106,34 +210,6 @@ _rm_hits_protected_path() {
 # throwaway target starts tripping this routinely, narrow the guard here rather
 # than working around it at the call site.
 _SQL_DESTRUCTIVE_RE='(^|[^[:alnum:]_])(DROP[[:space:]]+(TABLE|DATABASE|SCHEMA)|DROP[[:space:]]+OWNED[[:space:]]+BY|TRUNCATE)([^[:alnum:]_]|$)'
-
-# Commands that only READ or PRINT text. A destructive keyword appearing as an
-# argument to one of these is being searched for or quoted, not executed —
-# grepping for a pattern tripped the guard, and so did a commit message naming
-# one. Anchored to the segment's LEADING word, mirroring the git-merge guard
-# below: a read-only leader cannot launder a real command in a later segment,
-# because each segment is classified on its own.
-#
-# This started as an SQL-only skip (issue #67) and now serves the pattern lists
-# too (issue #70), where the same false positive was three times as common: a
-# grep for a pattern name, a word inside an echo, a commit subject. The worst of
-# those was a grep over THIS FILE — the guard blocked the investigation into the
-# guard, with no phrasing available that got past it.
-#
-# Why a leader check and not stripping quoted text, which is the obvious move:
-# quoting an operand is ordinary shell hygiene, not a signal that the text is
-# data. `rm -rf "$HOME"` and `dd if=/dev/zero of="/dev/sda"` destroy exactly as
-# much with the quotes as without, so a strip-then-match pass would have read
-# them as safe. Both were in fact already slipping through for a related reason
-# (the quote broke a literal-text pattern); see the dd/rm notes below. The leader
-# is what separates naming a command from running one, so the leader is what
-# this looks at.
-#
-# Everything not listed here gets no skip, which is the fail-closed half: an
-# unrecognised leader (eval, xargs, bash -c, a project wrapper) still blocks on a
-# quoted keyword. That is noisier than ideal and deliberately so — a false
-# negative here is a destroyed working tree, a false positive is one rephrasing.
-_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
 
 # An unqualified DELETE empties the table. The pattern this replaces was
 # "DELETE FROM.*WITHOUT.*WHERE", which matched the literal word WITHOUT and so
