@@ -1420,6 +1420,26 @@ else
 fi
 rm -rf "$repo38"
 
+# --- Scenario 39: an invalid ERE blocks, and says it was invalid (#92) ---
+# `grep -qE '['` exits 2, not 1, so an unbalanced bracket already fails CLOSED.
+# But reporting it as "did not match" diagnoses operator error as a genuine new
+# failure of the check, which sends the caller to read a log that is fine. The
+# three other block reasons are carefully distinguished; this is the fourth.
+repo39=$(make_repo)
+make_fake_gh "$repo39"
+echo "Test PR body" > "$repo39/body.md"
+JOBLOG_STATE="match"
+run_case "invalid ERE" "$repo39" "fail-allowed" \
+    --allow-failing-check "dependency-audit=GHSA-[2xqp"
+assert_contains "invalid ERE: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo39/last-output.txt")"
+assert_contains "invalid ERE: says the pattern is invalid" "is not a valid" "$(cat "$repo39/last-output.txt")"
+# Must NOT read as a non-match: the log is not the problem, the pattern is.
+assert_not_contains "invalid ERE: not reported as a non-match" "did not match the failed job log" "$(cat "$repo39/last-output.txt")"
+assert_not_contains "invalid ERE: never reports PASS" "CI_GATE: PASS" "$(cat "$repo39/last-output.txt")"
+assert_exit "invalid ERE: exit code" "1" "$(cat "$repo39/last-exit.txt")"
+assert_file_absent "invalid ERE: no merge" "$repo39/merged"
+rm -rf "$repo39"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

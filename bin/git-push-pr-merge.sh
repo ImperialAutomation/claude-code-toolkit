@@ -85,12 +85,16 @@
 #   lookup, so a matrix job whose check name carries its parameters resolves
 #   exactly like any other.
 #
-#   Three outcomes block, each with its own FAIL text, because the caller's
+#   Four outcomes block, each with its own FAIL text, because the caller's
 #   reaction differs:
 #     - the pattern did not match     -> this is a DIFFERENT failure; read the log
 #     - the log could not be read     -> expired or an API error; retry or drop it
 #     - the check has no Actions log  -> an external commit status; a pattern on
 #                                        such a check can never be satisfied
+#     - the pattern is not a valid ERE -> a typo in the caller's own flag; fix it.
+#                                        Kept separate because reporting it as a
+#                                        non-match would diagnose operator error
+#                                        as a new failure of the check
 #   The second is why the pattern form is strictly more fragile than allowing by
 #   name: "could not check" is not evidence, and a fail-closed gate must not read
 #   it as "fine". That is deliberate, not a side effect.
@@ -433,11 +437,26 @@ check_log_matches_pattern() {
 
     # grep -E, so the pattern is an ERE and a plain advisory ID works unescaped.
     # -q stops at the first match: job logs reach tens of megabytes.
-    if printf '%s' "$log_text" | grep -qE -e "$pattern"; then
-        return 0
-    fi
+    #
+    # grep's three exit statuses are all distinct here: 0 matched, 1 did not
+    # match, 2 the pattern itself is broken (an unbalanced `[`, say). All three
+    # already fail closed, because only 0 returns 0 — but 2 must not be reported
+    # as "did not match", which would diagnose a typo in the caller's own flag as
+    # a genuine new failure of the check and send them to read a log that is fine.
+    local grep_exit=0
+    printf '%s' "$log_text" | grep -qE -e "$pattern" || grep_exit=$?
 
-    PATTERN_BLOCK_REASON="$name: allow pattern did not match the failed job log"
+    case "$grep_exit" in
+        0)
+            return 0
+            ;;
+        1)
+            PATTERN_BLOCK_REASON="$name: allow pattern did not match the failed job log"
+            ;;
+        *)
+            PATTERN_BLOCK_REASON="$name: allow pattern is not a valid extended regular expression: $pattern"
+            ;;
+    esac
     return 1
 }
 

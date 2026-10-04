@@ -122,7 +122,7 @@ pattern matches. A new advisory, or a vulnerable package this PR introduces,
 stops reading as the known failure.
 
 The pattern form is deliberately more fragile than allowing by name, because a
-fail-closed gate cannot treat "could not check" as "fine". Three outcomes block,
+fail-closed gate cannot treat "could not check" as "fine". Four outcomes block,
 each with its own `CI_GATE: FAIL` text:
 
 | FAIL text | What it means | What to do |
@@ -130,6 +130,7 @@ each with its own `CI_GATE: FAIL` text:
 | `allow pattern did not match the failed job log` | The check is red for a cause the pattern does not describe | Read the log. This is the case the pattern exists to surface |
 | `could not read the job log to match the allow pattern (...)` | Log expired (90 days by default) or an API error. No evidence either way | Retry; if the log is gone for good, drop the pattern and re-confirm the cause by hand |
 | `no job log to match the allow pattern against (...)` | The check is an external commit status, not an Actions job, so it has no run log | Allow it by name alone, or make the cause visible some other way. A pattern on such a check can never be satisfied |
+| `allow pattern is not a valid extended regular expression: ...` | A typo in the flag, e.g. an unbalanced `[` | Fix the pattern. Reported separately so operator error is not mistaken for a new failure of the check |
 
 Two properties worth knowing before writing one: `<regex>` is an ERE while the
 check NAME stays literal, and the split is on the FIRST `=`, so a pattern may
