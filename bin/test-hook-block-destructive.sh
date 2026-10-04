@@ -73,6 +73,27 @@ run "rm -rf ~/Projects/x"                BLOCK
 run "rm -rf /tmp/a /usr"                 BLOCK
 run "echo cleaning && rm -rf /usr"       BLOCK
 
+# --- rm: $HOME is an operand, so the flag spelling must not matter ---
+# $HOME reaches the hook UNEXPANDED, so the operand is the literal text "$HOME",
+# which the path guard's token check did not recognise — leaving a BLOCKED_PATTERNS
+# regex pinned to the literal string "rm -rf" as the only coverage. Every ordinary
+# variation on those flags therefore walked past it, while the equivalent
+# `rm -fr /home/jan` blocked: the same action getting two answers depending on
+# flag order, which is the inconsistency this guard exists to prevent.
+run "rm -rf \$HOME"                      BLOCK
+run "rm -fr \$HOME"                      BLOCK
+run "rm -f -r \$HOME"                    BLOCK
+run "rm -rfv \$HOME"                     BLOCK
+run "rm -rf --verbose \$HOME"            BLOCK
+run "rm -rf \$HOME/Projects"             BLOCK
+run "rm -rf \${HOME}"                    BLOCK
+run "rm -rf \${HOME}/Projects"           BLOCK
+# The literal-path equivalents, pinned alongside so the two stay in agreement.
+run "rm -fr /home/jan"                   BLOCK
+run "rm -rfv /home/jan"                  BLOCK
+# Searching for the pattern must still be possible (issue #70's whole point).
+run "grep -n 'rm -fr \$HOME' bin/hook-block-destructive.sh"  ALLOW
+
 # --- rm: relative paths are ordinary build hygiene, never matched ---
 run "rm -rf ./build"                     ALLOW
 run "rm -rf build/"                      ALLOW
@@ -213,6 +234,12 @@ run "git push -f origin main"                                        BLOCK
 run "git reset --hard origin/main"                                   BLOCK
 run "git checkout -- ."                                              BLOCK
 run "git clean -fd"                                                  BLOCK
+# PID 1 is init; killing it takes the machine down. The pattern is anchored to end
+# of line ("kill -9 1$"), so this is the ONE form it matches — `kill -9 1234` is an
+# ordinary process kill and must stay allowed. Both sides pinned, because an
+# end-anchored pattern is easy to widen by accident.
+run "kill -9 1"                                                      BLOCK
+run "kill -9 1234"                                                   ALLOW
 run "killall node"                                                   BLOCK
 run "shutdown -h now"                                                BLOCK
 run "reboot"                                                         BLOCK
@@ -315,6 +342,52 @@ run_broken "renamed constant"     's|^_READONLY_LEADER_RE=|_RENAMED_LEADER_RE=|'
 # or everything, depending on the guard. Either way the guard stops meaning what
 # it says, so empty is treated as broken rather than as a permissive default.
 run_broken "emptied constant"     "s|^_SQL_DESTRUCTIVE_RE=.*|_SQL_DESTRUCTIVE_RE=''|"
+# A malformed but NON-EMPTY regex: `grep -qE` exits 2 on a pattern it cannot
+# compile, and every guard here reads any non-zero grep as "no match". So an
+# invalid regex looks exactly like a clean command and the hook exits 0 — the same
+# fail-OPEN as an unset constant, reached by a route the emptiness check above
+# cannot see. A stray paren while editing a pattern is how this actually happens.
+run_broken "malformed regex"      "s|^_SQL_DELETE_RE=.*|_SQL_DELETE_RE='(((('|"
+# A second malformed shape, so the check is not pinned to one kind of typo: an
+# inverted character range. (An interval must be written UNescaped to be invalid in
+# ERE — `a\{2,1\}` is an ordinary literal, which is itself an easy fixture mistake.)
+run_broken "malformed leader RE"  "s|^_READONLY_LEADER_RE=.*|_READONLY_LEADER_RE='[z-a]'|"
+
+# --- the deliberate limit of a text-matching guard ---
+# These ALLOW on this branch and BLOCKED on main, so they are a real reduction in
+# coverage and are pinned here rather than left to be discovered.
+#
+# The reduction is not the one it looks like. On main each of these blocked only
+# because the command TEXT happened to contain a keyword; the identical action
+# written without the literal word was allowed there too:
+#
+#   awk 'BEGIN{system("reboot")}'          main BLOCK
+#   awk 'BEGIN{system(ENVIRON["C"])}'      main ALLOW   <- same action
+#   echo killall node | sh                 main BLOCK
+#   cat script.sh | bash                   main ALLOW   <- same action
+#   echo $(reboot)                         main BLOCK
+#   echo $($CMD)                           main ALLOW   <- same action
+#
+# So main did not defend this class; it caught the spelling that named itself. A
+# guard that stops the loud form while the quiet equivalent passes is the exact
+# failure this hook's own comments describe for DROP SCHEMA (issue #67): it teaches
+# rephrasing instead of asking. Keeping the loud half only preserves the illusion.
+#
+# Reaching these properly means understanding what another interpreter will do with
+# a string — awk's system(), a shell reading stdin, command substitution — which
+# text matching cannot do at any level of effort. The honest boundary is here, and
+# ALLOW is pinned so that a future widening of the read-only leader list has to come
+# past these cases deliberately.
+run "awk 'BEGIN{system(\"reboot\")}'"                                ALLOW
+run "gh alias set boom '!killall node'"                              ALLOW
+run "echo killall node | sh"                                         ALLOW
+run "echo \$(reboot)"                                                ALLOW
+# What a read-only leader must still NOT do is excuse a real command beside it.
+# This is the property that makes the limit above a narrow one rather than a hole:
+# the skip is per segment, so the operation is judged on its own leader.
+run "awk '{print}' f.txt && reboot"                                  BLOCK
+run "gh pr list && reboot"                                           BLOCK
+run "sed -n 1p f && git push --force origin main"                    BLOCK
 
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK

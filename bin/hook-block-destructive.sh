@@ -198,15 +198,35 @@ _rm_hits_protected_path() {
         echo "$segment" | grep -qE '(^|[[:space:]])-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]|$)' || continue
         echo "$segment" | grep -qE '(^|[[:space:]])-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|$)' || continue
         for token in $segment; do
-            # SC2088 (tilde in quotes) is intentional below: we match a LITERAL
-            # ~ in the command text. Expanding it would defeat the check, since
-            # the tilde reaches this hook unexpanded.
-            # shellcheck disable=SC2088
+            # Strip any surrounding quotes the operand arrived with. Quoting a
+            # path is ordinary shell hygiene and says nothing about intent:
+            # `rm -rf "$HOME"` deletes exactly as much as the bare form. The
+            # quotes are removed only for CLASSIFYING this operand — the skip that
+            # decides data-vs-operation is the segment's leader, not quoting.
+            token=${token#[\"\']}
+            token=${token%[\"\']}
+            # SC2088 (tilde in quotes) and SC2016 ($ in single quotes) are both
+            # intentional below: these patterns match the LITERAL text "~" and
+            # "$HOME" as the command string carries it. Both reach this hook
+            # unexpanded, so expanding either one here would compare the operand
+            # against a resolved value instead of against the text actually seen,
+            # which is what the check is about.
+            # shellcheck disable=SC2088,SC2016
             case "$token" in
                 rm|-*) continue ;;
                 /tmp/?*) continue ;;   # a path UNDER /tmp: allowed
                 /*) return 0 ;;        # any other absolute path
                 '~'|'~/'*) return 0 ;; # home directory (literal ~, see above)
+                # $HOME reaches this hook UNEXPANDED, so the operand is the literal
+                # text "$HOME", matching neither /* nor ~* above. Classifying it
+                # here rather than leaving it to a BLOCKED_PATTERNS regex is what
+                # makes the check flag-order independent: the regex form had to pin
+                # the literal string "rm -rf", so `rm -fr $HOME`, `rm -rfv $HOME`
+                # and `rm -rf --verbose $HOME` all walked past it while the
+                # equivalent `rm -fr /home/jan` blocked. Same action, two answers
+                # depending on flag spelling — the inconsistency this guard exists
+                # to prevent, and the same lesson the git clean pattern learned.
+                '$HOME'|'$HOME/'*|'${HOME}'|'${HOME}/'*) return 0 ;;
             esac
         done
     done < <(_split_segments)
@@ -272,6 +292,14 @@ _sql_destructive_hit() {
 # because the exit status was a perfectly ordinary 0. Renaming a constant is the
 # realistic way in; this file renamed one while fixing issue #70.
 #
+# Being non-empty is not enough: the regex must also COMPILE. `grep -qE` exits 2
+# on a malformed pattern, and every guard here reads a non-zero grep as "no match",
+# so an invalid regex is indistinguishable from a clean command — the same fail-OPEN
+# as an unset constant, reached by a different route. A stray paren while editing a
+# pattern is the realistic way in, and the emptiness check above sails straight past
+# it. Compiling each one against a throwaway string separates "did not match" from
+# "could not be asked".
+#
 # Listed in one place rather than checked at each use, so a guard added later is
 # covered by adding its constant here instead of re-deriving the reasoning.
 for _required in _READONLY_LEADER_RE _INTERPRETER_LEADER_RE _SQL_DESTRUCTIVE_RE \
@@ -280,8 +308,18 @@ for _required in _READONLY_LEADER_RE _INTERPRETER_LEADER_RE _SQL_DESTRUCTIVE_RE 
         echo "BLOCKED by hook-block-destructive.sh: internal error — the pattern '$_required' this guard relies on is unset or empty, so the check cannot run. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
         exit 2
     fi
+    # Exit 0 (matched) and 1 (did not match) both mean the regex compiled; only 2
+    # and above signal that grep could not use it at all. The status is captured
+    # via `|| _rc=$?` because `set -e` would otherwise abort on the ordinary
+    # "did not match" case, turning a healthy pattern into a block.
+    _rc=0
+    printf '%s' '' | grep -qE "${!_required}" >/dev/null 2>&1 || _rc=$?
+    if [ "$_rc" -gt 1 ]; then
+        echo "BLOCKED by hook-block-destructive.sh: internal error — the pattern '$_required' this guard relies on is not a valid regex, so grep cannot evaluate it and every check using it would silently report 'no match'. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
+        exit 2
+    fi
 done
-unset _required
+unset _required _rc
 
 if _sql_destructive_hit; then
     echo "BLOCKED by hook-block-destructive.sh: refusing a destructive SQL statement (DROP TABLE/DATABASE/SCHEMA, DROP OWNED BY, TRUNCATE, or a DELETE FROM with no WHERE clause). All of these destroy data irreversibly, including the forms that avoid the word DATABASE. Adding a WHERE clause is fine if that is what you meant. If this targets a throwaway database, say so and ask the user to confirm — do not rephrase the statement to get past this check." >&2
@@ -295,31 +333,28 @@ fi
 
 # Patterns for destructive operations.
 #
-# Three of these were tightened after the per-segment rewrite (issue #70) exposed
+# Some of these were tightened after the per-segment rewrite (issue #70) exposed
 # them. Each had the same shape of hole: the pattern pinned LITERAL TEXT, so an
 # ordinary shell habit — quoting an operand, combining short flags — stepped
 # around it. They were found by writing the false-negative cases this change had
 # to avoid introducing, then discovering those cases already passed on main.
 #
-#   rm -rf "$HOME"              quoting the operand broke `rm -rf \$HOME`
 #   dd if=/dev/zero of="/dev/sda"  quoting the target broke `of=/dev/`
-#   git clean -fd               a combined flag broke `git clean.* -f( |$)`
+#   git clean -fd                  a combined flag broke `git clean.* -f( |$)`
+#   rm -fr $HOME                   a reordered flag broke `rm -rf \$HOME`
+#                                  (moved out of this list entirely, see below)
 #
 # The lesson generalises: a pattern that must match a FLAG should accept it in a
 # cluster, and one that must match an OPERAND should tolerate quotes around it.
-# SC2016 is intentional for the $HOME entry below: these are REGEXES matching
-# literal command text, and $HOME reaches this hook unexpanded. It must stay
-# single-quoted — written with double quotes, `$(HOME|...)` is command
-# substitution the shell runs while building the array. That happened: the
-# resulting exit 127 is neither 0 nor 2, so the hook allowed everything it should
-# have blocked. A guard whose own error means "allow" is worse than no guard,
-# which is why the trap above now converts any internal failure into a block.
-# shellcheck disable=SC2016
+#
+# The $HOME entry that used to head this list is gone, not relaxed. Tightening it
+# for quotes showed why it was the wrong mechanism: as a regex it had to pin the
+# literal string "rm -rf", so `rm -fr $HOME`, `rm -rfv $HOME` and
+# `rm -rf --verbose $HOME` all walked past it. $HOME is now classified as an
+# OPERAND in _rm_hits_protected_path(), alongside /* and ~*, which is flag-order
+# independent by construction. Keeping both would be two mechanisms for one rule,
+# and the weaker one would go on looking like coverage.
 BLOCKED_PATTERNS=(
-    # Filesystem destruction. Quotes around the operand are ordinary hygiene, not
-    # a signal of intent — `rm -rf "$HOME"` deletes exactly as much as the bare
-    # form, so both must match.
-    'rm -rf ["'"'"']?\$(HOME|\{HOME\})["'"'"']?'
     # Git destructive operations
     "git push.*--force"
     "git push.* -f( |$)"
