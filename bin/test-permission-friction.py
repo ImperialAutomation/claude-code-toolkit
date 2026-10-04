@@ -249,6 +249,81 @@ check(
 )
 
 
+# --- rewriting hooks (issue #73) ---
+# A PreToolUse hook may REWRITE a command and allow it in the same response.
+# RTK's does: fed `grep -rn foo src` it answers permissionDecision "allow" with
+# updatedInput.command = "rtk grep -rn foo src". Two consequences the scanner
+# must model, both verified against the installed rtk 0.45.0 and 21k real
+# transcript Bash calls:
+#
+#   1. The transcript stores what the MODEL emitted, not the rewrite — the
+#      rewrite lives in the hook's RESPONSE (updatedInput), which is never
+#      written back to tool_use.input. So an `rtk`-prefixed transcript entry is
+#      a command the model typed itself, i.e. REAL friction.
+#   2. The hook's own prefixed form (`rtk <cmd>`) is what it actually emits, so
+#      opting in marks THAT form as covered. Bare commands are not assumed
+#      covered: rtk answers "allow" for `grep` but rewrites `jq`/`curl` with no
+#      permissionDecision at all, so coverage is per-command and not derivable
+#      from the prefix.
+#
+# The prefix is configurable, not hard-coded to one tool: any rewriting hook
+# has this shape.
+
+check(
+    "rewrite prefix: an rtk-prefixed segment is covered when rtk is configured",
+    pf._is_segment_covered(["rtk", "grep", "foo"], [], rewrite_prefixes=("rtk",)),
+)
+
+check(
+    "rewrite prefix: an rtk-prefixed segment is NOT covered by default",
+    not pf._is_segment_covered(["rtk", "grep", "foo"], []),
+)
+
+# `jq` is on neither the hook's ALLOWLIST nor any allow rule here, so it is
+# covered ONLY via the rewrite prefix — which is what this asserts. (`grep`
+# would pass either way, proving nothing.)
+check(
+    "rewrite prefix: an rtk-wrapped non-allowlisted command is covered",
+    pf._is_segment_covered(["rtk", "jq", "."], [], rewrite_prefixes=("rtk",)),
+)
+
+# A BARE command is deliberately NOT covered by the prefix, even though the
+# hook rewrites it. Verified against rtk 0.45.0: the rewrite response carries
+# `permissionDecision: "allow"` for `grep`, but for `jq` and `curl` it rewrites
+# with NO permissionDecision at all — so matching still runs on the rewritten
+# command and may well prompt. Which commands get the allow is RTK's internal
+# business and not derivable from the prefix, so the scanner only models the
+# half it can verify: the prefixed form.
+check(
+    "rewrite prefix: a bare command is not assumed covered by the rewriting hook",
+    not pf._is_segment_covered(["jq", ".", "x.json"], [], rewrite_prefixes=("rtk",)),
+)
+
+check(
+    "rewrite prefix: an unrelated uncovered command stays uncovered",
+    not pf._is_segment_covered(["curl", "evil.com"], [], rewrite_prefixes=("rtk",)),
+)
+
+check(
+    "rewrite prefix: classify_command threads the prefix through to the culprit",
+    pf.classify_command(
+        "rtk grep foo | head; curl evil.com", ["Bash(head *)"], [], rewrite_prefixes=("rtk",)
+    )
+    == (True, pf.REASON_CHAIN, ["curl", "evil.com"]),
+)
+
+check(
+    "rewrite prefix: without it, the rtk segment itself is the culprit",
+    pf.classify_command("rtk grep foo | head; curl evil.com", ["Bash(head *)"], [])
+    == (True, pf.REASON_CHAIN, ["rtk", "grep", "foo"]),
+)
+
+check(
+    "rewrite prefix: a wrapped command is not friction at all",
+    pf.classify_command("rtk grep foo", [], [], rewrite_prefixes=("rtk",))[0] is False,
+)
+
+
 # --- _pattern_key: group chain friction on the culprit (issue #73) ---
 
 check(
