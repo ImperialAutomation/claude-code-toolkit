@@ -11,6 +11,43 @@ set -euo pipefail
 
 USAGE="Usage: docker-health-check.sh [project-dir] [--timeout SECS] [--filter PREFIX] [--project NAME]"
 
+# Exit codes:
+#   0  all containers healthy
+#   1  container issues, or no containers for the project
+#   2  usage error, or no compose file found
+#   3  the Docker daemon could not be reached
+EXIT_DAEMON=3
+
+DOCKER_ERR=""
+
+# Run a docker query, keeping its stderr instead of discarding it. Swallowing it
+# is what makes a dead daemon or an unreadable socket indistinguishable from a
+# stopped stack: both arrive as empty output, and the caller is told to start a
+# stack that is already running.
+#
+# The result goes into DOCKER_OUT rather than being echoed for `$( )` to collect:
+# a command substitution runs in a subshell, so an error message assigned there
+# would be discarded along with it, and the diagnostic this function exists to
+# preserve would be lost at exactly the moment it matters. Status is returned;
+# stdout lands in DOCKER_OUT and stderr in DOCKER_ERR.
+DOCKER_OUT=""
+docker_query() {
+  local err_file status
+  err_file=$(mktemp)
+  set +e
+  DOCKER_OUT=$("$@" 2>"$err_file")
+  status=$?
+  set -e
+  DOCKER_ERR=$(cat "$err_file")
+  rm -f "$err_file"
+  return $status
+}
+
+die_daemon_unreachable() {
+  echo "Error: cannot reach the Docker daemon: $DOCKER_ERR" >&2
+  exit "$EXIT_DAEMON"
+}
+
 PROJECT_DIR=""
 TIMEOUT=120
 FILTER=""
@@ -67,7 +104,8 @@ if [[ -n "$FILTER" ]]; then
   # become an issue, rather than disappearing into "no containers found".
   # Docker's `name=` is a substring match, so this is a pre-selection only — the
   # real prefix test is the name check in the loop below.
-  CONTAINERS_JSON=$(docker ps -a --filter "name=$FILTER" --format json 2>/dev/null || true)
+  docker_query docker ps -a --filter "name=$FILTER" --format json || die_daemon_unreachable
+  CONTAINERS_JSON="$DOCKER_OUT"
 else
   # Compose-Spec standard names in the project root. Nothing else: a file found
   # somewhere deeper is as likely to be one member of an include: set as it is to
@@ -124,10 +162,11 @@ else
   # separator. Filtering is on the label's presence, not its value — the value is
   # the entire file list, so an exact-match filter on one path finds nothing.
   if [[ -z "$COMPOSE_PROJECT" ]]; then
-    LABEL_ROWS=$(docker ps -a \
+    docker_query docker ps -a \
       --filter "label=com.docker.compose.project" \
       --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.config_files"}}' \
-      2>/dev/null || true)
+      || die_daemon_unreachable
+    LABEL_ROWS="$DOCKER_OUT"
 
     while IFS=$'\t' read -r row_project row_files; do
       [[ -z "$row_project" || -z "$row_files" ]] && continue
@@ -161,7 +200,9 @@ else
     COMPOSE_ARGS+=(-p "$COMPOSE_PROJECT")
   fi
 
-  CONTAINERS_JSON=$(docker compose "${COMPOSE_ARGS[@]}" -f "$COMPOSE_FILE" ps --format json 2>/dev/null || true)
+  docker_query docker compose "${COMPOSE_ARGS[@]}" -f "$COMPOSE_FILE" ps --format json \
+    || die_daemon_unreachable
+  CONTAINERS_JSON="$DOCKER_OUT"
 
   if [[ -z "$CONTAINERS_JSON" ]]; then
     echo "Error: no containers found for compose file $COMPOSE_REL" >&2

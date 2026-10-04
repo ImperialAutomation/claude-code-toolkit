@@ -468,6 +468,46 @@ check "--project beats label discovery" "0"  "$RC"
 check "label name not used"             "no" "$(contains "$OUT" "from-labels")"
 unset STUB_LABELS STUB_PROJECT STUB_COMPOSE
 
+echo "== 14. a broken daemon is reported as such, not as an empty stack =="
+# Swallowing Docker's stderr makes a permission problem read exactly like a
+# stopped stack, and both come out as "no containers found" with exit 1. They
+# call for opposite responses: fix your socket access, versus start the stack.
+STUB_DAEMON_ERR="permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"
+export STUB_DAEMON_ERR
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "daemon error has its own exit code" "3"   "$RC"
+check "says the daemon is unreachable"     "yes" "$(contains "$OUT" "cannot reach the Docker daemon")"
+check "keeps Docker's own message"         "yes" "$(contains "$OUT" "permission denied")"
+check "names the socket from the message"  "yes" "$(contains "$OUT" "/var/run/docker.sock")"
+check "not blamed on a stopped stack"      "no"  "$(contains "$OUT" "no containers found")"
+check "does not suggest compose up"        "no"  "$(contains "$OUT" "up -d")"
+
+# The same must hold for the --filter route, which reaches Docker by a different
+# call and would otherwise keep reporting "No containers found".
+OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
+check "filter route also exits 3"        "3"   "$RC"
+check "filter route names the daemon"    "yes" "$(contains "$OUT" "cannot reach the Docker daemon")"
+check "filter route keeps the message"   "yes" "$(contains "$OUT" "permission denied")"
+check "filter route not called empty"    "no"  "$(contains "$OUT" "No containers found")"
+
+# A daemon that is down rather than unreadable is the same class of problem.
+STUB_DAEMON_ERR="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+export STUB_DAEMON_ERR
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "daemon down exits 3"          "3"   "$RC"
+check "daemon down keeps message"    "yes" "$(contains "$OUT" "Is the docker daemon running")"
+unset STUB_DAEMON_ERR
+
+# The genuinely empty stack must keep its own distinct report: a working daemon
+# that simply has no containers for this project is exit 1, not 3.
+STUB_COMPOSE=""
+export STUB_COMPOSE
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "empty stack is still exit 1"      "1"   "$RC"
+check "empty stack says no containers"   "yes" "$(contains "$OUT" "no containers found")"
+check "empty stack blames no daemon"     "no"  "$(contains "$OUT" "cannot reach the Docker daemon")"
+unset STUB_COMPOSE
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
