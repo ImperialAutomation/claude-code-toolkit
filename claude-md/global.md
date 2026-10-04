@@ -88,6 +88,31 @@ Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug
 - `/absolute/path/.venv/bin/python ...` — `*` matcht niet over `/`
 - `python -m pytest ...` — alleen als `python` in PATH zit EN `Bash(python *)` allowed is
 
+### Werkdirectory meegeven: `env -C`, nooit `cd &&`
+
+**`cd <dir> && <cmd>` is enforced, not advisory.** `hook-auto-approve-bash.py`
+denyt elke `cd` met een commando erachter, met een hint die de alternatieven
+noemt. Ook binnen `~/Projects`, waar de hook zo'n keten vroeger stilletjes
+goedkeurde: aan een goedgekeurde `cd`-keten zie je niet af dat dezelfde vorm
+overal elders prompt, dus die uitzondering leerde juist het patroon aan dat de
+frictie veroorzaakt. Een kale `cd <dir>` zonder vervolgcommando blijft ongemoeid.
+
+Heeft een commando zijn werkdirectory echt nodig (een script dat `./.env` leest,
+`npx playwright test` dat config en specs vanaf cwd resolvet), gebruik dan de
+vorm die één commando blijft en dus gewoon matcht:
+
+| In plaats van | Gebruik |
+|---|---|
+| `cd <dir> && git ...` | `git -C <dir> ...` |
+| `cd <dir> && npm ...` | `npm --prefix <dir> ...` |
+| `cd <dir> && <iets anders>` | `env -C <dir> <iets anders>` |
+
+`env -C` wordt auto-approved onder twee voorwaarden tegelijk: `<dir>` ligt binnen
+`~/Projects`, én `<cmd>` zou op zichzelf al goedgekeurd worden. Een niet-toegestaan
+commando wordt er niet door witgewassen (`env -C <projectdir> ./start.sh` prompt
+gewoon), en een `env -C /etc cat passwd` evenmin. `bash -c "cd x && ..."` lost
+niets op; dat is net zo ongematcht als de kale `cd`.
+
 ## Code Quality
 
 - If ANY verification fails, STOP and reassess
