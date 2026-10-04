@@ -1371,6 +1371,40 @@ assert_exit "ERE pattern: exit code" "0" "$(cat "$repo37b/last-exit.txt")"
 assert_file_present "ERE pattern: merge happened" "$repo37b/merged"
 rm -rf "$repo37b"
 
+# --- Scenario 38: a pattern is re-matched on every poll while waiting (#92) ---
+# The allowed check is red for its known cause while another check is still
+# pending, so the gate keeps polling. Documents what that costs: the pattern
+# stage runs each time round, so the job log is fetched once per poll rather
+# than being cached after the first match.
+#
+# That is the conservative choice, not an oversight. A re-run of a failed job
+# replaces its log, so a cached first answer could outlive the evidence it was
+# based on — and the gate's whole contract is that a verdict is about the state
+# it just observed. The cost is bounded by --ci-timeout / --ci-poll-interval,
+# and the request is a conditional GET against a blob store.
+repo38=$(make_repo)
+make_fake_gh "$repo38"
+echo "Test PR body" > "$repo38/body.md"
+JOBLOG_STATE="match"
+run_case "pattern re-matched while pending" "$repo38" "fail-allowed-plus-pending" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p" \
+    --ci-timeout 2 --ci-poll-interval 1
+# Still blocks: the allowed check is accounted for, but `build` never finishes.
+assert_contains "repoll: CI_GATE line" "CI_GATE: TIMEOUT" "$(cat "$repo38/last-output.txt")"
+assert_contains "repoll: names the pending check" "build" "$(cat "$repo38/last-output.txt")"
+assert_not_contains "repoll: never reports PASS" "CI_GATE: PASS" "$(cat "$repo38/last-output.txt")"
+assert_file_absent "repoll: no merge" "$repo38/merged"
+# More than one fetch, i.e. the match is re-evaluated rather than cached. If
+# this ever becomes a caching decision, this assertion is the one to revisit.
+if [ "$(cat "$repo38/joblog-fetch-count")" -gt 1 ]; then
+    echo "PASS: repoll: log re-fetched each poll ($(cat "$repo38/joblog-fetch-count") fetches)"
+    pass=$((pass + 1))
+else
+    echo "FAIL: repoll: expected more than one fetch, got $(cat "$repo38/joblog-fetch-count")"
+    fail=$((fail + 1))
+fi
+rm -rf "$repo38"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
