@@ -304,6 +304,19 @@ _sql_destructive_hit() {
 # covered by adding its constant here instead of re-deriving the reasoning.
 for _required in _READONLY_LEADER_RE _INTERPRETER_LEADER_RE _SQL_DESTRUCTIVE_RE \
                  _SQL_DELETE_RE _SQL_WHERE_RE; do
+    # This emptiness check is kept for its DIAGNOSIS, not because it is the only
+    # thing standing between an empty pattern and a fail-open. Mutation testing
+    # showed both broken-constant cases still block without it, but each for a
+    # reason you would not want to debug from:
+    #
+    #   renamed  -> `set -u` aborts on the ${!_required} below and the EXIT trap
+    #               converts it, so the message is "unbound variable"
+    #   emptied  -> an empty regex matches EVERYTHING, so the SQL guard blocks
+    #               every command the user types, including `git status`
+    #
+    # Both fail closed, so neither is dangerous; both are opaque, and the second
+    # presents as "the hook has started refusing all my work". Naming the broken
+    # constant turns a confusing afternoon into one line of stderr.
     if [ -z "${!_required:-}" ]; then
         echo "BLOCKED by hook-block-destructive.sh: internal error — the pattern '$_required' this guard relies on is unset or empty, so the check cannot run. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
         exit 2
@@ -320,6 +333,23 @@ for _required in _READONLY_LEADER_RE _INTERPRETER_LEADER_RE _SQL_DESTRUCTIVE_RE 
     fi
 done
 unset _required _rc
+
+# The guards match against SEGMENTS, so a splitter that yields nothing is a
+# fail-OPEN on its own: every guard loops over what it is handed, finds no input,
+# reports "no match", and the hook exits 0. The regex assertions above cannot see
+# this — they check that the patterns are usable, not that there is anything to
+# match them against.
+#
+# Asserted here, in the parent shell, and NOT inside _split_segments. Putting it
+# there is the obvious move and silently does not work: the function runs inside a
+# `done < <(...)` process substitution, so its `exit 2` kills only the subshell
+# while the hook goes on to exit 0. That version printed this very message and
+# still allowed `killall node` — a guard that reports failing closed while failing
+# open, which is worse than the gap it was meant to close.
+if [ -n "${COMMAND//[[:space:]]/}" ] && [ -z "$(_split_segments | tr -d '[:space:]')" ]; then
+    echo "BLOCKED by hook-block-destructive.sh: internal error — the command is non-empty but could not be split into segments, so none of the checks could be applied to it. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
+    exit 2
+fi
 
 if _sql_destructive_hit; then
     echo "BLOCKED by hook-block-destructive.sh: refusing a destructive SQL statement (DROP TABLE/DATABASE/SCHEMA, DROP OWNED BY, TRUNCATE, or a DELETE FROM with no WHERE clause). All of these destroy data irreversibly, including the forms that avoid the word DATABASE. Adding a WHERE clause is fine if that is what you meant. If this targets a throwaway database, say so and ask the user to confirm — do not rephrase the statement to get past this check." >&2

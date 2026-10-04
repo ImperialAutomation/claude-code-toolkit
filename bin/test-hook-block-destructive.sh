@@ -332,6 +332,18 @@ run_broken() { # run_broken <label> <sed-expr-to-corrupt-the-hook>
 # being matched in the hook's source, not something to run here.
 # shellcheck disable=SC2016
 run_broken "unknown command"      's|^INPUT=$(cat)|this-command-does-not-exist-xyz|'
+# A splitter that yields nothing. Every guard matches against SEGMENTS, so no
+# segments means no match means exit 0 — a fail-open the regex assertions cannot
+# see, because they check that the patterns are usable, not that there is anything
+# to match them against.
+#
+# This case earns its place twice over. The first attempt at the fix lived inside
+# _split_segments, which runs in a `done < <(...)` process substitution: its
+# `exit 2` killed only the subshell, so the hook printed "Failing closed" on
+# stderr and then exited 0 anyway. Asserting on the EXIT STATUS rather than on the
+# message is exactly what catches that, which is why run_broken checks the status.
+run_broken "splitter yields nothing" '/^_split_segments()/,/^}/ s/^    _strip_heredoc_bodies.*/    printf ""/'
+
 # A renamed constant: the DEFINITION moves and the use sites keep the old name,
 # which is what a careless rename actually looks like. `set -u` fires inside the
 # guard's `done < <(...)` subshell and kills only that subshell; the loop then
