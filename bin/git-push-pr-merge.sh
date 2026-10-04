@@ -396,8 +396,18 @@ wait_for_ci_gate() {
             return 1
         fi
 
+        # Red checks split in two: the ones that block, and the ones the caller
+        # named in --allow-failing-check. `[.name] - $ARGS.positional` is an exact
+        # match on the whole name, not a substring: allowing `audit` must not also
+        # allow a future `audit-critical` that nobody has looked at.
         local fail_names
-        fail_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | map(.name) | join(",")')
+        fail_names=$(echo "$checks_json" | jq -r \
+            '[.[] | select((.bucket == "fail" or .bucket == "cancel") and ([.name] - $ARGS.positional | length) > 0)] | map(.name) | join(",")' \
+            --args "${ALLOW_FAILING[@]}")
+        local allowed_failing_names
+        allowed_failing_names=$(echo "$checks_json" | jq -r \
+            '[.[] | select((.bucket == "fail" or .bucket == "cancel") and ([.name] - $ARGS.positional | length) == 0)] | map(.name) | join(",")' \
+            --args "${ALLOW_FAILING[@]}")
         local pending_names
         pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")')
 
@@ -420,8 +430,18 @@ wait_for_ci_gate() {
             continue
         fi
 
+        # Only once nothing is pending. A red allowed check means nothing is
+        # BLOCKING, which is not the same as nothing being left to run: reporting
+        # PASS on that state would merge before the other checks had their say.
         if [[ -z "$pending_names" ]]; then
-            echo "CI_GATE: PASS"
+            if [[ -n "$allowed_failing_names" ]]; then
+                # Name the checks that were actually red, not the ones the caller
+                # permitted: the log should record what was bypassed, so a PASS
+                # carrying a stale allow list is visible rather than implied.
+                echo "CI_GATE: PASS (allowed failing: $allowed_failing_names)"
+            else
+                echo "CI_GATE: PASS"
+            fi
             return 0
         fi
 

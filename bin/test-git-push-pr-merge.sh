@@ -232,6 +232,36 @@ case "$1 $2" in
                 echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
                 exit 0
                 ;;
+            fail-allowed)
+                # One red check that the caller named in --allow-failing-check,
+                # everything else green. The realistic shape of issue #75: an
+                # advisory landed on a pinned package, so the audit is red in
+                # every PR in the repo regardless of the diff.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 1
+                ;;
+            fail-allowed-plus-other)
+                # The allowed check AND a second one are red. The second is about
+                # this diff, so the gate must still block — and must not launder
+                # the allowed name into the failure list.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"FAILURE","bucket":"fail"}]'
+                exit 1
+                ;;
+            fail-allowed-plus-pending)
+                # The allowed check is red while another is still running. Nothing
+                # is blocking YET, which is exactly the state a gate can misread
+                # as "nothing blocking, therefore green" and merge before the
+                # pending check has had its say.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"PENDING","bucket":"pending"}]'
+                exit 1
+                ;;
+            fail-allowed-cancelled)
+                # Same bypass, cancel bucket. The gate lumps fail and cancel
+                # together, so the allow list has to cover both or a cancelled
+                # allowed check blocks while a failed one does not.
+                echo '[{"name":"dependency-audit","state":"CANCELLED","bucket":"cancel"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 1
+                ;;
             object-json)
                 # Valid JSON but NOT an array — e.g. a GitHub API error body.
                 # jq's `length` succeeds on objects, so this used to pass the
@@ -749,6 +779,24 @@ assert_not_contains "malformed head: never reports PASS" "CI_GATE: PASS" "$(cat 
 assert_exit "malformed head: exit code" "1" "$(cat "$repo18/last-exit.txt")"
 assert_file_absent "malformed head: no merge" "$repo18/merged"
 rm -rf "$repo18"
+
+# --- Scenario 19: --allow-failing-check lets one named red check through (#75) ---
+# A check that is red repo-wide for a cause unrelated to the diff (an advisory on
+# a pinned package) blocked every PR in the repo. The only escape was
+# --no-ci-wait, which switches the whole gate off: no pending wait, no verdict on
+# any other check, no head matching. This flag relaxes exactly one check.
+repo19=$(make_repo)
+make_fake_gh "$repo19"
+echo "Test PR body" > "$repo19/body.md"
+run_case "allowed check red" "$repo19" "fail-allowed" --allow-failing-check "dependency-audit"
+assert_contains "allowed red: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo19/last-output.txt")"
+# The bypass has to be readable in the log. A bare PASS here would be
+# indistinguishable from a run where everything was actually green, which is a
+# weaker claim presented as the stronger one.
+assert_contains "allowed red: names what was bypassed" "allowed failing: dependency-audit" "$(cat "$repo19/last-output.txt")"
+assert_exit "allowed red: exit code" "0" "$(cat "$repo19/last-exit.txt")"
+assert_file_present "allowed red: merge happened" "$repo19/merged"
+rm -rf "$repo19"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
