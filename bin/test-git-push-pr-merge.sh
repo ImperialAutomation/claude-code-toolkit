@@ -32,6 +32,10 @@
 #   24. Flag repeated, one allowed check green -> PASS names only the red one
 #   25. All green with the flag set          -> bare PASS, no bypass note
 #   26. --allow-failing-check with no name   -> rejected before anything is pushed
+#   27. Allowed name starting with a dash    -> passed to jq as a value, not an option
+#  27b. Dash name that matches nothing       -> the real red check still blocks
+#   28. Name with spaces/dots/parens         -> matches exactly
+#  28b. Regex-ish allowed name (`.*`)        -> matches nothing, still blocks
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
@@ -269,6 +273,21 @@ case "$1 $2" in
                 # together, so the allow list has to cover both or a cancelled
                 # allowed check blocks while a failed one does not.
                 echo '[{"name":"dependency-audit","state":"CANCELLED","bucket":"cancel"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 1
+                ;;
+            fail-dashname)
+                # A red check whose name starts with a dash, alongside a second
+                # red check. Without `--args --`, jq eats the leading-dash
+                # allow-list value as one of its own options, exits 2, prints
+                # nothing, and BOTH red checks disappear from the fail list.
+                echo '[{"name":"-weird*[name]","state":"FAILURE","bucket":"fail"},{"name":"build","state":"FAILURE","bucket":"fail"}]'
+                exit 1
+                ;;
+            fail-parens-name)
+                # Real-world check names carry spaces, dots and parentheses.
+                # These must match exactly as a whole name, with no globbing or
+                # regex interpretation anywhere in the path.
+                echo '[{"name":"test (3.12)","state":"FAILURE","bucket":"fail"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
                 exit 1
                 ;;
             object-json)
@@ -924,6 +943,65 @@ assert_file_absent "empty name: no merge" "$repo26/merged"
 # Nothing may be pushed either: a rejected argument must stop before side effects.
 assert_not_contains "empty name: nothing pushed" "Pushing" "$(cat "$repo26/last-output.txt")"
 rm -rf "$repo26"
+
+# --- Scenario 27: a leading-dash check name must not be eaten by jq (#75) ---
+# The fail-open case. `jq ... --args "-weird*[name]"` without a `--` terminator
+# makes jq parse the value as its own option: exit 2, empty stdout. The fail list
+# comes back empty, set -e is suppressed inside `if ! wait_for_ci_gate`, and the
+# gate reports PASS while TWO checks are red. The allowed name here is red and
+# genuinely allowed; `build` is red and must still block.
+repo27=$(make_repo)
+make_fake_gh "$repo27"
+echo "Test PR body" > "$repo27/body.md"
+run_case "leading-dash allowed name" "$repo27" "fail-dashname" --allow-failing-check "-weird*[name]"
+assert_contains "dash name: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo27/last-output.txt")"
+assert_contains "dash name: still blocks on the other red check" "build" "$(cat "$repo27/last-output.txt")"
+assert_not_contains "dash name: never reports PASS" "CI_GATE: PASS" "$(cat "$repo27/last-output.txt")"
+assert_exit "dash name: exit code" "1" "$(cat "$repo27/last-exit.txt")"
+assert_file_absent "dash name: no merge" "$repo27/merged"
+rm -rf "$repo27"
+
+# --- Scenario 27b: a leading-dash name is still matched exactly when alone ---
+# The terminator must not break the feature it protects: with the other check
+# green, the dash-named check is bypassed and named on the PASS line.
+repo27b=$(make_repo)
+make_fake_gh "$repo27b"
+echo "Test PR body" > "$repo27b/body.md"
+run_case "leading-dash name allowed alone" "$repo27b" "fail-parens-name" --allow-failing-check "-weird*[name]"
+# That name matches nothing in this fixture, so `test (3.12)` must still block —
+# proving the dash value was passed through as a positional, not silently lost.
+assert_contains "dash unmatched: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo27b/last-output.txt")"
+assert_contains "dash unmatched: names the real red check" "test (3.12)" "$(cat "$repo27b/last-output.txt")"
+assert_exit "dash unmatched: exit code" "1" "$(cat "$repo27b/last-exit.txt")"
+assert_file_absent "dash unmatched: no merge" "$repo27b/merged"
+rm -rf "$repo27b"
+
+# --- Scenario 28: names with spaces, dots and parentheses match exactly ---
+# `test (3.12)` is an ordinary GitHub matrix job name. It must be matchable, and
+# the match must be literal: no glob, no regex.
+repo28=$(make_repo)
+make_fake_gh "$repo28"
+echo "Test PR body" > "$repo28/body.md"
+run_case "parenthesised check name" "$repo28" "fail-parens-name" --allow-failing-check "test (3.12)"
+assert_contains "parens name: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo28/last-output.txt")"
+assert_contains "parens name: names what was bypassed" "allowed failing: test (3.12)" "$(cat "$repo28/last-output.txt")"
+assert_exit "parens name: exit code" "0" "$(cat "$repo28/last-exit.txt")"
+assert_file_present "parens name: merge happened" "$repo28/merged"
+rm -rf "$repo28"
+
+# --- Scenario 28b: a regex-ish allowed name does not match by pattern ---
+# `.*` must allow nothing. If the match were ever regex-based this would wave
+# every red check through, which is the widest possible silent bypass.
+repo28b=$(make_repo)
+make_fake_gh "$repo28b"
+echo "Test PR body" > "$repo28b/body.md"
+run_case "regex-ish allowed name" "$repo28b" "fail-parens-name" --allow-failing-check ".*"
+assert_contains "regex name: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo28b/last-output.txt")"
+assert_contains "regex name: still blocks" "test (3.12)" "$(cat "$repo28b/last-output.txt")"
+assert_not_contains "regex name: never reports PASS" "CI_GATE: PASS" "$(cat "$repo28b/last-output.txt")"
+assert_exit "regex name: exit code" "1" "$(cat "$repo28b/last-exit.txt")"
+assert_file_absent "regex name: no merge" "$repo28b/merged"
+rm -rf "$repo28b"
 
 echo ""
 echo "Results: $pass passed, $fail failed"

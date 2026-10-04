@@ -113,6 +113,12 @@ Two signatures to read for:
 | `CI_GATE: PASS (allowed failing: <names>)` | A check was red and waved through. A weaker claim than a bare `CI_GATE: PASS`, and the only place the bypass is recorded |
 | A `--allow-failing-check` that outlives its cause | The named check has been bypassed on every PR since, including ones where it was red for a new reason |
 
+Both the bypassed list and the `CI_GATE: FAIL` list are comma-joined, so a check
+whose own name contains a comma is ambiguous to read back: `lint, typecheck`
+looks like two checks. The gate's decision is unaffected (matching is on whole
+names, not on the joined string) — only the printed line is ambiguous, so count
+the names against `gh pr checks` rather than splitting on commas.
+
 The second is the one that bites, because nothing expires the flag. Narrowing a
 bypass to its cause by matching the failed job's log is tracked in issue #92.
 

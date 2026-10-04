@@ -67,6 +67,9 @@
 #   vary per branch, and refusing an unmatched name would block a merge for a
 #   reason unrelated to the diff, which is the problem this flag exists to solve.
 #   The cost of that choice is that a typo reads as "allowed" and still blocks.
+#   The name is matched literally, with no globbing or regex: a name containing
+#   spaces, dots, parentheses, brackets, `*` or a leading dash matches only
+#   itself, and `.*` allows nothing.
 #
 # Worktree targeting:
 #   Without --repo this acts on the current directory. That is the right default
@@ -421,16 +424,30 @@ wait_for_ci_gate() {
         # named in --allow-failing-check. `[.name] - $ARGS.positional` is an exact
         # match on the whole name, not a substring: allowing `audit` must not also
         # allow a future `audit-critical` that nobody has looked at.
-        local fail_names
+        # `--args --` matters as much as the filter does. Without the `--`
+        # terminator, jq reads a positional value that starts with a dash as one
+        # of its OWN options: `--allow-failing-check -weird` makes jq exit 2 with
+        # "Unknown option -w" and print nothing. The command substitution below
+        # then yields an empty string, set -e is suppressed inside
+        # `if ! wait_for_ci_gate`, and an empty fail list reads as "nothing
+        # blocking" — a red check merged on a jq usage error.
+        local fail_names allowed_failing_names pending_names
+        local jq_ok=1
         fail_names=$(echo "$checks_json" | jq -r \
             '[.[] | select((.bucket == "fail" or .bucket == "cancel") and ([.name] - $ARGS.positional | length) > 0)] | map(.name) | join(",")' \
-            --args "${ALLOW_FAILING[@]}")
-        local allowed_failing_names
+            --args -- "${ALLOW_FAILING[@]}") || jq_ok=0
         allowed_failing_names=$(echo "$checks_json" | jq -r \
             '[.[] | select((.bucket == "fail" or .bucket == "cancel") and ([.name] - $ARGS.positional | length) == 0)] | map(.name) | join(",")' \
-            --args "${ALLOW_FAILING[@]}")
-        local pending_names
-        pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")')
+            --args -- "${ALLOW_FAILING[@]}") || jq_ok=0
+        pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")') || jq_ok=0
+
+        # An empty name list is only evidence of "nothing red" when jq actually
+        # succeeded. If any of the three queries failed, the lists carry no
+        # information at all, so fail closed rather than reading silence as green.
+        if [[ "$jq_ok" -eq 0 ]]; then
+            echo "CI_GATE: FAIL — unable to evaluate checks output from gh"
+            return 1
+        fi
 
         if [[ -n "$fail_names" ]]; then
             echo "CI_GATE: FAIL — $fail_names"
