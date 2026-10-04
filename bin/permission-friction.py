@@ -182,19 +182,23 @@ HOOK_DENY_REASONS = (
 # ever produces. So those are commands the model typed itself, i.e. REAL
 # friction, and an `rtk`-prefixed segment is NOT treated as covered by default.
 #
-# Opting in with --rewrite-prefix changes both halves consistently: the prefix's
-# own invocations AND the bare commands it wraps count as covered, because the
-# hook allows both. Configurable rather than hard-coded to one tool, since any
-# rewriting hook has this shape.
+# Opting in with --rewrite-prefix marks the PREFIXED form (`rtk <cmd>`) as
+# covered — that is the form the hook emits, and the one a user would allowlist
+# as `Bash(rtk *)`. A BARE command is deliberately not assumed covered: rtk
+# answers "allow" for `grep` but rewrites `jq`/`curl` with no permissionDecision
+# at all, so matching still runs on the rewritten command and may still prompt.
+# Which commands get the allow is the tool's internal business and not derivable
+# from the prefix, so only the half that is verifiable is modelled. Configurable
+# rather than hard-coded to one tool, since any rewriting hook has this shape.
 DEFAULT_REWRITE_PREFIXES = ()
 
 
 def _is_rewrite_covered(segment_tokens, rewrite_prefixes):
     """True if a rewriting hook in `rewrite_prefixes` would allow this segment.
 
-    Covers both forms the hook answers "allow" for: the segment already
-    carrying the prefix (`rtk grep ...`), and the bare command it would rewrite
-    (`grep ...`). An empty `rewrite_prefixes` disables this entirely.
+    Matches the prefixed form only (`rtk grep ...`) — see the note above on why
+    a bare wrapped command is not assumed covered. An empty `rewrite_prefixes`
+    disables this entirely.
     """
     if not rewrite_prefixes:
         return False
@@ -235,8 +239,8 @@ def _is_segment_covered(segment_tokens, allow_rules, rewrite_prefixes=()):
          accepts never reaches a prompt;
       2. an allow rule matching the segment on its own;
       3. a REWRITING hook named in `rewrite_prefixes` (see
-         `DEFAULT_REWRITE_PREFIXES`), which answers "allow" for the commands
-         it wraps as well as for its own already-prefixed form.
+         `DEFAULT_REWRITE_PREFIXES`), for a segment already carrying that
+         hook's prefix.
     """
     if _hook.is_segment_safe(segment_tokens):
         return True

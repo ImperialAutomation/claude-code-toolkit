@@ -286,9 +286,13 @@ check(
     == (True, pf.REASON_CHAIN),
 )
 
+# The culprit must be SELECTED, not just "the first segment": here the
+# substituting segment sits in the middle, so a naive `return segments[0]`
+# would answer `head` and fail.
 check(
-    "classify: the substituting segment is the culprit, not the innocent head",
-    pf.classify_command("grep -n $(cat f) x | head", _SUBST_ALLOW, _DENY)[2][0] == "grep",
+    "classify: a mid-chain substituting segment is picked out as the culprit",
+    pf.classify_command("head f | grep $(cat g) y | git status", _SUBST_ALLOW, _DENY)[2]
+    == ["grep", "$(cat", "g)", "y"],
 )
 
 check(
