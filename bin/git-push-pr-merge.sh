@@ -47,6 +47,30 @@
 #   printed, and the script exits non-zero so callers can react. Re-running
 #   with the same arguments reuses the open PR and re-runs the gate.
 #
+#   --allow-failing-check <name> (repeatable) exempts ONE named check from
+#   blocking. It exists for a check that is red repo-wide for a cause unrelated
+#   to the diff — typically a dependency audit after a new advisory lands on a
+#   pinned package, which otherwise blocks every PR in the repo, including the
+#   sub-PRs of an epic. Everything else about the gate still applies: the head
+#   must still match the pushed commit, pending checks are still waited for, and
+#   any OTHER red check still blocks. The PASS line becomes
+#   `CI_GATE: PASS (allowed failing: <names>)`, naming the checks that were
+#   actually red rather than the ones permitted, so the bypass is in the log.
+#
+#   Prefer it over --no-ci-wait, which is not a narrower version of the same
+#   thing: --no-ci-wait stops waiting for pending checks and stops looking at
+#   any check at all, so it merges on no evidence. This flag keeps the gate and
+#   subtracts one check from it.
+#
+#   The match is the exact, whole check name: allowing `audit` does not allow
+#   `audit-critical`. A name that no check carries is not an error — check names
+#   vary per branch, and refusing an unmatched name would block a merge for a
+#   reason unrelated to the diff, which is the problem this flag exists to solve.
+#   The cost of that choice is that a typo reads as "allowed" and still blocks.
+#   The name is matched literally, with no globbing or regex: a name containing
+#   spaces, dots, parentheses, brackets, `*` or a leading dash matches only
+#   itself, and `.*` allows nothing.
+#
 # Worktree targeting:
 #   Without --repo this acts on the current directory. That is the right default
 #   for a human in a shell, but wrong for an agent: an agent's working directory
@@ -65,6 +89,8 @@
 #   --body-file <path>         File containing PR body (required)
 #   --no-merge                 Create PR but don't merge (for manual review) — CI gate is skipped
 #   --no-ci-wait                Merge immediately without waiting for CI checks
+#   --allow-failing-check <name>  Do not block on this check when it is red. Exact
+#                              name, repeatable. The rest of the gate still applies
 #   --ci-timeout <secs>         Max time registered checks may stay pending (default: 900)
 #   --ci-grace <secs>           Max time checks may take to register (default: 120)
 #   --ci-poll-interval <secs>   Polling interval while waiting (default: 15, must be >= 1)
@@ -85,6 +111,11 @@ CI_WAIT=1
 CI_TIMEOUT=900
 CI_POLL_INTERVAL=15
 CI_GRACE=120
+# Check names that may be red without blocking the merge. Passed to jq as
+# positional args, never interpolated into the filter: real check names contain
+# spaces, parentheses and dots (`test (3.12)`), which a string-built filter
+# would mangle or, worse, read as jq syntax.
+ALLOW_FAILING=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -111,6 +142,18 @@ while [[ $# -gt 0 ]]; do
         --no-ci-wait)
             CI_WAIT=0
             shift
+            ;;
+        --allow-failing-check)
+            # An empty name would match a check whose name is empty — i.e. none,
+            # so the flag would read as given while allowing nothing. Silent
+            # no-ops are the wrong failure for a gate bypass: the caller believes
+            # a check is covered and the merge blocks on it anyway.
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --allow-failing-check requires a check name" >&2
+                exit 1
+            fi
+            ALLOW_FAILING+=("$2")
+            shift 2
             ;;
         --ci-timeout)
             CI_TIMEOUT="$2"
@@ -377,10 +420,34 @@ wait_for_ci_gate() {
             return 1
         fi
 
-        local fail_names
-        fail_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | map(.name) | join(",")')
-        local pending_names
-        pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")')
+        # Red checks split in two: the ones that block, and the ones the caller
+        # named in --allow-failing-check. `[.name] - $ARGS.positional` is an exact
+        # match on the whole name, not a substring: allowing `audit` must not also
+        # allow a future `audit-critical` that nobody has looked at.
+        # `--args --` matters as much as the filter does. Without the `--`
+        # terminator, jq reads a positional value that starts with a dash as one
+        # of its OWN options: `--allow-failing-check -weird` makes jq exit 2 with
+        # "Unknown option -w" and print nothing. The command substitution below
+        # then yields an empty string, set -e is suppressed inside
+        # `if ! wait_for_ci_gate`, and an empty fail list reads as "nothing
+        # blocking" — a red check merged on a jq usage error.
+        local fail_names allowed_failing_names pending_names
+        local jq_ok=1
+        fail_names=$(echo "$checks_json" | jq -r \
+            '[.[] | select((.bucket == "fail" or .bucket == "cancel") and ([.name] - $ARGS.positional | length) > 0)] | map(.name) | join(",")' \
+            --args -- "${ALLOW_FAILING[@]}") || jq_ok=0
+        allowed_failing_names=$(echo "$checks_json" | jq -r \
+            '[.[] | select((.bucket == "fail" or .bucket == "cancel") and ([.name] - $ARGS.positional | length) == 0)] | map(.name) | join(",")' \
+            --args -- "${ALLOW_FAILING[@]}") || jq_ok=0
+        pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")') || jq_ok=0
+
+        # An empty name list is only evidence of "nothing red" when jq actually
+        # succeeded. If any of the three queries failed, the lists carry no
+        # information at all, so fail closed rather than reading silence as green.
+        if [[ "$jq_ok" -eq 0 ]]; then
+            echo "CI_GATE: FAIL — unable to evaluate checks output from gh"
+            return 1
+        fi
 
         if [[ -n "$fail_names" ]]; then
             echo "CI_GATE: FAIL — $fail_names"
@@ -401,8 +468,18 @@ wait_for_ci_gate() {
             continue
         fi
 
+        # Only once nothing is pending. A red allowed check means nothing is
+        # BLOCKING, which is not the same as nothing being left to run: reporting
+        # PASS on that state would merge before the other checks had their say.
         if [[ -z "$pending_names" ]]; then
-            echo "CI_GATE: PASS"
+            if [[ -n "$allowed_failing_names" ]]; then
+                # Name the checks that were actually red, not the ones the caller
+                # permitted: the log should record what was bypassed, so a PASS
+                # carrying a stale allow list is visible rather than implied.
+                echo "CI_GATE: PASS (allowed failing: $allowed_failing_names)"
+            else
+                echo "CI_GATE: PASS"
+            fi
             return 0
         fi
 

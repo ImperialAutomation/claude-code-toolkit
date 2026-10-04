@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71).
+# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71, #75).
 #
 # Covers:
 #    1. No checks reported at all      -> CI_GATE: FAIL after grace, no merge (fail closed)
@@ -23,6 +23,19 @@
 #   16. Previous head RED, new head green  -> PASS in one invocation
 #   17. Head never catches up              -> FAIL after grace, no merge
 #   18. Unparseable `gh pr view` output     -> FAIL closed, no merge
+#   19. --allow-failing-check, that check red -> PASS names the bypass, merges
+#   20. Allowed red + another red            -> blocks, FAIL names only the other
+#   21. Allowed red + another pending        -> keeps waiting, no early merge
+#  21b. Allowed check cancelled              -> allowed too (cancel counts as red)
+#   22. Same red check, no flag              -> FAIL, no merge (the list is opt-in)
+#   23. Allowed name is a substring only     -> still blocks (exact match)
+#   24. Flag repeated, one allowed check green -> PASS names only the red one
+#   25. All green with the flag set          -> bare PASS, no bypass note
+#   26. --allow-failing-check with no name   -> rejected before anything is pushed
+#   27. Allowed name starting with a dash    -> passed to jq as a value, not an option
+#  27b. Dash name that matches nothing       -> the real red check still blocks
+#   28. Name with spaces/dots/parens         -> matches exactly
+#  28b. Regex-ish allowed name (`.*`)        -> matches nothing, still blocks
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
@@ -231,6 +244,51 @@ case "$1 $2" in
                 fi
                 echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
                 exit 0
+                ;;
+            fail-allowed)
+                # One red check that the caller named in --allow-failing-check,
+                # everything else green. The realistic shape of issue #75: an
+                # advisory landed on a pinned package, so the audit is red in
+                # every PR in the repo regardless of the diff.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 1
+                ;;
+            fail-allowed-plus-other)
+                # The allowed check AND a second one are red. The second is about
+                # this diff, so the gate must still block — and must not launder
+                # the allowed name into the failure list.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"FAILURE","bucket":"fail"}]'
+                exit 1
+                ;;
+            fail-allowed-plus-pending)
+                # The allowed check is red while another is still running. Nothing
+                # is blocking YET, which is exactly the state a gate can misread
+                # as "nothing blocking, therefore green" and merge before the
+                # pending check has had its say.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"PENDING","bucket":"pending"}]'
+                exit 1
+                ;;
+            fail-allowed-cancelled)
+                # Same bypass, cancel bucket. The gate lumps fail and cancel
+                # together, so the allow list has to cover both or a cancelled
+                # allowed check blocks while a failed one does not.
+                echo '[{"name":"dependency-audit","state":"CANCELLED","bucket":"cancel"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 1
+                ;;
+            fail-dashname)
+                # A red check whose name starts with a dash, alongside a second
+                # red check. Without `--args --`, jq eats the leading-dash
+                # allow-list value as one of its own options, exits 2, prints
+                # nothing, and BOTH red checks disappear from the fail list.
+                echo '[{"name":"-weird*[name]","state":"FAILURE","bucket":"fail"},{"name":"build","state":"FAILURE","bucket":"fail"}]'
+                exit 1
+                ;;
+            fail-parens-name)
+                # Real-world check names carry spaces, dots and parentheses.
+                # These must match exactly as a whole name, with no globbing or
+                # regex interpretation anywhere in the path.
+                echo '[{"name":"test (3.12)","state":"FAILURE","bucket":"fail"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 1
                 ;;
             object-json)
                 # Valid JSON but NOT an array — e.g. a GitHub API error body.
@@ -749,6 +807,201 @@ assert_not_contains "malformed head: never reports PASS" "CI_GATE: PASS" "$(cat 
 assert_exit "malformed head: exit code" "1" "$(cat "$repo18/last-exit.txt")"
 assert_file_absent "malformed head: no merge" "$repo18/merged"
 rm -rf "$repo18"
+
+# --- Scenario 19: --allow-failing-check lets one named red check through (#75) ---
+# A check that is red repo-wide for a cause unrelated to the diff (an advisory on
+# a pinned package) blocked every PR in the repo. The only escape was
+# --no-ci-wait, which switches the whole gate off: no pending wait, no verdict on
+# any other check, no head matching. This flag relaxes exactly one check.
+repo19=$(make_repo)
+make_fake_gh "$repo19"
+echo "Test PR body" > "$repo19/body.md"
+run_case "allowed check red" "$repo19" "fail-allowed" --allow-failing-check "dependency-audit"
+assert_contains "allowed red: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo19/last-output.txt")"
+# The bypass has to be readable in the log. A bare PASS here would be
+# indistinguishable from a run where everything was actually green, which is a
+# weaker claim presented as the stronger one.
+assert_contains "allowed red: names what was bypassed" "allowed failing: dependency-audit" "$(cat "$repo19/last-output.txt")"
+assert_exit "allowed red: exit code" "0" "$(cat "$repo19/last-exit.txt")"
+assert_file_present "allowed red: merge happened" "$repo19/merged"
+rm -rf "$repo19"
+
+# --- Scenario 20: allowed red + another red -> still blocks, names only the other ---
+# The flag relaxes one check, not the gate. The second failure is about this diff
+# and must block exactly as before.
+repo20=$(make_repo)
+make_fake_gh "$repo20"
+echo "Test PR body" > "$repo20/body.md"
+run_case "allowed red plus other red" "$repo20" "fail-allowed-plus-other" --allow-failing-check "dependency-audit"
+assert_contains "allowed+other: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo20/last-output.txt")"
+assert_contains "allowed+other: names the blocking check" "build" "$(cat "$repo20/last-output.txt")"
+# The allowed name must not appear in the FAIL list either. Listing it there
+# would send the caller to investigate the one check they already decided about.
+assert_not_contains "allowed+other: FAIL list excludes the allowed check" "CI_GATE: FAIL — dependency-audit" "$(cat "$repo20/last-output.txt")"
+assert_exit "allowed+other: exit code" "1" "$(cat "$repo20/last-exit.txt")"
+assert_file_absent "allowed+other: no merge" "$repo20/merged"
+rm -rf "$repo20"
+
+# --- Scenario 21: allowed red + another pending -> keeps waiting, no early merge ---
+# The subtle one. With the allowed check excluded there is nothing BLOCKING, and a
+# gate that reads "nothing blocking" as "green" merges while a check is still
+# running. Nothing in scenarios 19-20 would catch that: both have a settled set.
+repo21=$(make_repo)
+make_fake_gh "$repo21"
+echo "Test PR body" > "$repo21/body.md"
+run_case "allowed red plus pending" "$repo21" "fail-allowed-plus-pending" \
+    --allow-failing-check "dependency-audit" --ci-timeout 2 --ci-poll-interval 1
+assert_contains "allowed+pending: CI_GATE line" "CI_GATE: TIMEOUT" "$(cat "$repo21/last-output.txt")"
+assert_contains "allowed+pending: names the pending check" "build" "$(cat "$repo21/last-output.txt")"
+assert_not_contains "allowed+pending: never reports PASS" "CI_GATE: PASS" "$(cat "$repo21/last-output.txt")"
+assert_exit "allowed+pending: exit code" "1" "$(cat "$repo21/last-exit.txt")"
+assert_file_absent "allowed+pending: no merge" "$repo21/merged"
+rm -rf "$repo21"
+
+# --- Scenario 21b: a cancelled allowed check is allowed too ---
+# The gate treats cancel as a failure, so the allow list has to cover it. A
+# cancelled run is the common shape when a repo-wide check is cancelled by a
+# concurrency group rather than failing on its merits.
+repo21b=$(make_repo)
+make_fake_gh "$repo21b"
+echo "Test PR body" > "$repo21b/body.md"
+run_case "allowed check cancelled" "$repo21b" "fail-allowed-cancelled" --allow-failing-check "dependency-audit"
+assert_contains "allowed cancel: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo21b/last-output.txt")"
+assert_contains "allowed cancel: names what was bypassed" "allowed failing: dependency-audit" "$(cat "$repo21b/last-output.txt")"
+assert_file_present "allowed cancel: merge happened" "$repo21b/merged"
+rm -rf "$repo21b"
+
+# --- Scenario 22: the allow list is opt-in -> same state blocks without the flag ---
+# Guards the default. If the jq partition ever treated an empty allow list as
+# "allow everything", every scenario above would still pass and the gate would
+# merge every red PR in the repo.
+repo22=$(make_repo)
+make_fake_gh "$repo22"
+echo "Test PR body" > "$repo22/body.md"
+run_case "no flag, same red check" "$repo22" "fail-allowed"
+assert_contains "no flag: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo22/last-output.txt")"
+assert_contains "no flag: names the red check" "dependency-audit" "$(cat "$repo22/last-output.txt")"
+assert_not_contains "no flag: never reports PASS" "CI_GATE: PASS" "$(cat "$repo22/last-output.txt")"
+assert_exit "no flag: exit code" "1" "$(cat "$repo22/last-exit.txt")"
+assert_file_absent "no flag: no merge" "$repo22/merged"
+rm -rf "$repo22"
+
+# --- Scenario 23: the match is exact, not a substring ---
+# `--allow-failing-check audit` must not cover `dependency-audit`. A substring
+# match would silently widen every bypass as the repo grows checks.
+repo23=$(make_repo)
+make_fake_gh "$repo23"
+echo "Test PR body" > "$repo23/body.md"
+run_case "partial name does not match" "$repo23" "fail-allowed" --allow-failing-check "audit"
+assert_contains "exact match: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo23/last-output.txt")"
+assert_contains "exact match: still blocks on the full name" "dependency-audit" "$(cat "$repo23/last-output.txt")"
+assert_exit "exact match: exit code" "1" "$(cat "$repo23/last-exit.txt")"
+assert_file_absent "exact match: no merge" "$repo23/merged"
+rm -rf "$repo23"
+
+# --- Scenario 24: repeatable, and a green allowed check is not an error ---
+# Two names, only one of them red. The green one must not produce a bypass note
+# (nothing was bypassed), and an allowed name that no check carries is fine —
+# check names vary per branch, so an unmatched name must not block.
+repo24=$(make_repo)
+make_fake_gh "$repo24"
+echo "Test PR body" > "$repo24/body.md"
+run_case "repeatable flag" "$repo24" "fail-allowed" \
+    --allow-failing-check "dependency-audit" --allow-failing-check "licence-scan"
+assert_contains "repeatable: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo24/last-output.txt")"
+assert_contains "repeatable: names only the red one" "allowed failing: dependency-audit" "$(cat "$repo24/last-output.txt")"
+assert_not_contains "repeatable: green allowed check not listed as bypassed" "licence-scan" "$(cat "$repo24/last-output.txt")"
+assert_exit "repeatable: exit code" "0" "$(cat "$repo24/last-exit.txt")"
+assert_file_present "repeatable: merge happened" "$repo24/merged"
+rm -rf "$repo24"
+
+# --- Scenario 25: an all-green run still reports a bare PASS ---
+# The bypass note is conditional. If it leaked onto every PASS the log would
+# claim a bypass that never happened, which is the same misreporting as a bare
+# PASS on a bypassed run, pointing the other way.
+repo25=$(make_repo)
+make_fake_gh "$repo25"
+echo "Test PR body" > "$repo25/body.md"
+run_case "green with flag set" "$repo25" "pass" --allow-failing-check "dependency-audit"
+assert_contains "green with flag: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo25/last-output.txt")"
+assert_not_contains "green with flag: no bypass note" "allowed failing" "$(cat "$repo25/last-output.txt")"
+assert_exit "green with flag: exit code" "0" "$(cat "$repo25/last-exit.txt")"
+assert_file_present "green with flag: merge happened" "$repo25/merged"
+rm -rf "$repo25"
+
+# --- Scenario 26: --allow-failing-check with no name is rejected up front ---
+# An empty name matches a check named "", i.e. none. The flag would read as given
+# while allowing nothing, and the merge would block on the check the caller
+# believed was covered.
+repo26=$(make_repo)
+make_fake_gh "$repo26"
+echo "Test PR body" > "$repo26/body.md"
+run_case "empty allowed name" "$repo26" "fail-allowed" --allow-failing-check ""
+assert_contains "empty name: rejected" "--allow-failing-check requires a check name" "$(cat "$repo26/last-output.txt")"
+assert_exit "empty name: exit code" "1" "$(cat "$repo26/last-exit.txt")"
+assert_file_absent "empty name: no merge" "$repo26/merged"
+# Nothing may be pushed either: a rejected argument must stop before side effects.
+assert_not_contains "empty name: nothing pushed" "Pushing" "$(cat "$repo26/last-output.txt")"
+rm -rf "$repo26"
+
+# --- Scenario 27: a leading-dash check name must not be eaten by jq (#75) ---
+# The fail-open case. `jq ... --args "-weird*[name]"` without a `--` terminator
+# makes jq parse the value as its own option: exit 2, empty stdout. The fail list
+# comes back empty, set -e is suppressed inside `if ! wait_for_ci_gate`, and the
+# gate reports PASS while TWO checks are red. The allowed name here is red and
+# genuinely allowed; `build` is red and must still block.
+repo27=$(make_repo)
+make_fake_gh "$repo27"
+echo "Test PR body" > "$repo27/body.md"
+run_case "leading-dash allowed name" "$repo27" "fail-dashname" --allow-failing-check "-weird*[name]"
+assert_contains "dash name: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo27/last-output.txt")"
+assert_contains "dash name: still blocks on the other red check" "build" "$(cat "$repo27/last-output.txt")"
+assert_not_contains "dash name: never reports PASS" "CI_GATE: PASS" "$(cat "$repo27/last-output.txt")"
+assert_exit "dash name: exit code" "1" "$(cat "$repo27/last-exit.txt")"
+assert_file_absent "dash name: no merge" "$repo27/merged"
+rm -rf "$repo27"
+
+# --- Scenario 27b: a leading-dash name is still matched exactly when alone ---
+# The terminator must not break the feature it protects: with the other check
+# green, the dash-named check is bypassed and named on the PASS line.
+repo27b=$(make_repo)
+make_fake_gh "$repo27b"
+echo "Test PR body" > "$repo27b/body.md"
+run_case "leading-dash name allowed alone" "$repo27b" "fail-parens-name" --allow-failing-check "-weird*[name]"
+# That name matches nothing in this fixture, so `test (3.12)` must still block —
+# proving the dash value was passed through as a positional, not silently lost.
+assert_contains "dash unmatched: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo27b/last-output.txt")"
+assert_contains "dash unmatched: names the real red check" "test (3.12)" "$(cat "$repo27b/last-output.txt")"
+assert_exit "dash unmatched: exit code" "1" "$(cat "$repo27b/last-exit.txt")"
+assert_file_absent "dash unmatched: no merge" "$repo27b/merged"
+rm -rf "$repo27b"
+
+# --- Scenario 28: names with spaces, dots and parentheses match exactly ---
+# `test (3.12)` is an ordinary GitHub matrix job name. It must be matchable, and
+# the match must be literal: no glob, no regex.
+repo28=$(make_repo)
+make_fake_gh "$repo28"
+echo "Test PR body" > "$repo28/body.md"
+run_case "parenthesised check name" "$repo28" "fail-parens-name" --allow-failing-check "test (3.12)"
+assert_contains "parens name: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo28/last-output.txt")"
+assert_contains "parens name: names what was bypassed" "allowed failing: test (3.12)" "$(cat "$repo28/last-output.txt")"
+assert_exit "parens name: exit code" "0" "$(cat "$repo28/last-exit.txt")"
+assert_file_present "parens name: merge happened" "$repo28/merged"
+rm -rf "$repo28"
+
+# --- Scenario 28b: a regex-ish allowed name does not match by pattern ---
+# `.*` must allow nothing. If the match were ever regex-based this would wave
+# every red check through, which is the widest possible silent bypass.
+repo28b=$(make_repo)
+make_fake_gh "$repo28b"
+echo "Test PR body" > "$repo28b/body.md"
+run_case "regex-ish allowed name" "$repo28b" "fail-parens-name" --allow-failing-check ".*"
+assert_contains "regex name: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo28b/last-output.txt")"
+assert_contains "regex name: still blocks" "test (3.12)" "$(cat "$repo28b/last-output.txt")"
+assert_not_contains "regex name: never reports PASS" "CI_GATE: PASS" "$(cat "$repo28b/last-output.txt")"
+assert_exit "regex name: exit code" "1" "$(cat "$repo28b/last-exit.txt")"
+assert_file_absent "regex name: no merge" "$repo28b/merged"
+rm -rf "$repo28b"
 
 echo ""
 echo "Results: $pass passed, $fail failed"

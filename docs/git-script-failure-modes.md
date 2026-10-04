@@ -93,6 +93,35 @@ Either make the slow check required via branch protection, so GitHub's own merge
 button blocks on it regardless of what this script concluded, or run with
 `--no-merge` and merge after reading the PR's checks yourself.
 
+## `git-push-pr-merge.sh` — an allowed failing check is allowed by name only
+
+`--allow-failing-check <name>` exempts one named check from blocking. It is
+narrower than `--no-ci-wait` in every respect — the head still has to match the
+pushed commit, pending checks are still waited for, any other red check still
+blocks — but what it allows, it allows unconditionally.
+
+The flag is opened for a specific cause: an advisory on a pinned package makes
+the dependency audit red in every PR. Once it is in a command line, or in an
+orchestrator's prompt, a **different** failure of that same check also passes. A
+new critical advisory, or a genuinely vulnerable package the PR itself adds,
+reads identically to the known one.
+
+Two signatures to read for:
+
+| Signature | What it means |
+|---|---|
+| `CI_GATE: PASS (allowed failing: <names>)` | A check was red and waved through. A weaker claim than a bare `CI_GATE: PASS`, and the only place the bypass is recorded |
+| A `--allow-failing-check` that outlives its cause | The named check has been bypassed on every PR since, including ones where it was red for a new reason |
+
+The second is the one that bites, because nothing expires the flag. Narrowing a
+bypass to its cause by matching the failed job's log is tracked in issue #92.
+
+Both the bypassed list and the `CI_GATE: FAIL` list are comma-joined, so a check
+whose own name contains a comma is ambiguous to read back: `lint, typecheck`
+looks like two checks. The gate's decision is unaffected (matching is on whole
+names, not on the joined string) — only the printed line is ambiguous, so count
+the names against `gh pr checks` rather than splitting on commas.
+
 ## How to apply
 
 - After **every** `git-commit.sh`, run `git log --oneline -1`. Treat `ok N files
@@ -104,3 +133,10 @@ button blocks on it regardless of what this script concluded, or run with
 - `CI_GATE: PASS` means every check the gate could see on the pushed commit was
   green, not that every check that will eventually run has. In a repo with
   staggered check triggers, back it with branch protection or merge by hand.
+- Before adding `--allow-failing-check`, confirm the check is red on the base
+  branch too. That is what distinguishes "red repo-wide" from "red because of
+  this diff", and it is the only check on the flag's premise.
+- `CI_GATE: PASS (allowed failing: ...)` means something was red and waved
+  through by name. Treat the named checks as unverified, drop the flag once the
+  cause that justified it is fixed, and when the line appears in a merge you did
+  not expect it on, read that check's log before trusting the merge.
