@@ -249,6 +249,61 @@ check(
 )
 
 
+# --- a segment is never "covered" by a rule that glob-matched substitution ---
+# An allow rule is matched against the segment's raw text, so `Bash(grep *)`
+# happily matches `grep -n $(cat f) x`. The hook refuses such a segment, and
+# permission matching does not see through it either, so the command really
+# does prompt — it must not be written off as covered just because the glob hit.
+
+check(
+    "coverage: command substitution in a segment defeats an allow-rule match",
+    not pf._is_segment_covered(["grep", "-n", "$(cat", "f)", "x"], ["Bash(grep *)"]),
+)
+
+check(
+    "coverage: process substitution in a segment defeats an allow-rule match",
+    not pf._is_segment_covered(["grep", "-n", "x", "<(cat", "f)"], ["Bash(grep *)"]),
+)
+
+check(
+    "coverage: a heredoc in a segment defeats an allow-rule match",
+    not pf._is_segment_covered(["cat", "<<", "EOF"], ["Bash(cat *)"]),
+)
+
+check(
+    "coverage: a plain segment is still covered by its allow rule",
+    pf._is_segment_covered(["curl", "https://example.com"], ["Bash(curl *)"]),
+)
+
+# End-to-end: the whole chain must still be reported, with the substituting
+# segment named as the culprit. Before this fix these returned (False, None,
+# None) — no friction at all — while the hook declined to approve them.
+_SUBST_ALLOW = ["Bash(grep *)", "Bash(head *)", "Bash(git *)"]
+
+check(
+    "classify: a chain whose segments all glob-match but one substitutes still prompts",
+    pf.classify_command("grep -n $(cat f) x | head", _SUBST_ALLOW, _DENY)[:2]
+    == (True, pf.REASON_CHAIN),
+)
+
+check(
+    "classify: the substituting segment is the culprit, not the innocent head",
+    pf.classify_command("grep -n $(cat f) x | head", _SUBST_ALLOW, _DENY)[2][0] == "grep",
+)
+
+check(
+    "classify: process substitution in a chain still prompts",
+    pf.classify_command("grep -n x <(cat f) | head", _SUBST_ALLOW, _DENY)[:2]
+    == (True, pf.REASON_CHAIN),
+)
+
+check(
+    "classify: substitution in a LATER chain segment still prompts",
+    pf.classify_command("git log | head; grep -n x $(echo f)", _SUBST_ALLOW, _DENY)[:2]
+    == (True, pf.REASON_CHAIN),
+)
+
+
 # --- rewriting hooks (issue #73) ---
 # A PreToolUse hook may REWRITE a command and allow it in the same response.
 # RTK's does: fed `grep -rn foo src` it answers permissionDecision "allow" with

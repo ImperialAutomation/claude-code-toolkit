@@ -242,6 +242,20 @@ def _is_segment_covered(segment_tokens, allow_rules, rewrite_prefixes=()):
         return True
     if _is_rewrite_covered(segment_tokens, rewrite_prefixes):
         return True
+
+    # An allow rule is glob-matched against the segment's RAW text, so
+    # `Bash(grep *)` matches `grep -n $(cat f) x`. That match is meaningless
+    # here: the hook refuses a segment carrying substitution or a heredoc, and
+    # permission matching does not see through one either, so the command does
+    # reach a prompt. Treating the glob hit as coverage would silently drop it
+    # from the report.
+    if (
+        _hook.has_command_substitution(segment_tokens)
+        or _hook.has_process_substitution(segment_tokens)
+        or _hook.has_heredoc(segment_tokens)
+    ):
+        return False
+
     return command_matches_any_rule(" ".join(segment_tokens), allow_rules)
 
 
