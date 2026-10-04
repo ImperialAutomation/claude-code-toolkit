@@ -25,11 +25,27 @@
 #   CHECKLIST_PATH_MATCH   Glob matched against $PWD, used when the command has
 #                          no --repo. Optional; no PWD fallback if unset.
 #   CHECKLIST_CMD_MATCH    Extended regex selecting the commands to inspect.
-#                          Default: bare `gh pr create|edit`. Override when the
-#                          project opens PRs through a wrapper script: the
-#                          wrapper's own name never contains `gh pr create`, so
-#                          the default silently skips the very call that needs
-#                          checking.
+#                          Default: bare `gh pr create|edit`, anchored to
+#                          COMMAND POSITION — start of string or just after a
+#                          `;`/`&`/`|` separator, allowing leading `VAR=value`
+#                          assignments. Override when the project opens PRs
+#                          through a wrapper script: the wrapper's own name
+#                          never contains `gh pr create`, so the default
+#                          silently skips the very call that needs checking.
+#
+#                          An override MUST keep the anchor. Matching anywhere
+#                          in the string (e.g. a leading `(^|[;&|]|\s)`, which
+#                          starts a match after ANY whitespace) also fires when
+#                          the name appears as an ARGUMENT rather than as the
+#                          command being run — so `ls ~/.claude/bin/ pr.sh` and
+#                          `grep -n x ~/.claude/bin/pr.sh`, both read-only, get
+#                          blocked with "pass the PR body via --body-file".
+#                          Slot the wrapper's name into the default's anchor:
+#
+#   export CHECKLIST_CMD_MATCH='(^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*=[^ ]*\s+)*([^ ]*my-pr-wrapper\.sh|gh\s+pr\s+(create|edit))\b'
+#
+#                          `[^ ]*` before the script name covers every spelling
+#                          of its path (`~/.claude/bin/`, `bin/`, bare).
 #   CHECKLIST_START        Opening marker. Default: <!-- AGENT-REVIEW:START -->
 #   CHECKLIST_END          Closing marker. Default: <!-- AGENT-REVIEW:END -->
 #   CHECKLIST_TEMPLATE     Template path quoted in error messages.
@@ -56,7 +72,7 @@ set -euo pipefail
 
 REPO_MATCH="${CHECKLIST_REPO_MATCH:-}"
 PATH_MATCH="${CHECKLIST_PATH_MATCH:-}"
-CMD_MATCH="${CHECKLIST_CMD_MATCH:-(^|[;&|]|\s)gh\s+pr\s+(create|edit)\b}"
+CMD_MATCH="${CHECKLIST_CMD_MATCH:-(^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*=[^ ]*\s+)*gh\s+pr\s+(create|edit)\b}"
 START="${CHECKLIST_START:-<!-- AGENT-REVIEW:START -->}"
 END="${CHECKLIST_END:-<!-- AGENT-REVIEW:END -->}"
 TEMPLATE="${CHECKLIST_TEMPLATE:-.github/PULL_REQUEST_TEMPLATE.md}"
