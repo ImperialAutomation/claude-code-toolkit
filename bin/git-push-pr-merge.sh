@@ -20,11 +20,28 @@
 #   they all pass, one fails, or a deadline elapses. The gate FAILS CLOSED: it
 #   only merges on positive evidence that every check is green.
 #
+#   Checks are matched to the pushed commit. The SHA is recorded right after the
+#   push, and every poll first reads the PR's head commit (`gh pr view --json
+#   headRefOid`); a check set is only judged once that head IS the pushed SHA.
+#   Without this the gate judged whatever came back, which for the first seconds
+#   after a push to an EXISTING PR is the previous head's completed check set —
+#   wrong in both directions (issue #71). A stale green then merged the new
+#   commit before any of its checks had started, which is a fail-OPEN hole in a
+#   gate whose whole contract is to fail closed.
+#
 #   Checks do not exist for the first few seconds after a push — GitHub has to
 #   create the runs. That gap is a separate --ci-grace deadline (default 120s),
 #   not a reason to skip: if no checks appear within it the gate prints
-#   `CI_GATE: FAIL — no checks appeared` and does not merge. Use --no-ci-wait
-#   for repos that genuinely have no CI (this toolkit repo is one).
+#   `CI_GATE: FAIL — no checks appeared` and does not merge. A head that never
+#   catches up with the push shares that deadline, for the same reason: it is a
+#   registration gap, not a verdict. Use --no-ci-wait for repos that genuinely
+#   have no CI (this toolkit repo is one).
+#
+#   One race is deliberately NOT handled: a head that matches while only SOME of
+#   its runs have registered, all of them green. GitHub does not publish how many
+#   runs to expect for a commit, so no API answers "is this set complete yet".
+#   An empty set is covered by --ci-grace; a partial one is indistinguishable
+#   from a finished one. See docs/git-script-failure-modes.md.
 #
 #   On FAIL/TIMEOUT the PR is left open, a `CI_GATE: FAIL|TIMEOUT` line is
 #   printed, and the script exits non-zero so callers can react. Re-running
@@ -216,14 +233,19 @@ fi
 # non-zero on FAIL/TIMEOUT so the caller can bail before merging.
 #
 # Design principle: fail closed. Every branch that cannot positively establish
-# "all checks green" must block the merge. The previous version failed open on
-# "no checks reported" and merged PRs three seconds before their checks even
-# started (issue #32).
+# "all checks green ON THE PUSHED COMMIT" must block the merge. Two fail-open
+# holes have been closed here, and both looked like positive evidence:
+#   - "no checks reported" was read as "no CI", merging PRs three seconds before
+#     their checks even started (issue #32).
+#   - a check set belonging to the PREVIOUS head was judged as if it were this
+#     commit's, so a green predecessor merged an unchecked commit (issue #71).
+# The lesson both share: evidence has to be attributed before it is weighed.
 #
 # Two separate deadlines:
-#   CI_GRACE   — how long checks may take to REGISTER. GitHub creates check runs
-#                a few seconds after the push, so an empty set right after
-#                `gh pr create` means "not yet", not "this repo has no CI".
+#   CI_GRACE   — how long the evidence may take to EXIST for the pushed commit.
+#                Covers both an empty check set and a PR head that still lags the
+#                push; GitHub needs a few seconds for either, so right after a
+#                push both mean "not yet", not "nothing to wait for".
 #   CI_TIMEOUT — how long registered checks may stay pending.
 #
 # `gh pr checks` exit codes (see `gh pr checks --help`):
