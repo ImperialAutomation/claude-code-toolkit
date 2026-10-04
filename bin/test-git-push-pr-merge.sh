@@ -1154,6 +1154,107 @@ assert_file_present "pattern match: log was fetched" "$repo30/joblog-fetch-count
 assert_contains "pattern match: fetched the allowed check's job" "/actions/jobs/9001/logs" "$(cat "$repo30/joblog-endpoints")"
 rm -rf "$repo30"
 
+# --- Scenario 31: allowed check red, log does NOT match -> blocks (#92) ---
+# The whole point of the issue. The audit is red for a NEW advisory on a
+# different package; by name alone this is indistinguishable from the known
+# cause, and #75's flag would merge it. The FAIL line must say the pattern did
+# not match, not just "build failed", so the caller knows to read the log rather
+# than assume a flake.
+repo31=$(make_repo)
+make_fake_gh "$repo31"
+echo "Test PR body" > "$repo31/body.md"
+JOBLOG_STATE="nomatch"
+run_case "pattern does not match log" "$repo31" "fail-allowed" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p"
+assert_contains "pattern nomatch: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo31/last-output.txt")"
+assert_contains "pattern nomatch: says the pattern missed" "allow pattern did not match" "$(cat "$repo31/last-output.txt")"
+assert_contains "pattern nomatch: names the check" "dependency-audit" "$(cat "$repo31/last-output.txt")"
+assert_not_contains "pattern nomatch: never reports PASS" "CI_GATE: PASS" "$(cat "$repo31/last-exit.txt")"
+assert_not_contains "pattern nomatch: no bypass note" "allowed failing" "$(cat "$repo31/last-output.txt")"
+assert_exit "pattern nomatch: exit code" "1" "$(cat "$repo31/last-exit.txt")"
+assert_file_absent "pattern nomatch: no merge" "$repo31/merged"
+rm -rf "$repo31"
+
+# --- Scenario 32: the job log cannot be read -> blocks, says so (#92) ---
+# Logs expire after 90 days and the API has outages. "Could not check" is not
+# evidence that this is the known failure, so a fail-closed gate must block —
+# which is what makes the pattern form deliberately more fragile than #75's.
+# The message distinguishes it from a genuine non-match: the reactions differ
+# (retry or drop the pattern, versus read the log).
+repo32=$(make_repo)
+make_fake_gh "$repo32"
+echo "Test PR body" > "$repo32/body.md"
+JOBLOG_STATE="fetch-fail"
+run_case "job log fetch fails" "$repo32" "fail-allowed" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p"
+assert_contains "log unreadable: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo32/last-output.txt")"
+assert_contains "log unreadable: says the log could not be read" "could not read the job log" "$(cat "$repo32/last-output.txt")"
+assert_contains "log unreadable: names the check" "dependency-audit" "$(cat "$repo32/last-output.txt")"
+# Must NOT read as a non-match: that would send the caller to read a log that
+# was never retrieved.
+assert_not_contains "log unreadable: not reported as a non-match" "did not match" "$(cat "$repo32/last-output.txt")"
+assert_not_contains "log unreadable: never reports PASS" "CI_GATE: PASS" "$(cat "$repo32/last-output.txt")"
+assert_exit "log unreadable: exit code" "1" "$(cat "$repo32/last-exit.txt")"
+assert_file_absent "log unreadable: no merge" "$repo32/merged"
+rm -rf "$repo32"
+
+# --- Scenario 32b: an empty log body is a non-match, not a fetch failure (#92) ---
+# A 200 with no body. Nothing failed, so this is a genuine "the pattern is not
+# in the log" — but an implementation that only inspected the exit status could
+# just as easily have matched the empty string and merged.
+repo32b=$(make_repo)
+make_fake_gh "$repo32b"
+echo "Test PR body" > "$repo32b/body.md"
+JOBLOG_STATE="empty"
+run_case "job log is empty" "$repo32b" "fail-allowed" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p"
+assert_contains "empty log: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo32b/last-output.txt")"
+assert_contains "empty log: reported as a non-match" "allow pattern did not match" "$(cat "$repo32b/last-output.txt")"
+assert_not_contains "empty log: never reports PASS" "CI_GATE: PASS" "$(cat "$repo32b/last-output.txt")"
+assert_exit "empty log: exit code" "1" "$(cat "$repo32b/last-exit.txt")"
+assert_file_absent "empty log: no merge" "$repo32b/merged"
+rm -rf "$repo32b"
+
+# --- Scenario 33: a non-Actions check has no log to match -> blocks (#92) ---
+# Design question 4. An external service posting a commit status has no run log
+# at all, so a pattern against it can never be satisfied. It is not refused at
+# argument-parse time, because nothing about the flag says what kind of check
+# the name will turn out to refer to — that is only knowable once the payload
+# arrives. The message says which cause it was, so the caller does not go
+# hunting for a log that does not exist.
+repo33=$(make_repo)
+make_fake_gh "$repo33"
+echo "Test PR body" > "$repo33/body.md"
+JOBLOG_STATE="match"   # inert here: the parse fails before any fetch
+run_case "non-actions check with pattern" "$repo33" "fail-allowed-nonactions" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p"
+assert_contains "non-actions: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo33/last-output.txt")"
+assert_contains "non-actions: says there is no job log" "no job log to match" "$(cat "$repo33/last-output.txt")"
+assert_not_contains "non-actions: never reports PASS" "CI_GATE: PASS" "$(cat "$repo33/last-output.txt")"
+assert_exit "non-actions: exit code" "1" "$(cat "$repo33/last-exit.txt")"
+assert_file_absent "non-actions: no merge" "$repo33/merged"
+# No log fetch may be attempted: there is no job ID to fetch, and an attempt
+# would mean the link was parsed into something bogus.
+assert_file_absent "non-actions: no log fetch attempted" "$repo33/joblog-fetch-count"
+rm -rf "$repo33"
+
+# --- Scenario 33b: a check with no link at all -> blocks (#92) ---
+# `link` is an empty string. Distinct from 33 because an empty field and a
+# foreign URL fail the job-ID parse for different reasons.
+repo33b=$(make_repo)
+make_fake_gh "$repo33b"
+echo "Test PR body" > "$repo33b/body.md"
+JOBLOG_STATE="match"   # inert here too, for the same reason
+run_case "check with no link" "$repo33b" "fail-allowed-nolink" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p"
+assert_contains "no link: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo33b/last-output.txt")"
+assert_contains "no link: says there is no job log" "no job log to match" "$(cat "$repo33b/last-output.txt")"
+assert_not_contains "no link: never reports PASS" "CI_GATE: PASS" "$(cat "$repo33b/last-output.txt")"
+assert_exit "no link: exit code" "1" "$(cat "$repo33b/last-exit.txt")"
+assert_file_absent "no link: no merge" "$repo33b/merged"
+assert_file_absent "no link: no log fetch attempted" "$repo33b/joblog-fetch-count"
+rm -rf "$repo33b"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
