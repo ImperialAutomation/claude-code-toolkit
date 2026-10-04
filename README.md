@@ -145,9 +145,38 @@ Flag parsing stops at the output file, so everything after it belongs to the com
 | `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, pull, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
-| `git-commit.sh` | `git-commit.sh <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
+| `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
 | `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed, matched to the pushed commit so a lagging PR head cannot be read as a verdict), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. A check that is red repo-wide for a cause unrelated to the diff (e.g. a dependency audit after a new advisory) is `--allow-failing-check <name>`, which keeps the rest of the gate on and records the bypass on the PASS line. Creates the PR itself, so `gh pr create` hooks do not fire; the gate also cannot prove a check set is complete — see [failure modes](docs/git-script-failure-modes.md) |
+
+**`git-commit.sh` refuses to commit on a protected branch.** In repos where every
+change reaches the base branch through a PR, a commit on `develop`/`master`/`main`
+is always a mistake. The instruction to check the branch first was already
+written down twice and it still went wrong: a worktree was switched back to the
+base branch after a merge, a later session wrote a follow-up commit there, and
+only the push would have exposed it. Per the code-review rule, a convention
+violated more than once belongs in a script rather than a doc, and the commit
+wrapper is the one choke point every agent commit passes through, so a check
+here runs whether or not an agent remembered the rule.
+
+Which branches are protected is **per repo**, read from the first source that
+exists:
+
+1. `<repo>/.claude/protected-branches`: one branch name per line; blank lines
+   and `#` comments ignored
+2. `git config --get-all toolkit.protectedBranch`
+
+The file is the single source when it exists; git config is a fallback, not a
+second contributor, so "why is this branch protected" has one answer. Neither
+present protects nothing, which is the default; repos that commit straight to
+`main` never notice the guard exists. Names match exactly, no globbing.
+
+A refusal costs one `switch -c`; a commit on a base branch costs a manual
+untangle. `--allow-protected` overrides it where a direct commit is intended.
+Detached HEAD is always allowed: rebases and bisects commit there routinely and
+no base branch is at risk. The guard reads the branch of the tree named by
+`--repo`, not the caller's. Those differ exactly when a session works in a
+linked worktree, which is when the mistake happens.
 
 `git-resolve-worktree.sh` exists because an agent's working directory resets
 between every Bash call, and so do exported variables. In a repository with
