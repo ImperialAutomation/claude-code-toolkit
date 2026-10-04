@@ -93,7 +93,7 @@ Either make the slow check required via branch protection, so GitHub's own merge
 button blocks on it regardless of what this script concluded, or run with
 `--no-merge` and merge after reading the PR's checks yourself.
 
-## `git-push-pr-merge.sh` — an allowed failing check is allowed by name only
+## `git-push-pr-merge.sh` — an allowed failing check is allowed unconditionally unless you narrow it
 
 `--allow-failing-check <name>` exempts one named check from blocking. It is
 narrower than `--no-ci-wait` in every respect — the head still has to match the
@@ -113,8 +113,29 @@ Two signatures to read for:
 | `CI_GATE: PASS (allowed failing: <names>)` | A check was red and waved through. A weaker claim than a bare `CI_GATE: PASS`, and the only place the bypass is recorded |
 | A `--allow-failing-check` that outlives its cause | The named check has been bypassed on every PR since, including ones where it was red for a new reason |
 
-The second is the one that bites, because nothing expires the flag. Narrowing a
-bypass to its cause by matching the failed job's log is tracked in issue #92.
+The second is the one that bites, because nothing expires the flag.
+
+**Narrow the bypass to its cause** with `--allow-failing-check <name>=<regex>`.
+The gate then fetches that check's failed job log (resolved through the check's
+own `link`, so a matrix job needs no name guessing) and allows it only when the
+pattern matches. A new advisory, or a vulnerable package this PR introduces,
+stops reading as the known failure.
+
+The pattern form is deliberately more fragile than allowing by name, because a
+fail-closed gate cannot treat "could not check" as "fine". Three outcomes block,
+each with its own `CI_GATE: FAIL` text:
+
+| FAIL text | What it means | What to do |
+|---|---|---|
+| `allow pattern did not match the failed job log` | The check is red for a cause the pattern does not describe | Read the log. This is the case the pattern exists to surface |
+| `could not read the job log to match the allow pattern (...)` | Log expired (90 days by default) or an API error. No evidence either way | Retry; if the log is gone for good, drop the pattern and re-confirm the cause by hand |
+| `no job log to match the allow pattern against (...)` | The check is an external commit status, not an Actions job, so it has no run log | Allow it by name alone, or make the cause visible some other way. A pattern on such a check can never be satisfied |
+
+Two properties worth knowing before writing one: `<regex>` is an ERE while the
+check NAME stays literal, and the split is on the FIRST `=`, so a pattern may
+contain `=` but a check name carrying one cannot take a pattern. An empty name
+or an empty pattern is refused before the push — an empty ERE matches every log,
+which is the unconditional bypass wearing the narrowed one's syntax.
 
 Both the bypassed list and the `CI_GATE: FAIL` list are comma-joined, so a check
 whose own name contains a comma is ambiguous to read back: `lint, typecheck`
@@ -136,7 +157,10 @@ the names against `gh pr checks` rather than splitting on commas.
 - Before adding `--allow-failing-check`, confirm the check is red on the base
   branch too. That is what distinguishes "red repo-wide" from "red because of
   this diff", and it is the only check on the flag's premise.
+- While confirming that, you have the failed log open anyway — take the cause
+  from it and write `--allow-failing-check '<name>=<regex>'` rather than the
+  bare name. The bare form is the one that outlives its cause silently.
 - `CI_GATE: PASS (allowed failing: ...)` means something was red and waved
-  through by name. Treat the named checks as unverified, drop the flag once the
-  cause that justified it is fixed, and when the line appears in a merge you did
-  not expect it on, read that check's log before trusting the merge.
+  through. With a pattern, the log was read and matched; with a bare name,
+  nothing about the cause was verified. Either way treat the named checks as
+  unverified against this diff, and drop the flag once the cause is fixed.

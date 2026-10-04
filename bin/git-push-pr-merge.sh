@@ -71,6 +71,45 @@
 #   spaces, dots, parentheses, brackets, `*` or a leading dash matches only
 #   itself, and `.*` allows nothing.
 #
+#   --allow-failing-check <name>=<regex> narrows the bypass to ONE cause. By
+#   name alone the flag allows the check whatever made it red: it is opened for a
+#   specific advisory on a pinned package, but once it is in a command line (or
+#   an orchestrator's prompt) a new critical advisory, or a genuinely vulnerable
+#   package the PR itself introduces, reads identically. With a pattern the gate
+#   fetches that check's failed job log and only allows it when <regex> matches.
+#
+#   The job log is reached through the check's own `link` field, which for a
+#   GitHub Actions job is .../actions/runs/<run_id>/job/<job_id>; the job ID is
+#   read from it and fetched via
+#   `gh api /repos/{owner}/{repo}/actions/jobs/<job_id>/logs`. No `gh run list`
+#   lookup, so a matrix job whose check name carries its parameters resolves
+#   exactly like any other.
+#
+#   Three outcomes block, each with its own FAIL text, because the caller's
+#   reaction differs:
+#     - the pattern did not match     -> this is a DIFFERENT failure; read the log
+#     - the log could not be read     -> expired or an API error; retry or drop it
+#     - the check has no Actions log  -> an external commit status; a pattern on
+#                                        such a check can never be satisfied
+#   The second is why the pattern form is strictly more fragile than allowing by
+#   name: "could not check" is not evidence, and a fail-closed gate must not read
+#   it as "fine". That is deliberate, not a side effect.
+#
+#   <regex> is an ERE (`grep -E`), unlike the check NAME, which stays literal.
+#   The pair lives in ONE argument so it cannot drift: a separate positionally
+#   paired flag would, in a generated command line, silently attach a pattern to
+#   the wrong check and narrow the bypass to the wrong cause. The split is on the
+#   FIRST `=`, so a pattern may contain `=` freely; the cost is that a CHECK NAME
+#   containing `=` cannot carry a pattern (it remains allowable by name alone).
+#
+#   An empty name (`=re`) or an empty pattern (`name=`) is refused before the
+#   push. An empty ERE matches every log, which would be #75's unconditional
+#   bypass wearing the syntax of a narrowed one.
+#
+#   While other checks are still pending the pattern is re-matched on every
+#   poll, so the log is fetched once per poll rather than cached: a re-run
+#   replaces a job's log, and a cached answer could outlive its evidence.
+#
 # Worktree targeting:
 #   Without --repo this acts on the current directory. That is the right default
 #   for a human in a shell, but wrong for an agent: an agent's working directory
@@ -91,6 +130,10 @@
 #   --no-ci-wait                Merge immediately without waiting for CI checks
 #   --allow-failing-check <name>  Do not block on this check when it is red. Exact
 #                              name, repeatable. The rest of the gate still applies
+#   --allow-failing-check <name>=<regex>  Same, but only when the check's failed
+#                              job log matches <regex> (an ERE). Narrows the
+#                              bypass to one cause; blocks when the log does not
+#                              match, cannot be read, or does not exist
 #   --ci-timeout <secs>         Max time registered checks may stay pending (default: 900)
 #   --ci-grace <secs>           Max time checks may take to register (default: 120)
 #   --ci-poll-interval <secs>   Polling interval while waiting (default: 15, must be >= 1)

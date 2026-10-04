@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71, #75).
+# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71, #75, #92).
 #
 # Covers:
 #    1. No checks reported at all      -> CI_GATE: FAIL after grace, no merge (fail closed)
@@ -36,6 +36,21 @@
 #  27b. Dash name that matches nothing       -> the real red check still blocks
 #   28. Name with spaces/dots/parens         -> matches exactly
 #  28b. Regex-ish allowed name (`.*`)        -> matches nothing, still blocks
+#   29. `name=` (empty pattern)              -> rejected before anything is pushed
+#  29b. `=regex` (empty name)                -> rejected before anything is pushed
+#   30. Pattern matches the job log          -> PASS, and the log was really read
+#   31. Pattern does NOT match               -> blocks, FAIL says the pattern missed
+#   32. Job log cannot be fetched            -> blocks, FAIL names the unreadable log
+#  32b. Job log is empty (HTTP 200, no body) -> a non-match, not a fetch failure
+#   33. Allowed check is not an Actions job  -> blocks, no fetch attempted
+#  33b. Allowed check has no link at all     -> blocks, no fetch attempted
+#   34. Allowed red, no pattern              -> #75 unchanged, no log fetched
+#   35. Allowed check GREEN, pattern set     -> no fetch, bare PASS
+#   36. One patterned + one bare allow, miss -> only the patterned one blocks
+#  36b. Same pair, log matches               -> both allowed, PASS names both
+#   37. Pattern containing `=`               -> survives the first-`=` split
+#  37b. ERE metacharacters in the pattern    -> honoured as a regex
+#   38. Pattern re-matched on every poll     -> fetch per poll, not cached
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
