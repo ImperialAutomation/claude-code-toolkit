@@ -65,6 +65,8 @@
 #   --body-file <path>         File containing PR body (required)
 #   --no-merge                 Create PR but don't merge (for manual review) — CI gate is skipped
 #   --no-ci-wait                Merge immediately without waiting for CI checks
+#   --allow-failing-check <name>  Do not block on this check when it is red. Exact
+#                              name, repeatable. The rest of the gate still applies
 #   --ci-timeout <secs>         Max time registered checks may stay pending (default: 900)
 #   --ci-grace <secs>           Max time checks may take to register (default: 120)
 #   --ci-poll-interval <secs>   Polling interval while waiting (default: 15, must be >= 1)
@@ -85,6 +87,11 @@ CI_WAIT=1
 CI_TIMEOUT=900
 CI_POLL_INTERVAL=15
 CI_GRACE=120
+# Check names that may be red without blocking the merge. Passed to jq as
+# positional args, never interpolated into the filter: real check names contain
+# spaces, parentheses and dots (`test (3.12)`), which a string-built filter
+# would mangle or, worse, read as jq syntax.
+ALLOW_FAILING=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -111,6 +118,18 @@ while [[ $# -gt 0 ]]; do
         --no-ci-wait)
             CI_WAIT=0
             shift
+            ;;
+        --allow-failing-check)
+            # An empty name would match a check whose name is empty — i.e. none,
+            # so the flag would read as given while allowing nothing. Silent
+            # no-ops are the wrong failure for a gate bypass: the caller believes
+            # a check is covered and the merge blocks on it anyway.
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --allow-failing-check requires a check name" >&2
+                exit 1
+            fi
+            ALLOW_FAILING+=("$2")
+            shift 2
             ;;
         --ci-timeout)
             CI_TIMEOUT="$2"
