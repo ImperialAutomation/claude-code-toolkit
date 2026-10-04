@@ -179,6 +179,16 @@ fi
 echo "=== Pushing $CURRENT_BRANCH to origin ==="
 git_filtered push -u origin "$CURRENT_BRANCH"
 
+# The commit the gate must judge. Read AFTER the push so it is the SHA that was
+# actually sent, and kept for the whole run: `gh pr checks` answers for whatever
+# GitHub currently believes is the PR head, which lags a push by seconds, so
+# without this the gate has nothing to compare its evidence against (issue #71).
+PUSHED_SHA=$(git_filtered rev-parse HEAD)
+if ! [[ "$PUSHED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Error: could not resolve the pushed commit (got: '$PUSHED_SHA')" >&2
+    exit 1
+fi
+
 # PR creation is idempotent: a blocked CI gate leaves the PR open, and the
 # implement-epic recovery path re-runs this script with identical arguments
 # (up to 3 attempts). Without the reuse check, attempt 2 dies on "a pull
@@ -225,11 +235,64 @@ wait_for_ci_gate() {
     local elapsed=0
     local grace_elapsed=0
     local retried_transient=0
+    # A separate budget from retried_transient: the head read and the checks read
+    # are different calls that fail for different reasons, and letting one consume
+    # the other's single retry would make a genuine blip in the second fail the
+    # gate outright.
+    local retried_head=0
     local stderr_file
     stderr_file=$(mktemp)
     trap 'rm -f "$stderr_file"' RETURN
 
     while true; do
+        # Which commit is this evidence about? `gh pr checks` has no SHA field
+        # (see `gh pr checks --help`), so the head commit has to be read
+        # separately and the check set only trusted once it is the pushed one.
+        # A lagging head and a stale check set are the SAME staleness: `gh pr
+        # checks` reads the rollup of the PR's head commit, so when GitHub still
+        # reports the previous commit as head, the checks it returns are that
+        # commit's. Comparing here is what keeps the gate's "positive evidence"
+        # about the commit being merged.
+        local head_json
+        local head_exit=0
+        head_json=$(gh pr view "$PR_NUMBER" --json headRefOid 2>"$stderr_file") || head_exit=$?
+        local head_stderr
+        head_stderr=$(cat "$stderr_file" 2>/dev/null || true)
+
+        local head_sha=""
+        if [[ "$head_exit" -eq 0 ]]; then
+            head_sha=$(echo "$head_json" | jq -r 'if type == "object" and (.headRefOid | type) == "string" then .headRefOid else empty end' 2>/dev/null || true)
+        fi
+
+        # No SHA to compare against is no evidence at all. Failing closed here
+        # matters more than anywhere else in this function: carrying on would
+        # restore exactly the behaviour this guard exists to remove, judging
+        # whichever check set happened to come back.
+        if [[ -z "$head_sha" ]]; then
+            if [[ "$retried_head" -eq 0 ]]; then
+                retried_head=1
+                echo "CI gate: could not read the PR head, retrying once: $head_stderr" >&2
+                sleep 1
+                continue
+            fi
+            echo "CI_GATE: FAIL — unable to determine the PR head commit: $head_stderr"
+            return 1
+        fi
+
+        # The head has not caught up with the push yet. That is the registration
+        # gap, not a verdict, so it belongs on the CI_GRACE deadline alongside an
+        # empty check set — and like that one it fails closed when grace runs out.
+        if [[ "$head_sha" != "$PUSHED_SHA" ]]; then
+            if [[ "$grace_elapsed" -ge "$CI_GRACE" ]]; then
+                echo "CI_GATE: FAIL — PR head is still ${head_sha:0:7}, not the pushed ${PUSHED_SHA:0:7}, after ${CI_GRACE}s"
+                return 1
+            fi
+            echo "CI gate: PR head still stale (${head_sha:0:7}, waiting for ${PUSHED_SHA:0:7}) (${grace_elapsed}s/${CI_GRACE}s)" >&2
+            sleep "$CI_POLL_INTERVAL"
+            grace_elapsed=$((grace_elapsed + CI_POLL_INTERVAL))
+            continue
+        fi
+
         local checks_json
         local checks_exit=0
         checks_json=$(gh pr checks "$PR_NUMBER" --json name,bucket 2>"$stderr_file") || checks_exit=$?
