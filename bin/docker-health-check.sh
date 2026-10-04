@@ -8,6 +8,15 @@ set -euo pipefail
 # Usage: docker-health-check.sh [project-dir] [--timeout SECS] [--filter PREFIX]
 #                               [--project NAME]
 # Example: docker-health-check.sh /path/to/project --filter myapp_ --timeout 300
+#          docker-health-check.sh /path/to/project --project mystack
+#
+# Which containers get checked, in order of precedence:
+#   --filter PREFIX   the container set is named directly; no compose file needed
+#   --project NAME    the compose project to query
+#   COMPOSE_PROJECT_NAME in the .env beside the compose file
+#   container labels  the project whose com.docker.compose.project.config_files
+#                     lists the resolved compose file
+#   the compose file alone, letting Compose derive the project from its directory
 
 USAGE="Usage: docker-health-check.sh [project-dir] [--timeout SECS] [--filter PREFIX] [--project NAME]"
 
@@ -159,7 +168,7 @@ else
   # Each label is requested as its own --format field rather than read out of
   # .Labels: that field is one comma-joined string, and config_files is itself
   # comma-separated, so a file separator there is indistinguishable from a label
-  # separator. Filtering is on the label's presence, not its value — the value is
+  # separator. Filtering is on the label's presence, not its value: the value is
   # the entire file list, so an exact-match filter on one path finds nothing.
   if [[ -z "$COMPOSE_PROJECT" ]]; then
     docker_query docker ps -a \
@@ -192,7 +201,7 @@ else
 
   # Ask for the project by name when one is known. Without -p, Compose derives
   # the name from the compose file's directory, which is wrong for any stack
-  # started as `docker compose -p <name> ...` — and wrong in the quietest way
+  # started as `docker compose -p <name> ...`, and wrong in the quietest way
   # available: the query succeeds and returns an empty list, so a running stack
   # reads exactly like a stopped one.
   COMPOSE_ARGS=()
@@ -205,10 +214,15 @@ else
   CONTAINERS_JSON="$DOCKER_OUT"
 
   if [[ -z "$CONTAINERS_JSON" ]]; then
-    echo "Error: no containers found for compose file $COMPOSE_REL" >&2
+    if [[ -n "$COMPOSE_PROJECT" ]]; then
+      echo "Error: no containers found in compose project $COMPOSE_PROJECT ($COMPOSE_REL)" >&2
+    else
+      echo "Error: no containers found for compose file $COMPOSE_REL" >&2
+    fi
     echo "Are the containers running? Try: docker compose -f $COMPOSE_REL up -d" >&2
-    echo "If the stack is started from an include: set, its containers belong to a" >&2
-    echo "different compose project than this file — pass --filter <prefix> instead." >&2
+    echo "A stack started under its own project name (docker compose -p <name>) or from" >&2
+    echo "an include: set belongs to a different compose project than this file. Pass" >&2
+    echo "--project <name> to name it, or --filter <prefix> to name the containers." >&2
     exit 1
   fi
 fi

@@ -41,13 +41,13 @@ contains() { # haystack needle -> yes/no
 # STUB_COMPOSE  same, answer to `docker compose [-p N] -f X ps --format json`
 # STUB_PROJECT  the compose project STUB_COMPOSE belongs to. Set it, and the
 #               compose stub answers only when the script asked for that project
-#               by name — which is what Compose itself does. Unset, the stub
+#               by name, which is what Compose itself does. Unset, the stub
 #               answers any query, the pre-fix behaviour.
 # STUB_HEALTH   "name=status" pairs, one per line; inspect reads .State.Health.Status
 # STUB_RESTARTS "name=count" pairs, one per line; absent name means 0
 # STUB_LOGS     text returned by `docker logs` for every container
 # STUB_DAEMON_ERR  when set, every subcommand fails with this on stderr and
-#               exit 1 — a dead daemon or an unreadable socket.
+#               exit 1: a dead daemon or an unreadable socket.
 # STUB_LABELS   "project<TAB>comma,separated,config,files" rows, one per
 #               container, answering the label query the script uses to discover
 #               a project name. Modelled on measured output: `docker ps` renders
@@ -62,7 +62,7 @@ cat > "$T/bin/docker" <<'STUB'
 sub="$1"; shift
 
 # A broken daemon fails every subcommand the same way: a message on stderr and a
-# non-zero status. Nothing on stdout — which is exactly why swallowing stderr
+# non-zero status. Nothing on stdout, which is exactly why swallowing stderr
 # makes this indistinguishable from a stopped stack.
 if [[ -n "${STUB_DAEMON_ERR:-}" ]]; then
     echo "$STUB_DAEMON_ERR" >&2
@@ -125,7 +125,7 @@ case "$sub" in
         esac
     done
     # The heart of the bug being fixed. Compose answers for exactly one project:
-    # ask for the wrong one and you get an empty list, not an error — a running
+    # ask for the wrong one and you get an empty list, not an error: a running
     # stack that reads as a stopped one. With STUB_PROJECT set, wrong name means
     # empty output.
     if [[ -n "${STUB_PROJECT:-}" && "$asked" != "${STUB_PROJECT}" ]]; then
@@ -295,6 +295,9 @@ export STUB_COMPOSE STUB_PS STUB_PS_CALLED
 OUT=$(run "$T/with-compose" 2>&1); RC=$?
 check "empty compose set exits 1"   "1"   "$RC"
 check "error mentions --filter"     "yes" "$(contains "$OUT" "--filter")"
+# Both escape hatches, since a stack under its own project name is fixed by
+# --project and one without a shared prefix cannot use --filter at all.
+check "error mentions --project"    "yes" "$(contains "$OUT" "--project")"
 # Falling back to every container on the host would be a silently wrong answer:
 # it would report on containers that have nothing to do with this project.
 check "no fallback to all containers" "no" "$(contains "$OUT" "HEALTHY")"
