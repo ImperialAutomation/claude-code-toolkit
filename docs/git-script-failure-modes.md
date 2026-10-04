@@ -68,6 +68,31 @@ every project using the wrapper, including ones with no PR template, so it needs
 a guard on whether the template actually defines the markers. That is a separate
 change to make on purpose rather than as a side effect.
 
+## `git-push-pr-merge.sh` — the CI gate cannot prove a check set is complete
+
+The gate matches checks to the pushed commit: it records the SHA after the push
+and only judges a check set once `gh pr view --json headRefOid` reports that SHA
+as the PR head. That rules out verdicts about the previous head, which is the
+failure that matters in practice, because the documented recovery for a blocked
+gate is "fix, push to the same branch, re-run" and that re-run keeps the open PR.
+
+What it still cannot establish is whether the set it sees is **all** of the runs
+for that commit. GitHub publishes no expected count, so a commit with three
+workflows whose first one has registered and gone green is indistinguishable from
+a commit with one workflow that has finished. The gate reports PASS.
+
+In practice the window is small — GitHub creates a push's check runs together,
+within a second or two — and an empty set is still covered by `--ci-grace`. The
+exposure is a repo where some runs are created by a *different* trigger than the
+rest: a workflow started by a `workflow_run`, a `check_suite` completion, or an
+external service posting a commit status after its own queue. Those can appear
+tens of seconds after the push, long after the first batch is green.
+
+**When a repo has such a staggered trigger, do not rely on the gate alone.**
+Either make the slow check required via branch protection, so GitHub's own merge
+button blocks on it regardless of what this script concluded, or run with
+`--no-merge` and merge after reading the PR's checks yourself.
+
 ## How to apply
 
 - After **every** `git-commit.sh`, run `git log --oneline -1`. Treat `ok N files
@@ -76,3 +101,6 @@ change to make on purpose rather than as a side effect.
   before re-running. Re-running blind repeats the same failure.
 - When a project gates PR bodies, assemble and check the body before invoking
   `git-push-pr-merge.sh` — the wrapper will not do it for you.
+- `CI_GATE: PASS` means every check the gate could see on the pushed commit was
+  green, not that every check that will eventually run has. In a repo with
+  staggered check triggers, back it with branch protection or merge by hand.
