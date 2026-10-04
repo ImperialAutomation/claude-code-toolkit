@@ -342,6 +342,63 @@ OUT=$(run "$T/with-compose" 2>&1); RC=$?
 check "same stack unnamed is not found" "1" "$RC"
 unset STUB_PROJECT STUB_COMPOSE
 
+echo "== 12. COMPOSE_PROJECT_NAME in the .env beside the compose file is used =="
+# Compose reads this file itself when it starts the stack, so it is the one place
+# the project name is recorded where both sides can see it. Honouring it means a
+# wrapper script that sets it needs no extra argument here.
+mkdir -p "$T/dotenv"
+: > "$T/dotenv/docker-compose.yml"
+cat > "$T/dotenv/.env" <<'ENV'
+# Shared by the stack and this check.
+COMPOSE_PROJECT_NAME=warehouse
+POSTGRES_PASSWORD=not-a-project-name
+ENV
+STUB_COMPOSE='{"Name":"warehouse_api","State":"running","Health":"healthy","Status":"Up 3 days (healthy)"}'
+STUB_PROJECT="warehouse"
+export STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/dotenv" 2>&1); RC=$?
+check ".env project found, no args"  "0"   "$RC"
+check "container reported"           "yes" "$(contains "$OUT" "warehouse_api")"
+check "header names the project"     "yes" "$(contains "$OUT" "Compose project: warehouse")"
+
+# An explicit --project is the operator speaking now; the file is a default.
+STUB_PROJECT="override"
+export STUB_PROJECT
+OUT=$(run "$T/dotenv" --project override 2>&1); RC=$?
+check "--project beats .env"      "0"   "$RC"
+check "header names the override" "yes" "$(contains "$OUT" "Compose project: override")"
+check ".env value not used"       "no"  "$(contains "$OUT" "Compose project: warehouse")"
+unset STUB_PROJECT STUB_COMPOSE
+
+# Quoted values and surrounding whitespace are both legal in a Compose .env, and
+# a name arriving with its quotes attached matches no project at all.
+mkdir -p "$T/dotenv-quoted"
+: > "$T/dotenv-quoted/docker-compose.yml"
+cat > "$T/dotenv-quoted/.env" <<'ENV'
+  COMPOSE_PROJECT_NAME = "warehouse-staging"
+ENV
+STUB_COMPOSE='{"Name":"warehouse-staging_api","State":"running","Health":"healthy","Status":"Up 1 day (healthy)"}'
+STUB_PROJECT="warehouse-staging"
+export STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/dotenv-quoted" 2>&1); RC=$?
+check "quoted and spaced value parsed" "0"   "$RC"
+check "no quotes in the name"          "no"  "$(contains "$OUT" '"warehouse-staging"')"
+unset STUB_PROJECT STUB_COMPOSE
+
+# A commented-out assignment is not an assignment. Reading it would send the
+# check off to a project nobody started.
+mkdir -p "$T/dotenv-commented"
+: > "$T/dotenv-commented/docker-compose.yml"
+cat > "$T/dotenv-commented/.env" <<'ENV'
+#COMPOSE_PROJECT_NAME=retired-name
+ENV
+STUB_COMPOSE="$(c ledger_api running 'Up 1 hour')"
+export STUB_COMPOSE
+OUT=$(run "$T/dotenv-commented" 2>&1)
+check "commented assignment ignored" "no" "$(contains "$OUT" "retired-name")"
+check "no project line at all"       "no" "$(contains "$OUT" "Compose project:")"
+unset STUB_COMPOSE
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

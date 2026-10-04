@@ -92,6 +92,27 @@ else
 
   COMPOSE_REL="${COMPOSE_FILE#"$PROJECT_DIR"/}"
 
+  # Compose itself reads COMPOSE_PROJECT_NAME from the .env beside the compose
+  # file, so that file is the one place a stack's project name is recorded where
+  # both the starting side and this check can see it. An explicit --project is
+  # the operator speaking now and outranks it.
+  COMPOSE_ENV="$(dirname "$COMPOSE_FILE")/.env"
+  if [[ -z "$COMPOSE_PROJECT" && -f "$COMPOSE_ENV" ]]; then
+    # Only this one key, and only as a real assignment: a commented-out line is
+    # not an assignment, and reading it would query a project nobody started.
+    # Quotes and padding around the value are legal in a .env and must come off,
+    # since a name arriving with its quotes attached matches no project at all.
+    env_line=$(grep -E '^[[:space:]]*COMPOSE_PROJECT_NAME[[:space:]]*=' "$COMPOSE_ENV" 2>/dev/null | tail -1 || true)
+    if [[ -n "$env_line" ]]; then
+      env_value="${env_line#*=}"
+      env_value="${env_value#"${env_value%%[![:space:]]*}"}"   # strip leading space
+      env_value="${env_value%"${env_value##*[![:space:]]}"}"   # strip trailing space
+      env_value="${env_value%\"}"; env_value="${env_value#\"}"
+      env_value="${env_value%\'}"; env_value="${env_value#\'}"
+      COMPOSE_PROJECT="$env_value"
+    fi
+  fi
+
   echo "Docker Runtime Health Check"
   echo "=================================================="
   echo "Compose file: $COMPOSE_REL"
