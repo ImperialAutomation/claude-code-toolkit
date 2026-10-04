@@ -17,8 +17,35 @@
 # Exit codes:
 #   0 = allow
 #   2 = block (reason sent to stderr, shown to Claude)
+#   any other = an internal error, converted to a block by the trap below
 
 set -euo pipefail
+
+# Fail closed on an internal error. Claude Code blocks on exit 2 specifically, so
+# every OTHER non-zero exit — a typo in a regex, a missing jq, an unset variable
+# under `set -u` — reads as "allow". That inverts the guard precisely when it is
+# broken, and silently: nothing in the transcript distinguishes "checked, fine"
+# from "crashed before checking".
+#
+# Not hypothetical. While tightening the $HOME pattern (issue #70) an unescaped
+# `$(HOME|...)` became command substitution, the hook exited 127, and every
+# destructive command in the test suite came back ALLOW. The suite caught it
+# because it asserts on BLOCK as well as ALLOW; in a real session nothing would
+# have.
+#
+# The trap fires only on an unexpected exit: both deliberate paths (`exit 0` and
+# `exit 2`) are excluded, so a normal allow stays an allow.
+# SC2329: invoked indirectly, by the `trap ... EXIT` immediately below.
+# shellcheck disable=SC2329
+_fail_closed() {
+    local rc=$?
+    case "$rc" in
+        0 | 2) exit "$rc" ;;
+    esac
+    echo "BLOCKED by hook-block-destructive.sh: the guard itself failed (exit $rc) and cannot say whether this command is safe. Failing closed. This is a bug in the hook, not in the command — report it rather than working around it." >&2
+    exit 2
+}
+trap _fail_closed EXIT
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
@@ -234,6 +261,28 @@ _sql_destructive_hit() {
     return 1
 }
 
+# Assert every regex the guards depend on is set and non-empty, before the first
+# guard runs. `set -u` is not enough on its own: the guards read their constants
+# inside a `while ... done < <(...)` loop, so an unbound variable kills only the
+# SUBSHELL. The loop then sees end-of-input, reports "no match", and the hook
+# exits 0 — a fail-OPEN whose only trace is a line on stderr that nothing reads.
+#
+# Found by testing for it: a deliberately renamed constant made the hook allow a
+# command it should have blocked, and the EXIT trap above could not catch it
+# because the exit status was a perfectly ordinary 0. Renaming a constant is the
+# realistic way in; this file renamed one while fixing issue #70.
+#
+# Listed in one place rather than checked at each use, so a guard added later is
+# covered by adding its constant here instead of re-deriving the reasoning.
+for _required in _READONLY_LEADER_RE _INTERPRETER_LEADER_RE _SQL_DESTRUCTIVE_RE \
+                 _SQL_DELETE_RE _SQL_WHERE_RE; do
+    if [ -z "${!_required:-}" ]; then
+        echo "BLOCKED by hook-block-destructive.sh: internal error — the pattern '$_required' this guard relies on is unset or empty, so the check cannot run. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
+        exit 2
+    fi
+done
+unset _required
+
 if _sql_destructive_hit; then
     echo "BLOCKED by hook-block-destructive.sh: refusing a destructive SQL statement (DROP TABLE/DATABASE/SCHEMA, DROP OWNED BY, TRUNCATE, or a DELETE FROM with no WHERE clause). All of these destroy data irreversibly, including the forms that avoid the word DATABASE. Adding a WHERE clause is fine if that is what you meant. If this targets a throwaway database, say so and ask the user to confirm — do not rephrase the statement to get past this check." >&2
     exit 2
@@ -244,16 +293,41 @@ if _rm_hits_protected_path; then
     exit 2
 fi
 
-# Patterns for destructive operations
+# Patterns for destructive operations.
+#
+# Three of these were tightened after the per-segment rewrite (issue #70) exposed
+# them. Each had the same shape of hole: the pattern pinned LITERAL TEXT, so an
+# ordinary shell habit — quoting an operand, combining short flags — stepped
+# around it. They were found by writing the false-negative cases this change had
+# to avoid introducing, then discovering those cases already passed on main.
+#
+#   rm -rf "$HOME"              quoting the operand broke `rm -rf \$HOME`
+#   dd if=/dev/zero of="/dev/sda"  quoting the target broke `of=/dev/`
+#   git clean -fd               a combined flag broke `git clean.* -f( |$)`
+#
+# The lesson generalises: a pattern that must match a FLAG should accept it in a
+# cluster, and one that must match an OPERAND should tolerate quotes around it.
+# SC2016 is intentional for the $HOME entry below: these are REGEXES matching
+# literal command text, and $HOME reaches this hook unexpanded. It must stay
+# single-quoted — written with double quotes, `$(HOME|...)` is command
+# substitution the shell runs while building the array. That happened: the
+# resulting exit 127 is neither 0 nor 2, so the hook allowed everything it should
+# have blocked. A guard whose own error means "allow" is worse than no guard,
+# which is why the trap above now converts any internal failure into a block.
+# shellcheck disable=SC2016
 BLOCKED_PATTERNS=(
-    # Filesystem destruction
-    "rm -rf \\$HOME"
+    # Filesystem destruction. Quotes around the operand are ordinary hygiene, not
+    # a signal of intent — `rm -rf "$HOME"` deletes exactly as much as the bare
+    # form, so both must match.
+    'rm -rf ["'"'"']?\$(HOME|\{HOME\})["'"'"']?'
     # Git destructive operations
     "git push.*--force"
     "git push.* -f( |$)"
     "git reset.*--hard"
     "git checkout -- \\."
-    "git clean.* -f( |$)"
+    # `-f` may arrive clustered with other short flags (-fd, -fx, -xdf), which the
+    # earlier `-f( |$)` form required to stand alone.
+    "git clean.* -[a-zA-Z]*f[a-zA-Z]*( |$)"
     # Database destruction is handled by _sql_destructive_hit() above, which
     # covers the DROP SCHEMA / DROP OWNED BY forms these patterns missed and the
     # unqualified DELETE a single regex cannot express.
@@ -263,7 +337,9 @@ BLOCKED_PATTERNS=(
     "shutdown"
     "reboot"
     "mkfs"
-    "dd if=.* of=/dev/"
+    # Writing to a raw device destroys the filesystem on it. The target may be
+    # quoted, which the earlier `of=/dev/` form did not allow for.
+    "dd if=.* of=['\"]?/dev/"
 )
 
 # Case-sensitive patterns: only block uppercase forms (e.g. -D force delete, not -d safe delete)

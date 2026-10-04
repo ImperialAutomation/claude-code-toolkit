@@ -272,6 +272,50 @@ run "eval 'killall node'"                                            BLOCK
 run "bash -c 'git reset --hard origin/main'"                         BLOCK
 run "xargs -I{} git push --force {}"                                 BLOCK
 
+# --- the guard fails closed when the guard itself breaks ---
+# Claude Code blocks on exit 2 specifically, so any OTHER non-zero exit reads as
+# "allow" — the guard inverts exactly when it is broken, and leaves no trace that
+# distinguishes "checked, fine" from "crashed before checking". A real instance:
+# an unescaped `$(HOME|...)` in a pattern became command substitution, the hook
+# exited 127, and every destructive case below came back ALLOW.
+#
+# Driven by breaking the hook on purpose in a copy, since the whole point is
+# behaviour under a fault that cannot be triggered through the normal input.
+run_broken() { # run_broken <label> <sed-expr-to-corrupt-the-hook>
+    local label="$1" corrupt="$2" tmp rc got
+    tmp=$(mktemp)
+    sed "$corrupt" "$HOOK" > "$tmp"
+    chmod +x "$tmp"
+    printf '%s' 'git status' | jq -Rs '{tool_input:{command:.}}' | bash "$tmp" >/dev/null 2>&1
+    rc=$?
+    rm -f "$tmp"
+    got=ALLOW
+    [ "$rc" -eq 2 ] && got=BLOCK
+    if [ "$got" = BLOCK ]; then
+        pass=$((pass + 1))
+        printf 'PASS  %-6s broken hook: %s\n' "$got" "$label"
+    else
+        fail=$((fail + 1))
+        printf 'FAIL  got=%-6s want=BLOCK  broken hook: %s (exit %s)\n' "$got" "$label" "$rc"
+    fi
+}
+
+# A command that does not exist: the shape of the exit-127 incident.
+# SC2016 is the point: these are sed expressions, and $(cat) is the literal text
+# being matched in the hook's source, not something to run here.
+# shellcheck disable=SC2016
+run_broken "unknown command"      's|^INPUT=$(cat)|this-command-does-not-exist-xyz|'
+# A renamed constant: the DEFINITION moves and the use sites keep the old name,
+# which is what a careless rename actually looks like. `set -u` fires inside the
+# guard's `done < <(...)` subshell and kills only that subshell; the loop then
+# reports "no match" and the hook exits a perfectly ordinary 0, so the EXIT trap
+# cannot see it either. Only an up-front assertion catches this one.
+run_broken "renamed constant"     's|^_READONLY_LEADER_RE=|_RENAMED_LEADER_RE=|'
+# An emptied constant: a regex that matches nothing would silently skip nothing,
+# or everything, depending on the guard. Either way the guard stops meaning what
+# it says, so empty is treated as broken rather than as a permissive default.
+run_broken "emptied constant"     "s|^_SQL_DESTRUCTIVE_RE=.*|_SQL_DESTRUCTIVE_RE=''|"
+
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK
 run "git reset --hard origin/main"       BLOCK
