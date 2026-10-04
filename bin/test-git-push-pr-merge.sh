@@ -1255,6 +1255,122 @@ assert_file_absent "no link: no merge" "$repo33b/merged"
 assert_file_absent "no link: no log fetch attempted" "$repo33b/joblog-fetch-count"
 rm -rf "$repo33b"
 
+# --- Scenario 34: no pattern -> #75 behaviour, and no log fetch at all (#92) ---
+# The compatibility guarantee. A check allowed by name alone must behave exactly
+# as before: allowed unconditionally, with no log fetched. The fetch assertion is
+# the load-bearing one — if the pattern stage ran for every allowed check, every
+# repo-wide bypass would start costing an API call and would start FAILING
+# whenever a log had expired, breaking #75's callers without touching their
+# command lines.
+repo34=$(make_repo)
+make_fake_gh "$repo34"
+echo "Test PR body" > "$repo34/body.md"
+# nomatch: if a fetch happened despite no pattern, this log would not match and
+# the scenario would block instead of merging.
+JOBLOG_STATE="nomatch"
+run_case "no pattern given" "$repo34" "fail-allowed" --allow-failing-check "dependency-audit"
+assert_contains "no pattern: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo34/last-output.txt")"
+assert_contains "no pattern: names what was bypassed" "allowed failing: dependency-audit" "$(cat "$repo34/last-output.txt")"
+assert_exit "no pattern: exit code" "0" "$(cat "$repo34/last-exit.txt")"
+assert_file_present "no pattern: merge happened" "$repo34/merged"
+assert_file_absent "no pattern: no log fetch attempted" "$repo34/joblog-fetch-count"
+rm -rf "$repo34"
+
+# --- Scenario 35: a GREEN allowed check with a pattern -> no fetch (#92) ---
+# Nothing was red, so there is no failure to attribute and nothing to match. A
+# fetch here would be a wasted API call on every PR in the repo for as long as
+# the flag stays in the command line, and with a fetch-fail state it would also
+# block a run where every check passed — a green PR blocked by a bypass flag.
+repo35=$(make_repo)
+make_fake_gh "$repo35"
+echo "Test PR body" > "$repo35/body.md"
+JOBLOG_STATE="fetch-fail"
+run_case "green allowed check with pattern" "$repo35" "pass" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p"
+assert_contains "green+pattern: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo35/last-output.txt")"
+assert_not_contains "green+pattern: no bypass note" "allowed failing" "$(cat "$repo35/last-output.txt")"
+assert_exit "green+pattern: exit code" "0" "$(cat "$repo35/last-exit.txt")"
+assert_file_present "green+pattern: merge happened" "$repo35/merged"
+assert_file_absent "green+pattern: no log fetch attempted" "$repo35/joblog-fetch-count"
+rm -rf "$repo35"
+
+# --- Scenario 36: a pattern narrows only its own check (#92) ---
+# Two allowed checks, one with a pattern and one without, both red. The
+# patterned one must be gated on its log while the bare one keeps #75's
+# behaviour. This is what the `<name>=<regex>` form buys over a positionally
+# paired flag: the pairing cannot drift, so a reordered command line cannot
+# attach this pattern to the other check.
+repo36=$(make_repo)
+make_fake_gh "$repo36"
+echo "Test PR body" > "$repo36/body.md"
+JOBLOG_STATE="nomatch"
+run_case "patterned and bare allowed checks" "$repo36" "fail-allowed-plus-other" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p" \
+    --allow-failing-check "build"
+# dependency-audit is red for the wrong cause, so it blocks even though `build`
+# is waved through by name.
+assert_contains "mixed allow: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo36/last-output.txt")"
+assert_contains "mixed allow: the patterned check blocks" "allow pattern did not match" "$(cat "$repo36/last-output.txt")"
+assert_not_contains "mixed allow: never reports PASS" "CI_GATE: PASS" "$(cat "$repo36/last-output.txt")"
+assert_exit "mixed allow: exit code" "1" "$(cat "$repo36/last-exit.txt")"
+assert_file_absent "mixed allow: no merge" "$repo36/merged"
+# Exactly one fetch: the bare-named check must not be looked up.
+assert_contains "mixed allow: fetched once" "1" "$(cat "$repo36/joblog-fetch-count")"
+assert_contains "mixed allow: fetched the patterned check's job" "/actions/jobs/9001/logs" "$(cat "$repo36/joblog-endpoints")"
+rm -rf "$repo36"
+
+# --- Scenario 36b: the same pair, matching log -> both allowed, merges (#92) ---
+# The positive half of 36: with the patterned check red for its known cause, both
+# bypasses apply and the PASS line names both.
+repo36b=$(make_repo)
+make_fake_gh "$repo36b"
+echo "Test PR body" > "$repo36b/body.md"
+JOBLOG_STATE="match"
+run_case "patterned and bare, log matches" "$repo36b" "fail-allowed-plus-other" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p" \
+    --allow-failing-check "build"
+assert_contains "mixed allow ok: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo36b/last-output.txt")"
+assert_contains "mixed allow ok: names the patterned check" "dependency-audit" "$(cat "$repo36b/last-output.txt")"
+assert_contains "mixed allow ok: names the bare check" "build" "$(cat "$repo36b/last-output.txt")"
+assert_exit "mixed allow ok: exit code" "0" "$(cat "$repo36b/last-exit.txt")"
+assert_file_present "mixed allow ok: merge happened" "$repo36b/merged"
+rm -rf "$repo36b"
+
+# --- Scenario 37: a pattern may contain '=' (#92) ---
+# The split is on the FIRST '=', so an ERE carrying its own '=' survives intact.
+# A naive split on every '=' would truncate the pattern to `severity` and match
+# far more than the caller asked for — a silently widened bypass.
+repo37=$(make_repo)
+make_fake_gh "$repo37"
+echo "Test PR body" > "$repo37/body.md"
+JOBLOG_STATE="match"
+# The fixture log contains "Severity: high", not "severity=high", so this
+# pattern must NOT match. If the split dropped everything after the second '=',
+# the pattern would become `Severity` and match — blocking is the correct
+# outcome and the proof the full pattern survived.
+run_case "pattern containing equals" "$repo37" "fail-allowed" \
+    --allow-failing-check "dependency-audit=Severity=high"
+assert_contains "equals in pattern: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo37/last-output.txt")"
+assert_contains "equals in pattern: reported as a non-match" "allow pattern did not match" "$(cat "$repo37/last-output.txt")"
+assert_exit "equals in pattern: exit code" "1" "$(cat "$repo37/last-exit.txt")"
+assert_file_absent "equals in pattern: no merge" "$repo37/merged"
+rm -rf "$repo37"
+
+# --- Scenario 37b: an ERE metacharacter is honoured as a regex (#92) ---
+# The pattern is an ERE, unlike the check NAME, which is matched literally. A
+# caller writing `GHSA-[0-9a-z]{4}-` must get regex semantics.
+repo37b=$(make_repo)
+make_fake_gh "$repo37b"
+echo "Test PR body" > "$repo37b/body.md"
+JOBLOG_STATE="match"
+run_case "ERE pattern" "$repo37b" "fail-allowed" \
+    --allow-failing-check "dependency-audit=GHSA-(2xqp|9999)-wc4f"
+assert_contains "ERE pattern: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo37b/last-output.txt")"
+assert_contains "ERE pattern: names what was bypassed" "allowed failing: dependency-audit" "$(cat "$repo37b/last-output.txt")"
+assert_exit "ERE pattern: exit code" "0" "$(cat "$repo37b/last-exit.txt")"
+assert_file_present "ERE pattern: merge happened" "$repo37b/merged"
+rm -rf "$repo37b"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
