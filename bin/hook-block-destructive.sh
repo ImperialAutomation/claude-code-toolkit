@@ -27,6 +27,20 @@ if [ -z "$COMMAND" ]; then
     exit 0
 fi
 
+# Split the command line into the pieces a shell would run separately. Every guard
+# below classifies per segment rather than over the whole string, so that a
+# read-only leader excuses its OWN segment and nothing else: a grep for a pattern
+# name followed by `&&` and the real command must block on the second half, even
+# though the first half is only a search.
+#
+# This is a deliberately shallow split, not a shell parser. Writing one in bash is
+# its own source of bugs, and the failure mode of being too shallow is extra
+# segments that match no read-only leader — i.e. a block. Erring toward more
+# segments therefore errs toward refusing, which is the direction to err in.
+_split_segments() {
+    sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g' <<< "$COMMAND"
+}
+
 # Guard: force-recursive rm of an absolute path, EXCEPT below /tmp.
 #
 # Replaces the old substring patterns ("rm -rf /", "rm -rf /[a-z]", "rm -rf ~",
@@ -64,7 +78,7 @@ _rm_hits_protected_path() {
                 '~'|'~/'*) return 0 ;; # home directory (literal ~, see above)
             esac
         done
-    done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
+    done < <(_split_segments)
     return 1
 }
 
@@ -93,13 +107,33 @@ _rm_hits_protected_path() {
 # than working around it at the call site.
 _SQL_DESTRUCTIVE_RE='(^|[^[:alnum:]_])(DROP[[:space:]]+(TABLE|DATABASE|SCHEMA)|DROP[[:space:]]+OWNED[[:space:]]+BY|TRUNCATE)([^[:alnum:]_]|$)'
 
-# Commands that only READ or PRINT text. A statement appearing as an argument to
-# one of these is being searched for or quoted, not executed — grepping for a
-# pattern tripped the guard, and so did a commit message naming one. Both were
-# hit while fixing issue #67. Anchored to the segment's LEADING word, mirroring
-# the git-merge guard below: a read-only leader cannot launder a real statement
-# in a later segment, because each segment is classified on its own.
-_SQL_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
+# Commands that only READ or PRINT text. A destructive keyword appearing as an
+# argument to one of these is being searched for or quoted, not executed —
+# grepping for a pattern tripped the guard, and so did a commit message naming
+# one. Anchored to the segment's LEADING word, mirroring the git-merge guard
+# below: a read-only leader cannot launder a real command in a later segment,
+# because each segment is classified on its own.
+#
+# This started as an SQL-only skip (issue #67) and now serves the pattern lists
+# too (issue #70), where the same false positive was three times as common: a
+# grep for a pattern name, a word inside an echo, a commit subject. The worst of
+# those was a grep over THIS FILE — the guard blocked the investigation into the
+# guard, with no phrasing available that got past it.
+#
+# Why a leader check and not stripping quoted text, which is the obvious move:
+# quoting an operand is ordinary shell hygiene, not a signal that the text is
+# data. `rm -rf "$HOME"` and `dd if=/dev/zero of="/dev/sda"` destroy exactly as
+# much with the quotes as without, so a strip-then-match pass would have read
+# them as safe. Both were in fact already slipping through for a related reason
+# (the quote broke a literal-text pattern); see the dd/rm notes below. The leader
+# is what separates naming a command from running one, so the leader is what
+# this looks at.
+#
+# Everything not listed here gets no skip, which is the fail-closed half: an
+# unrecognised leader (eval, xargs, bash -c, a project wrapper) still blocks on a
+# quoted keyword. That is noisier than ideal and deliberately so — a false
+# negative here is a destroyed working tree, a false positive is one rephrasing.
+_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
 
 # An unqualified DELETE empties the table. The pattern this replaces was
 # "DELETE FROM.*WITHOUT.*WHERE", which matched the literal word WITHOUT and so
@@ -115,12 +149,12 @@ _sql_destructive_hit() {
         # Classify each segment independently, so one read-only leader does not
         # excuse the rest of the command line, and a qualified delete does not
         # excuse an unqualified one sharing it.
-        echo "$segment" | grep -qE "$_SQL_READONLY_LEADER_RE" && continue
+        echo "$segment" | grep -qE "$_READONLY_LEADER_RE" && continue
         echo "$segment" | grep -qiE "$_SQL_DESTRUCTIVE_RE" && return 0
         if echo "$segment" | grep -qiE "$_SQL_DELETE_RE"; then
             echo "$segment" | grep -qiE "$_SQL_WHERE_RE" || return 0
         fi
-    done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
+    done < <(_split_segments)
     return 1
 }
 
