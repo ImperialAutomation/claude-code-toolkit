@@ -81,6 +81,21 @@ NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of
 
 Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug>` een korte kebab-case samenvatting van de issue-titel is. Bijv. issue #3 "Per-feature code discipline" → `issue-3-code-discipline`. Zo is elke branch traceerbaar naar zijn issue. Branches zonder issue (los experiment) mogen afwijken.
 
+**Nooit committen op een base branch.** In repo's waar elke wijziging via een PR
+binnenkomt is een commit op `develop`/`master`/`main` altijd een vergissing.
+**Enforced, not advisory:** `git-commit.sh` leest de branch van de doelboom
+(`--repo`, anders cwd) en weigert als die beschermd is. Welke branches dat zijn
+staat per repo in `<repo>/.claude/protected-branches` (één naam per regel) of in
+`git config --get-all toolkit.protectedBranch`; staat er niets, dan is niets
+beschermd en verandert er niets. Commit dat bestand: ongetrackt bestaat het
+alleen in de boom waar je het aanmaakte, dus een linked worktree ziet geen
+config en de guard slaat daar nooit aan, precies waar de vergissing het vaakst
+gebeurt. De git-config-route heeft dat probleem niet, want worktrees delen
+`.git/config`. Een weigering kost één `switch -c`; een commit
+op een base branch kost handwerk om te ontwarren. `--allow-protected` overrulet
+het waar een directe commit de bedoeling is. Detached HEAD mag altijd (rebase,
+bisect).
+
 ### Wat NIET werkt (ook al lijkt het logisch)
 
 - `cd backend && python ...` — eerste woord is `cd`
