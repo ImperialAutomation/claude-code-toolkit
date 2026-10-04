@@ -38,15 +38,36 @@ contains() { # haystack needle -> yes/no
 
 # --- the stub docker ----------------------------------------------------------
 # STUB_PS       one JSON object per line, answer to `docker ps -a ... --format json`
-# STUB_COMPOSE  same, answer to `docker compose -f X ps --format json`
+# STUB_COMPOSE  same, answer to `docker compose [-p N] -f X ps --format json`
+# STUB_PROJECT  the compose project STUB_COMPOSE belongs to. Set it, and the
+#               compose stub answers only when the script asked for that project
+#               by name, which is what Compose itself does. Unset, the stub
+#               answers any query, the pre-fix behaviour.
 # STUB_HEALTH   "name=status" pairs, one per line; inspect reads .State.Health.Status
 # STUB_RESTARTS "name=count" pairs, one per line; absent name means 0
 # STUB_LOGS     text returned by `docker logs` for every container
+# STUB_DAEMON_ERR  when set, every subcommand fails with this on stderr and
+#               exit 1: a dead daemon or an unreadable socket.
+# STUB_LABELS   "project<TAB>comma,separated,config,files" rows, one per
+#               container, answering the label query the script uses to discover
+#               a project name. Modelled on measured output: `docker ps` renders
+#               each requested label as its own field, which is why the script
+#               asks for them that way instead of parsing the flat .Labels string
+#               (where a config_files separator is indistinguishable from a label
+#               separator, both being commas).
 mkdir -p "$T/bin"
 cat > "$T/bin/docker" <<'STUB'
 #!/bin/bash
 # Stub docker. Dispatches on the first non-flag word.
 sub="$1"; shift
+
+# A broken daemon fails every subcommand the same way: a message on stderr and a
+# non-zero status. Nothing on stdout, which is exactly why swallowing stderr
+# makes this indistinguishable from a stopped stack.
+if [[ -n "${STUB_DAEMON_ERR:-}" ]]; then
+    echo "$STUB_DAEMON_ERR" >&2
+    exit 1
+fi
 
 lookup() { # table name default
     local line
@@ -64,13 +85,21 @@ case "$sub" in
     [[ -n "${STUB_PS_CALLED:-}" ]] && echo "ps $*" >> "$STUB_PS_CALLED"
     # Honour --filter name=<substring> the way Docker does: a substring match,
     # not a prefix match. The script must not rely on this being a prefix.
-    want=""; all=""
+    want=""; all=""; label_query=""
     for a in "$@"; do
         case "$a" in
           name=*) want="${a#name=}" ;;
+          label=*) label_query=1 ;;
           -a|--all) all=1 ;;
         esac
     done
+    # The project-discovery query: filtered on the presence of the compose
+    # project label, formatted as the two label values. Answered from
+    # STUB_LABELS, which is a different fixture from the container list.
+    if [[ -n "$label_query" ]]; then
+        printf '%s\n' "${STUB_LABELS:-}"
+        exit 0
+    fi
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         name=$(printf '%s' "$line" | jq -r '.Names // empty')
@@ -85,7 +114,23 @@ case "$sub" in
     done <<< "${STUB_PS:-}"
     ;;
   compose)
-    # Only `compose -f <file> ps --format json` is used by the script.
+    # `compose [-p <name>] -f <file> ps --format json`. Record the invocation so
+    # a test can assert which project name the script actually asked for.
+    [[ -n "${STUB_COMPOSE_CALLED:-}" ]] && echo "compose $*" >> "$STUB_COMPOSE_CALLED"
+    asked=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -p|--project-name) asked="$2"; shift 2 ;;
+          *) shift ;;
+        esac
+    done
+    # The heart of the bug being fixed. Compose answers for exactly one project:
+    # ask for the wrong one and you get an empty list, not an error: a running
+    # stack that reads as a stopped one. With STUB_PROJECT set, wrong name means
+    # empty output.
+    if [[ -n "${STUB_PROJECT:-}" && "$asked" != "${STUB_PROJECT}" ]]; then
+        exit 0
+    fi
     printf '%s\n' "${STUB_COMPOSE:-}"
     ;;
   inspect)
@@ -250,12 +295,23 @@ export STUB_COMPOSE STUB_PS STUB_PS_CALLED
 OUT=$(run "$T/with-compose" 2>&1); RC=$?
 check "empty compose set exits 1"   "1"   "$RC"
 check "error mentions --filter"     "yes" "$(contains "$OUT" "--filter")"
+# Both escape hatches, since a stack under its own project name is fixed by
+# --project and one without a shared prefix cannot use --filter at all.
+check "error mentions --project"    "yes" "$(contains "$OUT" "--project")"
 # Falling back to every container on the host would be a silently wrong answer:
 # it would report on containers that have nothing to do with this project.
 check "no fallback to all containers" "no" "$(contains "$OUT" "HEALTHY")"
 check "stray container not reported"  "no" "$(contains "$OUT" "stray_container")"
-check "compose route never calls docker ps" "0" \
-    "$(wc -l < "$STUB_PS_CALLED" | tr -d ' ')"
+# The compose route may consult `docker ps` to discover a project name from
+# container labels, but never to obtain a container set: a name lookup reads
+# metadata, while listing containers would hand this check a set the compose
+# file never defined. The distinction is the --filter argument, so assert on
+# that rather than on whether `ps` was called at all.
+PS_CALLS=$(cat "$STUB_PS_CALLED")
+check "compose route asks ps only for labels" "no" \
+    "$(contains "$PS_CALLS" "name=")"
+check "any ps call is a label query" "yes" \
+    "$([[ -z "$PS_CALLS" ]] && echo yes || contains "$PS_CALLS" "label=")"
 unset STUB_COMPOSE STUB_PS_CALLED
 
 echo "== 9. the compose candidate list is the Compose-Spec names in the root =="
@@ -285,6 +341,175 @@ export STUB_PS
 OUT=$(run "$T/no-compose" --filter nosuch_ 2>&1); RC=$?
 check "empty filtered set exits 1" "1"   "$RC"
 check "names the filter used"      "yes" "$(contains "$OUT" "nosuch_")"
+
+echo "== 11. --project names the compose project the stack actually runs under =="
+# The issue: `docker compose -p mystack -f a.yml -f b.yml up` puts the containers
+# in project "mystack", while `docker compose -f a.yml ps` asks for a project
+# named after a.yml's directory. Wrong project, empty answer, healthy stack
+# reported as absent.
+STUB_COMPOSE='{"Name":"shopfront_api","State":"running","Health":"healthy","Status":"Up 6 hours (healthy)"}'
+STUB_PROJECT="shopfront"
+STUB_COMPOSE_CALLED="$T/compose-called-11"
+: > "$STUB_COMPOSE_CALLED"
+export STUB_COMPOSE STUB_PROJECT STUB_COMPOSE_CALLED
+OUT=$(run "$T/with-compose" --project shopfront 2>&1); RC=$?
+check "named project found"        "0"   "$RC"
+check "container is reported"      "yes" "$(contains "$OUT" "shopfront_api")"
+check "1/1 OK"                     "yes" "$(contains "$OUT" "HEALTHY (1/1")"
+check "not reported as absent"     "no"  "$(contains "$OUT" "no containers found")"
+check "project passed to compose"  "yes" \
+    "$(contains "$(cat "$STUB_COMPOSE_CALLED")" "-p shopfront")"
+check "header names the project"   "yes" "$(contains "$OUT" "Compose project: shopfront")"
+unset STUB_COMPOSE_CALLED
+
+# Without the name, the same stack is invisible. This is the asymmetry that makes
+# the option load-bearing rather than cosmetic.
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "same stack unnamed is not found" "1" "$RC"
+unset STUB_PROJECT STUB_COMPOSE
+
+echo "== 12. COMPOSE_PROJECT_NAME in the .env beside the compose file is used =="
+# Compose reads this file itself when it starts the stack, so it is the one place
+# the project name is recorded where both sides can see it. Honouring it means a
+# wrapper script that sets it needs no extra argument here.
+mkdir -p "$T/dotenv"
+: > "$T/dotenv/docker-compose.yml"
+cat > "$T/dotenv/.env" <<'ENV'
+# Shared by the stack and this check.
+COMPOSE_PROJECT_NAME=warehouse
+POSTGRES_PASSWORD=not-a-project-name
+ENV
+STUB_COMPOSE='{"Name":"warehouse_api","State":"running","Health":"healthy","Status":"Up 3 days (healthy)"}'
+STUB_PROJECT="warehouse"
+export STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/dotenv" 2>&1); RC=$?
+check ".env project found, no args"  "0"   "$RC"
+check "container reported"           "yes" "$(contains "$OUT" "warehouse_api")"
+check "header names the project"     "yes" "$(contains "$OUT" "Compose project: warehouse")"
+
+# An explicit --project is the operator speaking now; the file is a default.
+STUB_PROJECT="override"
+export STUB_PROJECT
+OUT=$(run "$T/dotenv" --project override 2>&1); RC=$?
+check "--project beats .env"      "0"   "$RC"
+check "header names the override" "yes" "$(contains "$OUT" "Compose project: override")"
+check ".env value not used"       "no"  "$(contains "$OUT" "Compose project: warehouse")"
+unset STUB_PROJECT STUB_COMPOSE
+
+# Quoted values and surrounding whitespace are both legal in a Compose .env, and
+# a name arriving with its quotes attached matches no project at all.
+mkdir -p "$T/dotenv-quoted"
+: > "$T/dotenv-quoted/docker-compose.yml"
+cat > "$T/dotenv-quoted/.env" <<'ENV'
+  COMPOSE_PROJECT_NAME = "warehouse-staging"
+ENV
+STUB_COMPOSE='{"Name":"warehouse-staging_api","State":"running","Health":"healthy","Status":"Up 1 day (healthy)"}'
+STUB_PROJECT="warehouse-staging"
+export STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/dotenv-quoted" 2>&1); RC=$?
+check "quoted and spaced value parsed" "0"   "$RC"
+check "no quotes in the name"          "no"  "$(contains "$OUT" '"warehouse-staging"')"
+unset STUB_PROJECT STUB_COMPOSE
+
+# A commented-out assignment is not an assignment. Reading it would send the
+# check off to a project nobody started.
+mkdir -p "$T/dotenv-commented"
+: > "$T/dotenv-commented/docker-compose.yml"
+cat > "$T/dotenv-commented/.env" <<'ENV'
+#COMPOSE_PROJECT_NAME=retired-name
+ENV
+STUB_COMPOSE="$(c ledger_api running 'Up 1 hour')"
+export STUB_COMPOSE
+OUT=$(run "$T/dotenv-commented" 2>&1)
+check "commented assignment ignored" "no" "$(contains "$OUT" "retired-name")"
+check "no project line at all"       "no" "$(contains "$OUT" "Compose project:")"
+unset STUB_COMPOSE
+
+echo "== 13. with no name given, the project comes from the containers' labels =="
+# The case where nothing on disk records the name: the stack was started as
+# `docker compose -p <name> -f a.yml -f b.yml up` and the name lives only in the
+# shell history. The containers themselves still know it.
+mkdir -p "$T/labelled"
+: > "$T/labelled/docker-compose.yml"
+LABELLED_FILE="$T/labelled/docker-compose.yml"
+STUB_LABELS=$(printf 'invoicing\t%s,%s/docker-compose.prod.yml\n' "$LABELLED_FILE" "$T/labelled")
+STUB_COMPOSE='{"Name":"invoicing_api","State":"running","Health":"healthy","Status":"Up 5 hours (healthy)"}'
+STUB_PROJECT="invoicing"
+export STUB_LABELS STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/labelled" 2>&1); RC=$?
+check "project discovered from labels" "0"   "$RC"
+check "container reported"             "yes" "$(contains "$OUT" "invoicing_api")"
+check "header names the project"       "yes" "$(contains "$OUT" "Compose project: invoicing")"
+
+# A container of a DIFFERENT stack must not donate its project name. Its
+# config_files list does not mention this compose file, and adopting it would
+# report on a stack that has nothing to do with this directory.
+STUB_LABELS=$(printf 'someone-else\t/srv/other/docker-compose.yml\n')
+export STUB_LABELS
+OUT=$(run "$T/labelled" 2>&1); RC=$?
+check "foreign project not adopted" "1"  "$RC"
+check "its name is not used"        "no" "$(contains "$OUT" "someone-else")"
+
+# A path that merely contains the compose file path as a substring is a different
+# file. /srv/app/docker-compose.yml.bak must not match /srv/app/docker-compose.yml.
+STUB_LABELS=$(printf 'backup-stack\t%s.bak\n' "$LABELLED_FILE")
+export STUB_LABELS
+OUT=$(run "$T/labelled" 2>&1); RC=$?
+check "substring path is not a match" "1"  "$RC"
+check "backup stack not adopted"      "no" "$(contains "$OUT" "backup-stack")"
+unset STUB_LABELS STUB_PROJECT STUB_COMPOSE
+
+# An explicit --project still wins: discovery is the fallback, not an override.
+mkdir -p "$T/labelled-override"
+: > "$T/labelled-override/docker-compose.yml"
+STUB_LABELS=$(printf 'from-labels\t%s/docker-compose.yml\n' "$T/labelled-override")
+STUB_COMPOSE='{"Name":"chosen_api","State":"running","Health":"healthy","Status":"Up 1 hour (healthy)"}'
+STUB_PROJECT="chosen"
+export STUB_LABELS STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/labelled-override" --project chosen 2>&1); RC=$?
+check "--project beats label discovery" "0"  "$RC"
+check "label name not used"             "no" "$(contains "$OUT" "from-labels")"
+unset STUB_LABELS STUB_PROJECT STUB_COMPOSE
+
+echo "== 14. a broken daemon is reported as such, not as an empty stack =="
+# Swallowing Docker's stderr makes a permission problem read exactly like a
+# stopped stack, and both come out as "no containers found" with exit 1. They
+# call for opposite responses: fix your socket access, versus start the stack.
+STUB_DAEMON_ERR="permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"
+export STUB_DAEMON_ERR
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "daemon error has its own exit code" "3"   "$RC"
+check "says the daemon is unreachable"     "yes" "$(contains "$OUT" "cannot reach the Docker daemon")"
+check "keeps Docker's own message"         "yes" "$(contains "$OUT" "permission denied")"
+check "names the socket from the message"  "yes" "$(contains "$OUT" "/var/run/docker.sock")"
+check "not blamed on a stopped stack"      "no"  "$(contains "$OUT" "no containers found")"
+check "does not suggest compose up"        "no"  "$(contains "$OUT" "up -d")"
+
+# The same must hold for the --filter route, which reaches Docker by a different
+# call and would otherwise keep reporting "No containers found".
+OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
+check "filter route also exits 3"        "3"   "$RC"
+check "filter route names the daemon"    "yes" "$(contains "$OUT" "cannot reach the Docker daemon")"
+check "filter route keeps the message"   "yes" "$(contains "$OUT" "permission denied")"
+check "filter route not called empty"    "no"  "$(contains "$OUT" "No containers found")"
+
+# A daemon that is down rather than unreadable is the same class of problem.
+STUB_DAEMON_ERR="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+export STUB_DAEMON_ERR
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "daemon down exits 3"          "3"   "$RC"
+check "daemon down keeps message"    "yes" "$(contains "$OUT" "Is the docker daemon running")"
+unset STUB_DAEMON_ERR
+
+# The genuinely empty stack must keep its own distinct report: a working daemon
+# that simply has no containers for this project is exit 1, not 3.
+STUB_COMPOSE=""
+export STUB_COMPOSE
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "empty stack is still exit 1"      "1"   "$RC"
+check "empty stack says no containers"   "yes" "$(contains "$OUT" "no containers found")"
+check "empty stack blames no daemon"     "no"  "$(contains "$OUT" "cannot reach the Docker daemon")"
+unset STUB_COMPOSE
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
