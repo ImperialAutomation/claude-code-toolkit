@@ -253,6 +253,18 @@ git -C <worktree> checkout <feature_branch>
 git -C <worktree> pull origin <feature_branch>
 ```
 
+#### Step 1b: Reset the progress file
+
+**Mandatory before every spawn — see "Reset the progress file before every
+spawn" below.** Overwrite `/tmp/<project>-epic-progress-<N>.txt` with the Write
+tool:
+
+```
+PHASE: SPAWNED
+SPAWNED_AT: <YYYY-MM-DD HH:MM:SS>
+DETAIL: agent for #<N> not started yet
+```
+
 #### Step 2: Fetch issue details and classify
 
 ```bash
@@ -414,6 +426,11 @@ PHASE: <milestone-name>
 DETAIL: <optional context>
 TESTS: <passed>/<total> passed, <failed> failed
 
+The file already exists and reads `PHASE: SPAWNED` — the orchestrator wrote that
+before spawning you. Overwrite it with the Write tool as usual; there is nothing
+in it to preserve. Your first milestone write is also what tells the orchestrator
+you are alive, so do not skip `READING_CODEBASE`.
+
 Milestones to report (update the file BEFORE starting each phase):
 - READING_CODEBASE — when you start exploring files. DETAIL: which directories/files
 - WRITING_TESTS — when you start writing test code. DETAIL: number of test classes/cases
@@ -544,6 +561,11 @@ Format (one line per field, only PHASE is required):
 PHASE: <milestone-name>
 DETAIL: <optional context>
 
+The file already exists and reads `PHASE: SPAWNED` — the orchestrator wrote that
+before spawning you. Overwrite it with the Write tool as usual; there is nothing
+in it to preserve. Your first milestone write is also what tells the orchestrator
+you are alive, so do not skip `SCANNING_CODEBASE`.
+
 Milestones to report (update the file BEFORE starting each phase):
 - SCANNING_CODEBASE — when you start reviewing code. DETAIL: which directories
 - RUNNING_AUDIT_SCRIPTS — when running audit scripts. DETAIL: which script
@@ -573,6 +595,57 @@ ATTEMPTS: <what was tried>
 LAST_ERROR_OUTPUT: <relevant error output>
 ```
 
+### Reset the progress file before every spawn
+
+Progress file names are fixed per epic and per issue, so they are reused. The
+same path is written by every run: the first attempt at a sub-issue and its
+re-spawn after a recovery, the first Phase Final and the Phase Final that runs
+again after a late sub-issue is merged.
+
+Nothing clears them. A second run therefore starts by reading the previous run's
+file, which already says `PHASE: DONE` — so monitoring ends immediately, and the
+previous run's `DETAIL` is reported as the new agent's result. That is not a
+delayed or partial answer; it is a complete, plausible, wrong one, and nothing in
+the file says which run wrote it. The observed case relayed a WARN that an
+earlier round had already found and fixed, and the new agent then overwrote the
+evidence.
+
+**So: immediately before every `Task` spawn that has a progress file, overwrite
+that file with the Write tool.** Use the spawn's own path and nothing else:
+
+```
+PHASE: SPAWNED
+SPAWNED_AT: <YYYY-MM-DD HH:MM:SS>
+DETAIL: <what was spawned> not started yet
+```
+
+This applies to all of them, with no exceptions:
+
+| Spawn | File |
+|---|---|
+| Per sub-issue (Step 1b above) | `/tmp/<project>-epic-progress-<N>.txt` |
+| Re-spawn after a recovery | `/tmp/<project>-epic-progress-<N>.txt` |
+| Phase Final — Validation & Tests | `/tmp/<project>-epic-verify-validation-<epic>.txt` |
+| Phase Final — Runtime & Smoke Test | `/tmp/<project>-epic-verify-runtime-<epic>.txt` |
+
+Write it, then spawn, then start monitoring — in that order. Resetting after the
+spawn races the agent's own first write and can erase it.
+
+A re-spawn is the case most easily missed, because by then the file is the one
+you have been reading all along and looks like live state. It is the dead
+agent's last words.
+
+**Where the wait is a `wait-for-pattern.sh` call rather than a polling loop**,
+pass the spawn time as well — the reset and the flag guard the same mistake from
+two directions, and the flag is the half that still holds if a reset is ever
+skipped:
+
+```bash
+SPAWNED_AT=$(date +%s)   # capture BEFORE spawning
+~/.claude/bin/wait-for-pattern.sh --newer-than "$SPAWNED_AT" \
+    /tmp/<project>-epic-verify-runtime-<epic>.txt 'DONE|FAILED' 1800
+```
+
 #### Step 3C: Monitor sub-agent progress
 
 **⚠️ TOOL RULE: Use the Read tool to read progress files and TaskOutput to check agent status. NEVER use Bash commands like `tail`, `cat`, `grep`, or `head` for monitoring — these will be blocked by permissions and stall the epic.**
@@ -582,7 +655,10 @@ After spawning the background sub-agent:
 1. Store the `task_id` from the Task tool response
 2. **Poll every 30-45 seconds** until the agent completes:
    a. Use the **Read tool** on `/tmp/<project>-epic-progress-<N>.txt` (ignore if file doesn't exist yet — agent is still starting)
-   b. Parse the `PHASE:`, `DETAIL:`, and `TESTS:` fields
+   b. Parse the `PHASE:`, `DETAIL:`, and `TESTS:` fields. **If the first read
+      already shows a terminal phase (`DONE`/`FAILED`), do not report it** —
+      check it against the current run first, per "A terminal phase on the first
+      poll" below
    c. **Report to the user** with a human-readable status message:
       ```
       ⏳ #<N> (<title>): <human-readable phase>
@@ -594,7 +670,27 @@ After spawning the background sub-agent:
    f. If completed → extract the result text and proceed to Step 4
    g. **If the progress file hasn't advanced across 2-3 consecutive polls AND `TaskOutput` returns "No task found with ID"** → the sub-agent has died silently (a process-level failure, not a task-level FAILED response). Do not treat this the same as an active FAILED result. Follow "Sub-agent Liveness & Recovery" below before re-spawning anything.
 
-**Two false-alarm sources to avoid when judging liveness:**
+**A terminal phase on the first poll is a result you have not earned.** An agent
+that genuinely finished passed through `READING_CODEBASE`, `IMPLEMENTING` and the
+rest first; a `DONE` that is there within seconds of the spawn almost always
+belongs to the previous run (see "Reset the progress file before every spawn").
+Resetting the file is what prevents this, so a fast `DONE` is also the signal
+that the reset was skipped. Before reporting any suspiciously fast match:
+
+- Check the file still carries the `SPAWNED_AT` line the reset wrote, and that
+  the phases above it are ones *this* run could have reached. A `DONE` with no
+  `SPAWNED_AT` above it was never reset.
+- Check the `DETAIL` against work this run has actually done. A detail naming a
+  file, a finding or a fix you already saw resolved in an earlier round is the
+  earlier round talking.
+- Confirm with `TaskOutput`. A real completion has a task result; a stale file
+  has none. The task result, not the file, is the authority on whether the agent
+  finished.
+
+Report it as a result only once all three agree. If they do not, reset the file
+and treat the agent as still starting.
+
+**Two further false-alarm sources to avoid when judging liveness:**
 
 - **Never use repo file mtimes as a liveness signal** (e.g. `find backend/ frontend/ -newermt '...'`). Under the sandbox this returns nothing while the agent is demonstrably editing files — it will report a healthy agent as dead. The progress file is the signal; `TaskOutput` is the proof.
 - **A silent progress file is not by itself proof of death.** An agent making a large edit or thinking through one spot can go a long time without hitting a milestone — the progress file only advances at milestones, not continuously. This is why the `TaskOutput` check in (g) is required, not optional: without that confirmation, treat silence under ~25 minutes as "still working". If you ever monitor on silence alone, use ~40 minutes as the threshold, and run the clock from when you *started watching*, not from the mtime left behind by a previous (dead) agent — otherwise the timer fires the instant you restart.
@@ -619,7 +715,11 @@ A sub-agent can die mid-task without ever sending a completion notification or w
    - `git -C <worktree> stash push -u -m "orphaned #<N> work from dead sub-agent: <short description>"` — never `git checkout --` or `git clean` a dead agent's edits.
    - Note the stash reference so it can be referenced when re-spawning. A stash belongs to the repository, not the tree, so say which worktree it was taken from.
 4. If a sub-branch has zero commits (identical tip to the feature branch) and nothing was stashed for it, it is safe to delete (`git -C <worktree> branch -d <sub-branch>`) before re-spawning — nothing is lost.
-5. **Re-spawn** with an explicit note in the prompt:
+5. **Re-spawn** with an explicit note in the prompt. **First reset
+   `/tmp/<project>-epic-progress-<N>.txt`** (see "Reset the progress file before
+   every spawn") — the dead agent's file is still there, and on a re-spawn it is
+   the file you have been reading all along, so it reads like live state rather
+   than a leftover:
    - State plainly that a previous attempt died and this is a fresh attempt.
    - If a stash exists, point to it by name/message and say it MAY be inspected for reference (`git -C <worktree> stash show -p stash@{N}`) but must not be blindly applied — treat it as unverified, not a starting point to resume from.
    - If the second failure signature (confused non-response) was the trigger, add an explicit instruction to actually perform the implementation and not just describe or delegate it (see the hardened Response Format instruction below).
@@ -629,6 +729,7 @@ A sub-agent can die mid-task without ever sending a completion notification or w
 
    | Progress file value | Display to user |
    |---|---|
+   | SPAWNED | Starting up |
    | READING_CODEBASE | Analyzing codebase |
    | WRITING_TESTS | Writing tests |
    | RUNNING_TESTS_RED | Running tests (RED phase) |
@@ -724,6 +825,13 @@ gh pr edit <tracking_pr> --body-file /tmp/<project>-tracking-pr-update-$ARGUMENT
 
 **CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after polling waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
 
+**If this is not the epic's first Phase Final** — a late sub-issue was merged
+after the first round, so verification runs again — then both verification
+progress files already hold a completed run. Reset each one before its spawn
+(Steps 1 and 2 below say where), and apply "A terminal phase on the first poll"
+when reading them: a `DONE` arriving within seconds is the first round
+answering, and its warnings are findings you have already dispositioned.
+
 **Every prompt below opens with this block**, with `<worktree>` filled in. A
 fresh context window inherits none of the Worktree section above, and these
 agents commit to a shared branch:
@@ -743,7 +851,12 @@ on another session's branch — both silently, since both trees are valid checko
 
 ### Step 1: Spawn verification sub-agent — Validation & Tests
 
-Spawn a background agent:
+**First reset `/tmp/<project>-epic-verify-validation-<epic>.txt`** with the Write
+tool (see "Reset the progress file before every spawn"). Phase Final is the step
+most likely to run twice on one epic — a late sub-issue merged after the first
+round sends it through again, against a file that already says `DONE`.
+
+Then spawn a background agent:
 
 ```
 ## Task: Project Validation & Test Suite for Epic #<epic_number>
@@ -836,7 +949,9 @@ feature branch as above.
 
 ### Step 3: Report
 
-Write progress to `/tmp/<project>-epic-verify-validation-$ARGUMENTS.txt`:
+Write progress to `/tmp/<project>-epic-verify-validation-$ARGUMENTS.txt` with the
+Write tool. It already reads `PHASE: SPAWNED` — the orchestrator wrote that
+before spawning you; overwrite it, there is nothing in it to preserve.
 
 PHASE: RUNNING_VALIDATION / RUNNING_TESTS / FIXING / DONE
 DETAIL: <what's happening>
@@ -855,7 +970,10 @@ ERROR: <description>
 
 ### Step 2: Spawn verification sub-agent — Runtime & Smoke Test
 
-Spawn a background agent:
+**First reset `/tmp/<project>-epic-verify-runtime-<epic>.txt`** with the Write
+tool (see "Reset the progress file before every spawn").
+
+Then spawn a background agent:
 
 ```
 ## Task: Runtime Verification & Smoke Test for Epic #<epic_number>
@@ -937,7 +1055,9 @@ If the project has no such script, report SKIP.
 
 ### Step 6: Report
 
-Write progress to `/tmp/<project>-epic-verify-runtime-$ARGUMENTS.txt`:
+Write progress to `/tmp/<project>-epic-verify-runtime-$ARGUMENTS.txt` with the
+Write tool. It already reads `PHASE: SPAWNED` — the orchestrator wrote that
+before spawning you; overwrite it, there is nothing in it to preserve.
 
 PHASE: REBUILDING / HEALTH_CHECK / SMOKE_TEST / MIGRATION_CHECK / LOGIN_TEST / DONE
 DETAIL: <what's happening>

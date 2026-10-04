@@ -232,6 +232,8 @@ misdescribe the argument.
 | `docker-health-check.sh` | `docker-health-check.sh [project-dir] [--timeout S] [--filter PREFIX] [--project NAME]` | Runtime Docker container health verification (status, restarts, error logs). `--filter` names the container set directly and needs no compose file; without it the set comes from a compose file in the project root, queried under the project named by `--project`, by `COMPOSE_PROJECT_NAME`, or discovered from container labels. Exit 3 means the Docker daemon could not be reached |
 | `smoke-test.sh` | `smoke-test.sh [base-url] [--health-token TOKEN]` | API endpoint smoke testing with auto-discovery |
 | `http-status.sh` | `http-status.sh [--body] [--max-time SECS] <url> [url...]` | HTTP status per URL as a single command. One URL prints the bare code; several print `<status>  <url>`. 4xx/5xx exit 0 (a valid answer); transport failures print `ERR` and exit 1 |
+| `wait-for-pattern.sh` | `wait-for-pattern.sh [--newer-than EPOCH] <file> <extended-regex> [timeout] [poll]` | Block until a regex appears in a file. Exit 0 prints the matching line(s); exit 1 dumps the file's current contents for diagnosis. A missing file is a normal starting state, not an error. `--newer-than` ignores the file until its mtime passes the given epoch |
+| `wait-for-healthy.sh` | `wait-for-healthy.sh <container> [--timeout SECS] [--interval SECS]` | Block until a Docker container reports healthy. Exit 1 on timeout |
 
 `docker-health-check.sh` has to decide which containers belong to the project, and the compose file alone does not always say. `docker compose -f <file> ps` derives the project name from that file's directory, so a stack started under its own name (`docker compose -p mystack -f a.yml -f b.yml up`) or from an `include:` set lives in a project this query never asks about. The query then succeeds and returns nothing, which is the worst available failure: a running, healthy stack reads exactly like a stopped one.
 
@@ -240,6 +242,20 @@ The project name is therefore looked for in several places, in this order: `--pr
 `--filter <prefix>` skips that question entirely: the prefix names the container set directly, no compose file is consulted, and the containers come from `docker ps -a` (including stopped ones, which are findings rather than absences). It remains the right answer when the containers share a prefix but no compose project, and the only one when there is no compose file to point at. Record the prefix as `Container prefix:` in the project CLAUDE.md's Integration Verification section, where `/verify` and `/pre-merge` both read it.
 
 Exit codes separate the three outcomes that used to look alike: 1 for container issues or a project with no containers, 2 for a usage error or a missing compose file, and 3 for a Docker daemon that could not be reached. Docker's own message comes through on exit 3, so a permission problem on the socket no longer presents itself as a stack you forgot to start.
+
+`wait-for-pattern.sh --newer-than <epoch>` exists because a progress file whose
+name is fixed per task is reused by every run of that task, and nothing clears it
+in between. The second run's wait then matches the first run's `PHASE: DONE`
+within a second, and the caller reports the previous run's result as the new
+one — a complete, plausible, wrong answer, with nothing in the file saying which
+run wrote it. Exit 0 carries no such information; the mtime does. Capture
+`SPAWNED_AT=$(date +%s)` *before* starting the watched process and pass it, and
+only a write made after that moment can satisfy the pattern. A file that stays
+stale times out instead, and says so, naming the cutoff rather than leaving a
+dump in which the pattern is visibly present. The `/implement-epic` skill pairs
+this with resetting each progress file before its spawn: belt and braces for the
+same mistake, since the reset is an instruction an agent can skip and the flag is
+not.
 
 `http-status.sh` exists for permission matching, not for curl features. `curl -s -o /dev/null -w "%{http_code}\n" <url>` is rarely wanted just once, and two on a line make a compound command — every segment after the `;` or `&&` goes unmatched and prompts, even with a broad `Bash(curl *)` rule allowlisted. Auth headers, retries and JSON parsing are deliberately absent: past that point it is not a smoke test and calling `curl` directly is clearer. For waiting until a service comes up, use `wait-for-pattern.sh` or `wait-for-healthy.sh`.
 
