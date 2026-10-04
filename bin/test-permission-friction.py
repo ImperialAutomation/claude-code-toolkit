@@ -195,6 +195,60 @@ check(
 )
 
 
+# --- classify_command: hook denies are not prompts (issue #73) ---
+# hook-auto-approve-bash.py DENIES these outright. A deny shows no permission
+# prompt at all: it is the opposite signal (the agent reached for the wrong
+# tool) and needs a different remedy, so it must not be counted as friction.
+
+check(
+    "classify_command: a sed file read is reported as a hook deny, not a prompt",
+    pf.classify_command("grep x f | head; sed -n '1,5p' f", _HOOK_ALLOW, _DENY)
+    == (False, pf.REASON_HOOK_DENY_SED_READ, None),
+)
+
+check(
+    "classify_command: inline Python file read is reported as a hook deny",
+    pf.classify_command(
+        "python3 -c \"print(open('/etc/hosts').read())\"", _HOOK_ALLOW, _DENY
+    )
+    == (False, pf.REASON_HOOK_DENY_PYTHON_READ, None),
+)
+
+check(
+    "classify_command: an until+sleep file wait loop is reported as a hook deny",
+    pf.classify_command(
+        "until [ -f /tmp/done ]; do sleep 2; done", _HOOK_ALLOW, _DENY
+    )
+    == (False, pf.REASON_HOOK_DENY_WAIT_LOOP, None),
+)
+
+check(
+    "classify_command: a hook deny outranks a matching deny rule's prompt verdict",
+    pf.classify_command("sed -n '1,5p' f", _HOOK_ALLOW, ["Bash(sed *)"])[1]
+    == pf.REASON_HOOK_DENY_SED_READ,
+)
+
+check(
+    "classify_command: a real sed stream edit still prompts, not a hook deny",
+    pf.classify_command("sed -i 's/a/b/' f", _HOOK_ALLOW, _DENY)[1] == pf.REASON_NO_RULE,
+)
+
+# CLAUDE.md explicitly permits python -c for calculation. It must never land in
+# a deny category — whether it prompts is a separate question decided by the
+# allow rules (python3 has no rule here, so it legitimately prompts as NO_RULE).
+check(
+    "classify_command: python doing arithmetic is untouched by the deny category",
+    pf.classify_command('python3 -c "print(2 + 2)"', _HOOK_ALLOW, _DENY)[1]
+    not in pf.HOOK_DENY_REASONS,
+)
+
+check(
+    "is_hook_denied exposes the matching rule name",
+    pf.is_hook_denied("sed -n '1,5p' f") == pf.REASON_HOOK_DENY_SED_READ
+    and pf.is_hook_denied("git status") is None,
+)
+
+
 # --- load_allow_rules ---
 
 tmpdir = tempfile.mkdtemp(prefix="permission-friction-test-")
@@ -476,6 +530,49 @@ try:
     check("format_report_text: mentions recurring marker for sessions>=2", "recurring" in text_report)
     check("format_report_text: includes total call count", "4" in text_report)
 
+    # --- hook denies stay out of prompted_estimate (issue #73) ---
+    # A chain whose sed segment the hook DENIES shows no prompt at all. It must
+    # be reported in its own bucket, never inflate the friction estimate, and
+    # never create a `grep`/`sed` pattern row that /retro would act on.
+    deny_dir = fake_projects_root / "-home-jan-Projects-fake-deny-project"
+    deny_dir.mkdir(parents=True)
+    (deny_dir / "session-d.jsonl").write_text(
+        "\n".join(
+            [
+                _bash_line("d1", "grep -rn TODO src | head; sed -n '1,20p' src/main.py"),
+                _bash_line("d2", "grep -rn TODO src | head; sed -n '5,9p' README.md"),
+                _bash_line("d3", "curl https://api.example.com/health"),
+            ]
+        )
+    )
+
+    pf.CLAUDE_HOME = fake_home
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        deny_report = pf.analyze_friction("/home/jan/Projects/fake-deny-project", days=30)
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    check(
+        "analyze_friction: hook-denied sed reads are excluded from prompted_estimate",
+        deny_report["prompted_estimate"] == 1,
+    )
+    check(
+        "analyze_friction: hook-denied calls are reported in their own bucket",
+        [(d["reason"], d["count"]) for d in deny_report["hook_denied"]]
+        == [(pf.REASON_HOOK_DENY_SED_READ, 2)],
+    )
+    check(
+        "analyze_friction: a hook-denied chain creates no pattern row",
+        [p["pattern"] for p in deny_report["patterns"]]
+        == [f"curl — {pf.REASON_NO_RULE}"],
+    )
+    check(
+        "format_report_text: surfaces the hook-denied bucket",
+        "denied by hook" in pf.format_report_text(deny_report, days=30),
+    )
+
     # graceful handling of a project with no transcripts at all (AC requirement)
     pf.CLAUDE_HOME = fake_home
     pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
@@ -487,7 +584,14 @@ try:
 
     check(
         "analyze_friction: empty/missing transcript dir yields a zeroed report, not a crash",
-        empty_report == {"total_calls": 0, "prompted_estimate": 0, "denied": 0, "patterns": []},
+        empty_report
+        == {
+            "total_calls": 0,
+            "prompted_estimate": 0,
+            "denied": 0,
+            "hook_denied": [],
+            "patterns": [],
+        },
     )
 finally:
     shutil.rmtree(e2e_tmpdir, ignore_errors=True)

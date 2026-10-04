@@ -121,6 +121,37 @@ REASON_CD_PREFIX = "cd-prefix defeats first-token matching"
 REASON_CHAIN = "compound command (;/&&/||/|) has an unmatched segment"
 REASON_NO_RULE = "no allow rule covers this command"
 
+# Commands hook-auto-approve-bash.py DENIES. A deny is not friction: no prompt
+# is ever shown, so counting these as "prompted" overstates the estimate and
+# points /retro at the wrong remedy. They are the opposite signal — the agent
+# reached for a shell command where a native tool exists — and the fix is to
+# use that tool, never an allowlist entry. Reported separately for that reason.
+REASON_HOOK_DENY_SED_READ = "denied by hook: sed used as a file reader"
+REASON_HOOK_DENY_PYTHON_READ = "denied by hook: inline Python opens a file"
+REASON_HOOK_DENY_WAIT_LOOP = "denied by hook: until+sleep wait loop on a file"
+
+HOOK_DENY_REASONS = (
+    REASON_HOOK_DENY_SED_READ,
+    REASON_HOOK_DENY_PYTHON_READ,
+    REASON_HOOK_DENY_WAIT_LOOP,
+)
+
+
+def is_hook_denied(command):
+    """Return the REASON_HOOK_DENY_* constant for `command`, or None.
+
+    Mirrors hook-auto-approve-bash.py's deny branches in the same order the
+    hook itself evaluates them, so the category a command lands in here is
+    the message the agent actually saw.
+    """
+    if _hook.command_has_sed_file_read(command):
+        return REASON_HOOK_DENY_SED_READ
+    if _hook.command_has_python_file_read(command):
+        return REASON_HOOK_DENY_PYTHON_READ
+    if _hook.command_has_until_sleep_wait_loop(command):
+        return REASON_HOOK_DENY_WAIT_LOOP
+    return None
+
 
 def _is_segment_covered(segment_tokens, allow_rules):
     """True if a chain segment would NOT, on its own, cause a prompt.
@@ -166,7 +197,16 @@ def classify_command(command, allow_rules, deny_rules):
     Mirrors hook-auto-approve-bash.py's own safety logic first — a command
     that hook would silently approve never reaches a prompt in practice,
     regardless of raw rule coverage.
+
+    A hook DENY is checked before anything else, because the hook runs before
+    permission matching: once it denies, no prompt is shown and no allow or
+    deny rule is ever consulted. Such a command returns would_prompt=False
+    with a REASON_HOOK_DENY_* reason — reported, but not as friction.
     """
+    hook_deny = is_hook_denied(command)
+    if hook_deny is not None:
+        return False, hook_deny, None
+
     if command_matches_any_rule(command, deny_rules):
         return True, REASON_DENY_MATCH, None
 
@@ -314,14 +354,33 @@ def collect_bash_tool_uses(project_dir, days=30):
     return results
 
 
-def _pattern_key(command, reason):
-    """Normalize a command into a grouping key for the report: the first
-    whitespace token (the sub-command binary/verb) plus the friction
-    reason, e.g. "curl (no allow rule covers this command)". Grouping by
-    first-token mirrors how permission rules themselves match, so the key
-    directly identifies which allowlist entry would fix the pattern."""
-    first_token = command.strip().split(" ", 1)[0] if command.strip() else command
-    return f"{first_token} — {reason}"
+def _culprit_token(culprit_tokens):
+    """The token a remedy for `culprit_tokens` would have to name.
+
+    Strips the cd/env prefixes first: `cd /x && rtk grep ...` must group under
+    `rtk`, not `cd`, since an allow rule or wrapper targets the real command.
+    """
+    stripped = _hook.strip_env_prefix(_hook.strip_cd_prefix(culprit_tokens))
+    tokens = stripped or culprit_tokens
+    return tokens[0] if tokens else ""
+
+
+def _pattern_key(command, reason, culprit=None):
+    """Normalize a command into a grouping key for the report: a command token
+    plus the friction reason, e.g. "curl (no allow rule covers this command)".
+
+    Which token depends on the reason. For a chain it is the CULPRIT segment's
+    first token — grouping chain friction under the command's own first token
+    names a command that is usually already approved (`grep ... | head; sed ...`
+    is a `sed` problem, not a `grep` one), so /retro proposes a remedy for a
+    command that never prompted. For every other reason the whole command is
+    the subject, so its first token is the right key.
+    """
+    if culprit is not None:
+        key_token = _culprit_token(culprit)
+    else:
+        key_token = command.strip().split(" ", 1)[0] if command.strip() else command
+    return f"{key_token} — {reason}"
 
 
 def analyze_friction(project_dir, days=30):
@@ -348,6 +407,8 @@ def analyze_friction(project_dir, days=30):
     pattern_counts = {}
     pattern_sessions = {}
     pattern_examples = {}
+    hook_denied_counts = {}
+    hook_denied_examples = {}
     denied = 0
 
     for entry in tool_uses:
@@ -357,11 +418,17 @@ def analyze_friction(project_dir, days=30):
         if entry["tool_use_id"] in denied_tool_use_ids:
             denied += 1
 
-        would_prompt, reason, _culprit = classify_command(command, allow_rules, deny_rules)
+        would_prompt, reason, culprit = classify_command(command, allow_rules, deny_rules)
+
+        if reason in HOOK_DENY_REASONS:
+            hook_denied_counts[reason] = hook_denied_counts.get(reason, 0) + 1
+            hook_denied_examples.setdefault(reason, command)
+            continue
+
         if not would_prompt:
             continue
 
-        key = _pattern_key(command, reason)
+        key = _pattern_key(command, reason, culprit)
         pattern_counts[key] = pattern_counts.get(key, 0) + 1
         pattern_sessions.setdefault(key, set()).add(session_id)
         pattern_examples.setdefault(key, command)
@@ -377,10 +444,21 @@ def analyze_friction(project_dir, days=30):
     ]
     patterns.sort(key=lambda p: p["count"], reverse=True)
 
+    hook_denied = [
+        {
+            "reason": reason,
+            "count": count,
+            "example": hook_denied_examples[reason],
+        }
+        for reason, count in hook_denied_counts.items()
+    ]
+    hook_denied.sort(key=lambda d: d["count"], reverse=True)
+
     return {
         "total_calls": len(tool_uses),
         "prompted_estimate": sum(p["count"] for p in patterns),
         "denied": denied,
+        "hook_denied": hook_denied,
         "patterns": patterns,
     }
 
@@ -405,6 +483,13 @@ def format_report_text(report, days):
     else:
         lines.append("")
         lines.append("  No prompt-causing patterns found.")
+
+    if report.get("hook_denied"):
+        lines.append("")
+        lines.append("  Denied by hook (no prompt shown — use the native tool instead):")
+        for d in report["hook_denied"]:
+            lines.append(f"    {d['count']:>3}x  {d['reason']}")
+            lines.append(f"           e.g. {d['example']}")
 
     return "\n".join(lines)
 
