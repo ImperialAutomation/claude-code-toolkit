@@ -116,6 +116,12 @@ CI_GRACE=120
 # spaces, parentheses and dots (`test (3.12)`), which a string-built filter
 # would mangle or, worse, read as jq syntax.
 ALLOW_FAILING=()
+# Allow patterns, parallel to ALLOW_FAILING: ALLOW_PATTERN[i] is the ERE that
+# check ALLOW_FAILING[i]'s failed job log must match, or "" for a check allowed
+# by name alone (#75's behaviour). Two indexed arrays rather than an associative
+# one because check names are arbitrary strings — a name with the wrong
+# characters is a usable array value but not a usable bash key.
+ALLOW_PATTERN=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -152,7 +158,39 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: --allow-failing-check requires a check name" >&2
                 exit 1
             fi
-            ALLOW_FAILING+=("$2")
+            # Optional `<name>=<regex>`: the pattern the check's failed job log
+            # must match for the bypass to apply (issue #92). Kept in ONE
+            # argument rather than a separate positional flag because the pair
+            # must not be able to drift: in a generated command line a reordered
+            # pattern would narrow the bypass to the wrong check's cause, and
+            # nothing about the result would look wrong.
+            #
+            # Split on the FIRST `=`, so a pattern may contain `=` freely
+            # (`GHSA-x=y`, `severity=high`). The cost is that a CHECK NAME
+            # containing `=` cannot carry a pattern — it is still allowable by
+            # name alone, since without a `=` there is nothing to split.
+            if [[ "$2" == *=* ]]; then
+                _allow_name="${2%%=*}"
+                _allow_pattern="${2#*=}"
+                if [[ -z "$_allow_name" ]]; then
+                    echo "Error: --allow-failing-check requires a check name before '=' (got: '$2')" >&2
+                    exit 1
+                fi
+                # An empty pattern is an ERE that matches every log, so it would
+                # wave the check through on any failure at all — the unconditional
+                # bypass of #75 wearing the syntax of a narrowed one. That is a
+                # worse failure than either flag alone, because the command line
+                # reads as if a cause had been pinned down.
+                if [[ -z "$_allow_pattern" ]]; then
+                    echo "Error: --allow-failing-check '$2' requires a non-empty pattern after '='" >&2
+                    exit 1
+                fi
+                ALLOW_FAILING+=("$_allow_name")
+                ALLOW_PATTERN+=("$_allow_pattern")
+            else
+                ALLOW_FAILING+=("$2")
+                ALLOW_PATTERN+=("")
+            fi
             shift 2
             ;;
         --ci-timeout)

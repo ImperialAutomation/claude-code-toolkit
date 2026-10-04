@@ -1102,6 +1102,34 @@ assert_exit "regex name: exit code" "1" "$(cat "$repo28b/last-exit.txt")"
 assert_file_absent "regex name: no merge" "$repo28b/merged"
 rm -rf "$repo28b"
 
+# --- Scenario 29: an empty pattern in <name>=<regex> is rejected up front (#92) ---
+# `dependency-audit=` reads as "allow this check, narrowed to its cause" while
+# the cause is the empty regex, which matches every log. That is the widest
+# possible bypass wearing the syntax of the narrowest one, so it is refused
+# before anything is pushed rather than silently behaving like #75's flag.
+repo29=$(make_repo)
+make_fake_gh "$repo29"
+echo "Test PR body" > "$repo29/body.md"
+run_case "empty pattern" "$repo29" "fail-allowed" --allow-failing-check "dependency-audit="
+assert_contains "empty pattern: rejected" "requires a non-empty pattern" "$(cat "$repo29/last-output.txt")"
+assert_exit "empty pattern: exit code" "1" "$(cat "$repo29/last-exit.txt")"
+assert_file_absent "empty pattern: no merge" "$repo29/merged"
+assert_not_contains "empty pattern: nothing pushed" "Pushing" "$(cat "$repo29/last-output.txt")"
+rm -rf "$repo29"
+
+# --- Scenario 29b: an empty name in <name>=<regex> is rejected up front (#92) ---
+# `=GHSA-xxx` carries a cause but no check to attach it to. Same reasoning as
+# #75's empty-name guard: it would match a check named "", i.e. none.
+repo29b=$(make_repo)
+make_fake_gh "$repo29b"
+echo "Test PR body" > "$repo29b/body.md"
+run_case "empty name with pattern" "$repo29b" "fail-allowed" --allow-failing-check "=GHSA-2xqp-wc4f-hj7p"
+assert_contains "empty name+pattern: rejected" "requires a check name" "$(cat "$repo29b/last-output.txt")"
+assert_exit "empty name+pattern: exit code" "1" "$(cat "$repo29b/last-exit.txt")"
+assert_file_absent "empty name+pattern: no merge" "$repo29b/merged"
+assert_not_contains "empty name+pattern: nothing pushed" "Pushing" "$(cat "$repo29b/last-output.txt")"
+rm -rf "$repo29b"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
