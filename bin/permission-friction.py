@@ -11,6 +11,36 @@ Reads transcripts only (no network) from
 ~/.claude/projects/<encoded-project-dir>/*.jsonl, and derives allow/deny
 rules by parsing the merged settings.json files at runtime — never a
 hardcoded allowlist, so it stays correct as the user's permissions evolve.
+
+Attribution: friction in a compound command is attributed to the SEGMENT that
+defeats matching, not the command's first token. `grep ... | head; sed ...`
+prompts because of `sed`; `grep` and `head` are both already approved, so a
+report blaming `grep` sends the remedy to a command that never prompted.
+
+Three things can cover a segment, and all are consulted: the auto-approve
+hook's own safety logic, an allow rule matching the segment alone, and an
+opted-in rewriting-hook prefix (--rewrite-prefix).
+
+Hook denies (`sed -n 'X,Yp' <file>`, inline Python that opens a file, an
+until+sleep file wait loop) are reported in their own bucket and excluded from
+the prompted estimate: a deny shows no prompt at all. It is the opposite
+signal — a native tool exists — and the remedy is that tool, not an allowlist
+entry.
+
+Rewriting hooks: a PreToolUse hook may rewrite a command and allow it in one
+response, so a command no allow rule covers never prompts. Verified against
+rtk 0.45.0: fed `grep -rn foo src` it answers permissionDecision "allow" with
+updatedInput.command = "rtk grep -rn foo src". The transcript nevertheless
+stores what the MODEL emitted — the rewrite lives in the hook's response and
+is never written back to tool_use.input. Measured over ~21k real transcript
+Bash calls: 516 start with `rtk`, dominated by `rtk proxy` (243) and `rtk
+grep` (222), and `rtk proxy` is RTK's own documented escape hatch, a form no
+rewrite produces. Those are commands the model typed itself, i.e. real
+friction — so prefixed commands count as friction BY DEFAULT. Pass
+--rewrite-prefix to opt out per tool. Only the prefixed form is modelled:
+rtk answers "allow" for `grep` but rewrites `jq`/`curl` with no
+permissionDecision at all, so per-command coverage is not derivable from the
+prefix.
 """
 
 import argparse
@@ -121,50 +151,192 @@ REASON_CD_PREFIX = "cd-prefix defeats first-token matching"
 REASON_CHAIN = "compound command (;/&&/||/|) has an unmatched segment"
 REASON_NO_RULE = "no allow rule covers this command"
 
+# Commands hook-auto-approve-bash.py DENIES. A deny is not friction: no prompt
+# is ever shown, so counting these as "prompted" overstates the estimate and
+# points /retro at the wrong remedy. They are the opposite signal — the agent
+# reached for a shell command where a native tool exists — and the fix is to
+# use that tool, never an allowlist entry. Reported separately for that reason.
+REASON_HOOK_DENY_SED_READ = "denied by hook: sed used as a file reader"
+REASON_HOOK_DENY_PYTHON_READ = "denied by hook: inline Python opens a file"
+REASON_HOOK_DENY_WAIT_LOOP = "denied by hook: until+sleep wait loop on a file"
 
-def classify_command(command, allow_rules, deny_rules):
+HOOK_DENY_REASONS = (
+    REASON_HOOK_DENY_SED_READ,
+    REASON_HOOK_DENY_PYTHON_READ,
+    REASON_HOOK_DENY_WAIT_LOOP,
+)
+
+
+# --- rewriting PreToolUse hooks ------------------------------------------------
+# A PreToolUse hook may REWRITE a command and allow it in the same response,
+# which makes a command that no allow rule covers never prompt. RTK's hook does
+# exactly this: fed `grep -rn foo src` it answers permissionDecision "allow"
+# with updatedInput.command = "rtk grep -rn foo src" (verified against the
+# installed rtk 0.45.0).
+#
+# What the transcript stores: the command the MODEL emitted, NOT the rewrite.
+# The rewrite is in the hook's RESPONSE (updatedInput), which is never written
+# back to the tool_use input. Measured over ~21k real transcript Bash calls:
+# 516 entries start with `rtk`, dominated by `rtk proxy` (243) and `rtk grep`
+# (222) — `rtk proxy` is RTK's own documented escape hatch, a form no rewrite
+# ever produces. So those are commands the model typed itself, i.e. REAL
+# friction, and an `rtk`-prefixed segment is NOT treated as covered by default.
+#
+# Opting in with --rewrite-prefix marks the PREFIXED form (`rtk <cmd>`) as
+# covered — that is the form the hook emits, and the one a user would allowlist
+# as `Bash(rtk *)`. A BARE command is deliberately not assumed covered: rtk
+# answers "allow" for `grep` but rewrites `jq`/`curl` with no permissionDecision
+# at all, so matching still runs on the rewritten command and may still prompt.
+# Which commands get the allow is the tool's internal business and not derivable
+# from the prefix, so only the half that is verifiable is modelled. Configurable
+# rather than hard-coded to one tool, since any rewriting hook has this shape.
+DEFAULT_REWRITE_PREFIXES = ()
+
+
+def _is_rewrite_covered(segment_tokens, rewrite_prefixes):
+    """True if a rewriting hook in `rewrite_prefixes` would allow this segment.
+
+    Matches the prefixed form only (`rtk grep ...`) — see the note above on why
+    a bare wrapped command is not assumed covered. An empty `rewrite_prefixes`
+    disables this entirely.
+    """
+    if not rewrite_prefixes:
+        return False
+
+    stripped = _hook.strip_env_prefix(_hook.strip_cd_prefix(segment_tokens))
+    if not stripped:
+        return False
+
+    return stripped[0] in rewrite_prefixes
+
+
+def is_hook_denied(command):
+    """Return the REASON_HOOK_DENY_* constant for `command`, or None.
+
+    Mirrors hook-auto-approve-bash.py's deny branches in the same order the
+    hook itself evaluates them, so the category a command lands in here is
+    the message the agent actually saw.
+    """
+    if _hook.command_has_sed_file_read(command):
+        return REASON_HOOK_DENY_SED_READ
+    if _hook.command_has_python_file_read(command):
+        return REASON_HOOK_DENY_PYTHON_READ
+    if _hook.command_has_until_sleep_wait_loop(command):
+        return REASON_HOOK_DENY_WAIT_LOOP
+    return None
+
+
+def _is_segment_covered(segment_tokens, allow_rules, rewrite_prefixes=()):
+    """True if a chain segment would NOT, on its own, cause a prompt.
+
+    Three independent things can cover a segment, and all must be consulted —
+    checking only allow rules (as this code once did) reports a harmless
+    leading `cd /home/jan/Projects/x` as the culprit, because no rule names
+    `cd` even though the hook sees straight through it:
+
+      1. hook-auto-approve-bash.py's `is_segment_safe` — the hook approves the
+         whole command before permission matching ever runs, so a segment it
+         accepts never reaches a prompt;
+      2. an allow rule matching the segment on its own;
+      3. a REWRITING hook named in `rewrite_prefixes` (see
+         `DEFAULT_REWRITE_PREFIXES`), for a segment already carrying that
+         hook's prefix.
+    """
+    if _hook.is_segment_safe(segment_tokens):
+        return True
+    if _is_rewrite_covered(segment_tokens, rewrite_prefixes):
+        return True
+
+    # An allow rule is glob-matched against the segment's RAW text, so
+    # `Bash(grep *)` matches `grep -n $(cat f) x`. That match is meaningless
+    # here: the hook refuses a segment carrying substitution or a heredoc, and
+    # permission matching does not see through one either, so the command does
+    # reach a prompt. Treating the glob hit as coverage would silently drop it
+    # from the report.
+    if (
+        _hook.has_command_substitution(segment_tokens)
+        or _hook.has_process_substitution(segment_tokens)
+        or _hook.has_heredoc(segment_tokens)
+    ):
+        return False
+
+    return command_matches_any_rule(" ".join(segment_tokens), allow_rules)
+
+
+def find_chain_culprit(segments, allow_rules, rewrite_prefixes=()):
+    """Return the first segment in `segments` that nothing covers, or None.
+
+    This is the segment that actually defeats permission matching, which is
+    what a remedy has to address. The chain's first token is usually NOT it:
+    `grep ... | head; sed ...` prompts because of `sed`, while `grep` and
+    `head` are both already approved.
+    """
+    for segment_tokens in segments:
+        if not _is_segment_covered(segment_tokens, allow_rules, rewrite_prefixes):
+            return segment_tokens
+    return None
+
+
+def classify_command(command, allow_rules, deny_rules, rewrite_prefixes=DEFAULT_REWRITE_PREFIXES):
     """Classify whether `command` would trigger a permission prompt.
 
-    Returns (would_prompt: bool, reason: str | None). reason is None only
-    when the command would NOT prompt. Mirrors hook-auto-approve-bash.py's
-    own safety logic first — a command that hook would silently approve
-    never reaches a prompt in practice, regardless of raw rule coverage.
+    Returns (would_prompt: bool, reason: str | None, culprit: list[str] | None).
+    `reason` is None only when the command would NOT prompt. `culprit` is the
+    offending segment's tokens for REASON_CHAIN, and None for every other
+    reason — those name the whole command, so there is no sub-segment to
+    attribute them to.
+
+    Mirrors hook-auto-approve-bash.py's own safety logic first — a command
+    that hook would silently approve never reaches a prompt in practice,
+    regardless of raw rule coverage.
+
+    A hook DENY is checked before anything else, because the hook runs before
+    permission matching: once it denies, no prompt is shown and no allow or
+    deny rule is ever consulted. Such a command returns would_prompt=False
+    with a REASON_HOOK_DENY_* reason — reported, but not as friction.
     """
+    hook_deny = is_hook_denied(command)
+    if hook_deny is not None:
+        return False, hook_deny, None
+
     if command_matches_any_rule(command, deny_rules):
-        return True, REASON_DENY_MATCH
+        return True, REASON_DENY_MATCH, None
 
     if _hook.is_command_safe(command):
-        return False, None
+        return False, None, None
 
     try:
         segments = _hook.split_segments(command)
     except ValueError:
-        return True, REASON_NO_RULE
+        return True, REASON_NO_RULE, None
 
     if len(segments) > 1:
-        for segment_tokens in segments:
-            segment_command = " ".join(segment_tokens)
-            if not command_matches_any_rule(segment_command, allow_rules):
-                return True, REASON_CHAIN
+        culprit = find_chain_culprit(segments, allow_rules, rewrite_prefixes)
+        if culprit is not None:
+            return True, REASON_CHAIN, culprit
+        return False, None, None
 
     segment_tokens = segments[0] if segments else []
 
+    if _is_rewrite_covered(segment_tokens, rewrite_prefixes):
+        return False, None, None
+
     if _hook.has_heredoc(segment_tokens):
-        return True, REASON_HEREDOC
+        return True, REASON_HEREDOC, None
     if _hook.has_process_substitution(segment_tokens):
-        return True, REASON_PROCESS_SUBSTITUTION
+        return True, REASON_PROCESS_SUBSTITUTION, None
     if _hook.has_command_substitution(segment_tokens):
-        return True, REASON_COMMAND_SUBSTITUTION
+        return True, REASON_COMMAND_SUBSTITUTION, None
 
     stripped = _hook.strip_env_prefix(_hook.strip_cd_prefix(segment_tokens))
     if stripped != _hook.strip_env_prefix(segment_tokens) and stripped and stripped != segment_tokens:
         if not command_matches_any_rule(command, allow_rules):
-            return True, REASON_CD_PREFIX
+            return True, REASON_CD_PREFIX, None
 
     if command_matches_any_rule(command, allow_rules):
-        return False, None
+        return False, None, None
 
-    return True, REASON_NO_RULE
+    return True, REASON_NO_RULE, None
 
 
 def _encode_project_dir(project_dir):
@@ -278,17 +450,36 @@ def collect_bash_tool_uses(project_dir, days=30):
     return results
 
 
-def _pattern_key(command, reason):
-    """Normalize a command into a grouping key for the report: the first
-    whitespace token (the sub-command binary/verb) plus the friction
-    reason, e.g. "curl (no allow rule covers this command)". Grouping by
-    first-token mirrors how permission rules themselves match, so the key
-    directly identifies which allowlist entry would fix the pattern."""
-    first_token = command.strip().split(" ", 1)[0] if command.strip() else command
-    return f"{first_token} — {reason}"
+def _culprit_token(culprit_tokens):
+    """The token a remedy for `culprit_tokens` would have to name.
+
+    Strips the cd/env prefixes first: `cd /x && rtk grep ...` must group under
+    `rtk`, not `cd`, since an allow rule or wrapper targets the real command.
+    """
+    stripped = _hook.strip_env_prefix(_hook.strip_cd_prefix(culprit_tokens))
+    tokens = stripped or culprit_tokens
+    return tokens[0] if tokens else ""
 
 
-def analyze_friction(project_dir, days=30):
+def _pattern_key(command, reason, culprit=None):
+    """Normalize a command into a grouping key for the report: a command token
+    plus the friction reason, e.g. "curl (no allow rule covers this command)".
+
+    Which token depends on the reason. For a chain it is the CULPRIT segment's
+    first token — grouping chain friction under the command's own first token
+    names a command that is usually already approved (`grep ... | head; sed ...`
+    is a `sed` problem, not a `grep` one), so /retro proposes a remedy for a
+    command that never prompted. For every other reason the whole command is
+    the subject, so its first token is the right key.
+    """
+    if culprit is not None:
+        key_token = _culprit_token(culprit)
+    else:
+        key_token = command.strip().split(" ", 1)[0] if command.strip() else command
+    return f"{key_token} — {reason}"
+
+
+def analyze_friction(project_dir, days=30, rewrite_prefixes=DEFAULT_REWRITE_PREFIXES):
     """Scan `project_dir`'s transcripts and return a friction report dict:
 
     {
@@ -312,6 +503,9 @@ def analyze_friction(project_dir, days=30):
     pattern_counts = {}
     pattern_sessions = {}
     pattern_examples = {}
+    pattern_culprits = {}
+    hook_denied_counts = {}
+    hook_denied_examples = {}
     denied = 0
 
     for entry in tool_uses:
@@ -321,30 +515,58 @@ def analyze_friction(project_dir, days=30):
         if entry["tool_use_id"] in denied_tool_use_ids:
             denied += 1
 
-        would_prompt, reason = classify_command(command, allow_rules, deny_rules)
+        would_prompt, reason, culprit = classify_command(
+            command, allow_rules, deny_rules, rewrite_prefixes
+        )
+
+        if reason in HOOK_DENY_REASONS:
+            hook_denied_counts[reason] = hook_denied_counts.get(reason, 0) + 1
+            hook_denied_examples.setdefault(reason, command)
+            continue
+
         if not would_prompt:
             continue
 
-        key = _pattern_key(command, reason)
+        key = _pattern_key(command, reason, culprit)
         pattern_counts[key] = pattern_counts.get(key, 0) + 1
         pattern_sessions.setdefault(key, set()).add(session_id)
         pattern_examples.setdefault(key, command)
+        if culprit is not None:
+            pattern_culprits.setdefault(key, culprit)
 
-    patterns = [
-        {
+    patterns = []
+    for key, count in pattern_counts.items():
+        row = {
             "pattern": key,
             "count": count,
             "sessions": len(pattern_sessions[key]),
             "example": pattern_examples[key],
         }
-        for key, count in pattern_counts.items()
-    ]
+        culprit_tokens = pattern_culprits.get(key)
+        if culprit_tokens is not None:
+            # Both halves are useful to a consumer: the token a remedy would
+            # name, and the segment verbatim so the full `example` chain does
+            # not have to be re-parsed to see what actually prompted.
+            row["culprit"] = _culprit_token(culprit_tokens)
+            row["culprit_example"] = " ".join(culprit_tokens)
+        patterns.append(row)
     patterns.sort(key=lambda p: p["count"], reverse=True)
+
+    hook_denied = [
+        {
+            "reason": reason,
+            "count": count,
+            "example": hook_denied_examples[reason],
+        }
+        for reason, count in hook_denied_counts.items()
+    ]
+    hook_denied.sort(key=lambda d: d["count"], reverse=True)
 
     return {
         "total_calls": len(tool_uses),
         "prompted_estimate": sum(p["count"] for p in patterns),
         "denied": denied,
+        "hook_denied": hook_denied,
         "patterns": patterns,
     }
 
@@ -365,10 +587,19 @@ def format_report_text(report, days):
             lines.append(
                 f"    {p['count']:>3}x  {p['pattern']}  (sessions: {p['sessions']}){recurring}"
             )
+            if p.get("culprit_example"):
+                lines.append(f"           culprit: {p['culprit_example']}")
             lines.append(f"           e.g. {p['example']}")
     else:
         lines.append("")
         lines.append("  No prompt-causing patterns found.")
+
+    if report.get("hook_denied"):
+        lines.append("")
+        lines.append("  Denied by hook (no prompt shown — use the native tool instead):")
+        for d in report["hook_denied"]:
+            lines.append(f"    {d['count']:>3}x  {d['reason']}")
+            lines.append(f"           e.g. {d['example']}")
 
     return "\n".join(lines)
 
@@ -383,6 +614,7 @@ Examples:
   %(prog)s /path/to/project       Scan a specific project directory
   %(prog)s --days 7               Narrow the scan window
   %(prog)s --json                 Output as JSON
+  %(prog)s --rewrite-prefix rtk   Don't count commands a rewriting hook allows
         """,
     )
     parser.add_argument(
@@ -403,10 +635,26 @@ Examples:
         dest="json_output",
         help="Output in JSON format",
     )
+    parser.add_argument(
+        "--rewrite-prefix",
+        action="append",
+        default=[],
+        dest="rewrite_prefixes",
+        metavar="CMD",
+        help=(
+            "Treat a segment starting with CMD as already covered, for a "
+            "PreToolUse hook that rewrites commands to that prefix and allows "
+            "them (e.g. --rewrite-prefix rtk). Repeatable. Off by default: the "
+            "transcript records what the model emitted, so a prefixed command "
+            "there is one the model typed itself and is real friction."
+        ),
+    )
 
     args = parser.parse_args()
 
-    report = analyze_friction(args.project_dir, args.days)
+    report = analyze_friction(
+        args.project_dir, args.days, tuple(args.rewrite_prefixes)
+    )
 
     if args.json_output:
         print(json.dumps(report, indent=2))

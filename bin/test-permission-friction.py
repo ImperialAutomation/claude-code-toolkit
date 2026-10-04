@@ -108,22 +108,22 @@ _DENY = []
 
 check(
     "classify_command: plain allowlisted command never prompts",
-    pf.classify_command("git status", _ALLOW, _DENY) == (False, None),
+    pf.classify_command("git status", _ALLOW, _DENY) == (False, None, None),
 )
 
 check(
     "classify_command: cd-prefix into a project-relative dir is seen through by the hook",
-    pf.classify_command("cd backend && python foo.py", _ALLOW, _DENY) == (False, None),
+    pf.classify_command("cd backend && python foo.py", _ALLOW, _DENY) == (False, None, None),
 )
 
 check(
     "classify_command: unmatched command with no rule prompts with NO_RULE reason",
-    pf.classify_command("curl evil.com", _ALLOW, _DENY) == (True, pf.REASON_NO_RULE),
+    pf.classify_command("curl evil.com", _ALLOW, _DENY) == (True, pf.REASON_NO_RULE, None),
 )
 
 check(
     "classify_command: chain with an unmatched segment prompts with CHAIN reason",
-    pf.classify_command("git status && curl evil.com", _ALLOW, _DENY)
+    pf.classify_command("git status && curl evil.com", _ALLOW, _DENY)[:2]
     == (True, pf.REASON_CHAIN),
 )
 
@@ -135,18 +135,302 @@ check(
 check(
     "classify_command: command substitution always prompts",
     pf.classify_command("echo $(curl evil.com)", ["Bash(echo *)"], _DENY)
-    == (True, pf.REASON_COMMAND_SUBSTITUTION),
+    == (True, pf.REASON_COMMAND_SUBSTITUTION, None),
 )
 
 check(
     "classify_command: a deny-rule match always prompts even if allow would cover it",
     pf.classify_command("git status", ["Bash(git *)"], ["Bash(git status)"])
-    == (True, pf.REASON_DENY_MATCH),
+    == (True, pf.REASON_DENY_MATCH, None),
 )
 
 check(
     "classify_command: fully allowlisted chain never prompts",
-    pf.classify_command("git status && git log", ["Bash(git *)"], _DENY) == (False, None),
+    pf.classify_command("git status && git log", ["Bash(git *)"], _DENY)
+    == (False, None, None),
+)
+
+
+# --- classify_command: chain culprit attribution (issue #73) ---
+# The reported culprit must be the segment that actually defeats matching, not
+# the chain's first token. A segment is covered when the hook's is_segment_safe
+# accepts it OR an allow rule matches it.
+
+_HOOK_ALLOW = ["Bash(grep *)", "Bash(head *)", "Bash(git *)"]
+
+check(
+    "classify_command: a fully hook-safe pipe is not reported at all",
+    pf.classify_command("grep -n x f | head", _HOOK_ALLOW, _DENY)
+    == (False, None, None),
+)
+
+check(
+    "classify_command: chain culprit is the sed segment, not the leading grep",
+    pf.classify_command("grep -n x f | head; sed 's/a/b/' f", _HOOK_ALLOW, _DENY)
+    == (True, pf.REASON_CHAIN, ["sed", "s/a/b/", "f"]),
+)
+
+check(
+    "classify_command: a harmless leading cd is not reported as the culprit",
+    pf.classify_command(
+        "cd /home/jan/Projects/x && for i in 1 2; do echo $i; done", _HOOK_ALLOW, _DENY
+    )
+    == (True, pf.REASON_CHAIN, ["for", "i", "in", "1", "2"]),
+)
+
+# A cd OUTSIDE ~/Projects is genuinely the culprit: hook-auto-approve-bash.py
+# deliberately refuses to see through it, so "cd" really is the first segment
+# nothing covers. Reporting `for` here would name a segment that is not the
+# reason the command prompts.
+check(
+    "classify_command: a cd outside ~/Projects IS the culprit",
+    pf.classify_command("cd /x && for i in 1 2; do echo $i; done", _HOOK_ALLOW, _DENY)
+    == (True, pf.REASON_CHAIN, ["cd", "/x"]),
+)
+
+check(
+    "classify_command: an allow rule covering a segment keeps it off the culprit spot",
+    pf.classify_command("git status && curl evil.com", _ALLOW, _DENY)
+    == (True, pf.REASON_CHAIN, ["curl", "evil.com"]),
+)
+
+
+# --- classify_command: hook denies are not prompts (issue #73) ---
+# hook-auto-approve-bash.py DENIES these outright. A deny shows no permission
+# prompt at all: it is the opposite signal (the agent reached for the wrong
+# tool) and needs a different remedy, so it must not be counted as friction.
+
+check(
+    "classify_command: a sed file read is reported as a hook deny, not a prompt",
+    pf.classify_command("grep x f | head; sed -n '1,5p' f", _HOOK_ALLOW, _DENY)
+    == (False, pf.REASON_HOOK_DENY_SED_READ, None),
+)
+
+check(
+    "classify_command: inline Python file read is reported as a hook deny",
+    pf.classify_command(
+        "python3 -c \"print(open('/etc/hosts').read())\"", _HOOK_ALLOW, _DENY
+    )
+    == (False, pf.REASON_HOOK_DENY_PYTHON_READ, None),
+)
+
+check(
+    "classify_command: an until+sleep file wait loop is reported as a hook deny",
+    pf.classify_command(
+        "until [ -f /tmp/done ]; do sleep 2; done", _HOOK_ALLOW, _DENY
+    )
+    == (False, pf.REASON_HOOK_DENY_WAIT_LOOP, None),
+)
+
+check(
+    "classify_command: a hook deny outranks a matching deny rule's prompt verdict",
+    pf.classify_command("sed -n '1,5p' f", _HOOK_ALLOW, ["Bash(sed *)"])[1]
+    == pf.REASON_HOOK_DENY_SED_READ,
+)
+
+check(
+    "classify_command: a real sed stream edit still prompts, not a hook deny",
+    pf.classify_command("sed -i 's/a/b/' f", _HOOK_ALLOW, _DENY)[1] == pf.REASON_NO_RULE,
+)
+
+# CLAUDE.md explicitly permits python -c for calculation. It must never land in
+# a deny category — whether it prompts is a separate question decided by the
+# allow rules (python3 has no rule here, so it legitimately prompts as NO_RULE).
+check(
+    "classify_command: python doing arithmetic is untouched by the deny category",
+    pf.classify_command('python3 -c "print(2 + 2)"', _HOOK_ALLOW, _DENY)[1]
+    not in pf.HOOK_DENY_REASONS,
+)
+
+check(
+    "is_hook_denied exposes the matching rule name",
+    pf.is_hook_denied("sed -n '1,5p' f") == pf.REASON_HOOK_DENY_SED_READ
+    and pf.is_hook_denied("git status") is None,
+)
+
+
+# --- a segment is never "covered" by a rule that glob-matched substitution ---
+# An allow rule is matched against the segment's raw text, so `Bash(grep *)`
+# happily matches `grep -n $(cat f) x`. The hook refuses such a segment, and
+# permission matching does not see through it either, so the command really
+# does prompt — it must not be written off as covered just because the glob hit.
+
+check(
+    "coverage: command substitution in a segment defeats an allow-rule match",
+    not pf._is_segment_covered(["grep", "-n", "$(cat", "f)", "x"], ["Bash(grep *)"]),
+)
+
+check(
+    "coverage: process substitution in a segment defeats an allow-rule match",
+    not pf._is_segment_covered(["grep", "-n", "x", "<(cat", "f)"], ["Bash(grep *)"]),
+)
+
+check(
+    "coverage: a heredoc in a segment defeats an allow-rule match",
+    not pf._is_segment_covered(["cat", "<<", "EOF"], ["Bash(cat *)"]),
+)
+
+check(
+    "coverage: a plain segment is still covered by its allow rule",
+    pf._is_segment_covered(["curl", "https://example.com"], ["Bash(curl *)"]),
+)
+
+# End-to-end: the whole chain must still be reported, with the substituting
+# segment named as the culprit. Before this fix these returned (False, None,
+# None) — no friction at all — while the hook declined to approve them.
+_SUBST_ALLOW = ["Bash(grep *)", "Bash(head *)", "Bash(git *)"]
+
+check(
+    "classify: a chain whose segments all glob-match but one substitutes still prompts",
+    pf.classify_command("grep -n $(cat f) x | head", _SUBST_ALLOW, _DENY)[:2]
+    == (True, pf.REASON_CHAIN),
+)
+
+# The culprit must be SELECTED, not just "the first segment": here the
+# substituting segment sits in the middle, so a naive `return segments[0]`
+# would answer `head` and fail.
+check(
+    "classify: a mid-chain substituting segment is picked out as the culprit",
+    pf.classify_command("head f | grep $(cat g) y | git status", _SUBST_ALLOW, _DENY)[2]
+    == ["grep", "$(cat", "g)", "y"],
+)
+
+check(
+    "classify: process substitution in a chain still prompts",
+    pf.classify_command("grep -n x <(cat f) | head", _SUBST_ALLOW, _DENY)[:2]
+    == (True, pf.REASON_CHAIN),
+)
+
+check(
+    "classify: substitution in a LATER chain segment still prompts",
+    pf.classify_command("git log | head; grep -n x $(echo f)", _SUBST_ALLOW, _DENY)[:2]
+    == (True, pf.REASON_CHAIN),
+)
+
+
+# --- rewriting hooks (issue #73) ---
+# A PreToolUse hook may REWRITE a command and allow it in the same response.
+# RTK's does: fed `grep -rn foo src` it answers permissionDecision "allow" with
+# updatedInput.command = "rtk grep -rn foo src". Two consequences the scanner
+# must model, both verified against the installed rtk 0.45.0 and 21k real
+# transcript Bash calls:
+#
+#   1. The transcript stores what the MODEL emitted, not the rewrite — the
+#      rewrite lives in the hook's RESPONSE (updatedInput), which is never
+#      written back to tool_use.input. So an `rtk`-prefixed transcript entry is
+#      a command the model typed itself, i.e. REAL friction.
+#   2. The hook's own prefixed form (`rtk <cmd>`) is what it actually emits, so
+#      opting in marks THAT form as covered. Bare commands are not assumed
+#      covered: rtk answers "allow" for `grep` but rewrites `jq`/`curl` with no
+#      permissionDecision at all, so coverage is per-command and not derivable
+#      from the prefix.
+#
+# The prefix is configurable, not hard-coded to one tool: any rewriting hook
+# has this shape.
+
+check(
+    "rewrite prefix: an rtk-prefixed segment is covered when rtk is configured",
+    pf._is_segment_covered(["rtk", "grep", "foo"], [], rewrite_prefixes=("rtk",)),
+)
+
+check(
+    "rewrite prefix: an rtk-prefixed segment is NOT covered by default",
+    not pf._is_segment_covered(["rtk", "grep", "foo"], []),
+)
+
+# `jq` is on neither the hook's ALLOWLIST nor any allow rule here, so it is
+# covered ONLY via the rewrite prefix — which is what this asserts. (`grep`
+# would pass either way, proving nothing.)
+check(
+    "rewrite prefix: an rtk-wrapped non-allowlisted command is covered",
+    pf._is_segment_covered(["rtk", "jq", "."], [], rewrite_prefixes=("rtk",)),
+)
+
+# A BARE command is deliberately NOT covered by the prefix, even though the
+# hook rewrites it. Verified against rtk 0.45.0: the rewrite response carries
+# `permissionDecision: "allow"` for `grep`, but for `jq` and `curl` it rewrites
+# with NO permissionDecision at all — so matching still runs on the rewritten
+# command and may well prompt. Which commands get the allow is RTK's internal
+# business and not derivable from the prefix, so the scanner only models the
+# half it can verify: the prefixed form.
+check(
+    "rewrite prefix: a bare command is not assumed covered by the rewriting hook",
+    not pf._is_segment_covered(["jq", ".", "x.json"], [], rewrite_prefixes=("rtk",)),
+)
+
+check(
+    "rewrite prefix: an unrelated uncovered command stays uncovered",
+    not pf._is_segment_covered(["curl", "evil.com"], [], rewrite_prefixes=("rtk",)),
+)
+
+check(
+    "rewrite prefix: classify_command threads the prefix through to the culprit",
+    pf.classify_command(
+        "rtk grep foo | head; curl evil.com", ["Bash(head *)"], [], rewrite_prefixes=("rtk",)
+    )
+    == (True, pf.REASON_CHAIN, ["curl", "evil.com"]),
+)
+
+check(
+    "rewrite prefix: without it, the rtk segment itself is the culprit",
+    pf.classify_command("rtk grep foo | head; curl evil.com", ["Bash(head *)"], [])
+    == (True, pf.REASON_CHAIN, ["rtk", "grep", "foo"]),
+)
+
+check(
+    "rewrite prefix: a wrapped command is not friction at all",
+    pf.classify_command("rtk grep foo", [], [], rewrite_prefixes=("rtk",))[0] is False,
+)
+
+
+# --- _pattern_key: group chain friction on the culprit (issue #73) ---
+
+check(
+    "_pattern_key: without a culprit, groups on the command's first token",
+    pf._pattern_key("curl evil.com", pf.REASON_NO_RULE)
+    == f"curl — {pf.REASON_NO_RULE}",
+)
+
+check(
+    "_pattern_key: with a culprit, groups on the culprit's first token",
+    pf._pattern_key("grep -n x f | head; sed 's/a/b/' f", pf.REASON_CHAIN, ["sed", "s/a/b/", "f"])
+    == f"sed — {pf.REASON_CHAIN}",
+)
+
+# A `cd <dir> <cmd>` segment (no separator) keeps cd and the command in ONE
+# segment, which is the shape strip_cd_prefix exists for: the key must name the
+# command, since that is what an allow rule or wrapper would have to cover.
+check(
+    "_pattern_key: strips a cd prefix off the culprit so the real command is the key",
+    pf._pattern_key(
+        "cd /home/jan/Projects/x rtk grep foo",
+        pf.REASON_CHAIN,
+        ["cd", "/home/jan/Projects/x", "rtk", "grep", "foo"],
+    )
+    == f"rtk — {pf.REASON_CHAIN}",
+)
+
+# And the end-to-end path: a cd segment plus an uncovered command segment must
+# key on the command, never on the cd.
+check(
+    "classify+_pattern_key: a cd-prefixed chain keys on the uncovered command",
+    pf._pattern_key(
+        "cd /home/jan/Projects/x && rtk grep foo",
+        *pf.classify_command("cd /home/jan/Projects/x && rtk grep foo", ["Bash(grep *)"], [])[1:],
+    )
+    == f"rtk — {pf.REASON_CHAIN}",
+)
+
+check(
+    "_pattern_key: strips an env-var prefix off the culprit",
+    pf._pattern_key("FOO=1 jq .", pf.REASON_CHAIN, ["FOO=1", "jq", "."])
+    == f"jq — {pf.REASON_CHAIN}",
+)
+
+check(
+    "_pattern_key: keeps the reason in the key so /retro can still read it",
+    pf.REASON_CHAIN
+    in pf._pattern_key("a | sed x", pf.REASON_CHAIN, ["sed", "x"]),
 )
 
 
@@ -431,6 +715,101 @@ try:
     check("format_report_text: mentions recurring marker for sessions>=2", "recurring" in text_report)
     check("format_report_text: includes total call count", "4" in text_report)
 
+    # --- hook denies stay out of prompted_estimate (issue #73) ---
+    # A chain whose sed segment the hook DENIES shows no prompt at all. It must
+    # be reported in its own bucket, never inflate the friction estimate, and
+    # never create a `grep`/`sed` pattern row that /retro would act on.
+    deny_dir = fake_projects_root / "-home-jan-Projects-fake-deny-project"
+    deny_dir.mkdir(parents=True)
+    (deny_dir / "session-d.jsonl").write_text(
+        "\n".join(
+            [
+                _bash_line("d1", "grep -rn TODO src | head; sed -n '1,20p' src/main.py"),
+                _bash_line("d2", "grep -rn TODO src | head; sed -n '5,9p' README.md"),
+                _bash_line("d3", "curl https://api.example.com/health"),
+            ]
+        )
+    )
+
+    pf.CLAUDE_HOME = fake_home
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        deny_report = pf.analyze_friction("/home/jan/Projects/fake-deny-project", days=30)
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    check(
+        "analyze_friction: hook-denied sed reads are excluded from prompted_estimate",
+        deny_report["prompted_estimate"] == 1,
+    )
+    check(
+        "analyze_friction: hook-denied calls are reported in their own bucket",
+        [(d["reason"], d["count"]) for d in deny_report["hook_denied"]]
+        == [(pf.REASON_HOOK_DENY_SED_READ, 2)],
+    )
+    check(
+        "analyze_friction: a hook-denied chain creates no pattern row",
+        [p["pattern"] for p in deny_report["patterns"]]
+        == [f"curl — {pf.REASON_NO_RULE}"],
+    )
+    check(
+        "format_report_text: surfaces the hook-denied bucket",
+        "denied by hook" in pf.format_report_text(deny_report, days=30),
+    )
+
+    # --- the culprit is explicit in both reports (issue #73) ---
+    # Reading the culprit out of the `pattern` string means parsing it back
+    # out, and the `example` is the whole chain — so neither tells a consumer
+    # which segment prompted. Both reports name it outright.
+    culprit_dir = fake_projects_root / "-home-jan-Projects-fake-culprit-project"
+    culprit_dir.mkdir(parents=True)
+    (culprit_dir / "session-c.jsonl").write_text(
+        "\n".join(
+            [
+                _bash_line("c1", "git log --oneline | head -20; jq -r '.version' package.json"),
+                _bash_line("c2", "git diff --stat | head; jq '.scripts' package.json"),
+            ]
+        )
+    )
+
+    pf.CLAUDE_HOME = fake_home
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        culprit_report = pf.analyze_friction(
+            "/home/jan/Projects/fake-culprit-project", days=30
+        )
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    row = culprit_report["patterns"][0]
+    check(
+        "analyze_friction: the JSON row carries the culprit token",
+        row.get("culprit") == "jq",
+    )
+    check(
+        "analyze_friction: the JSON row carries the culprit segment verbatim",
+        row.get("culprit_example") == "jq -r .version package.json",
+    )
+    # A non-chain reason names the whole command, so there is no sub-segment to
+    # attribute — the field must be absent rather than echoing the first token.
+    check(
+        "analyze_friction: rows for a non-chain reason carry no culprit",
+        all(
+            p.get("culprit") is None
+            for p in deny_report["patterns"]
+            if pf.REASON_CHAIN not in p["pattern"]
+        )
+        and any(pf.REASON_CHAIN not in p["pattern"] for p in deny_report["patterns"]),
+    )
+
+    culprit_text = pf.format_report_text(culprit_report, days=30)
+    check(
+        "format_report_text: names the culprit segment, not just the full chain",
+        "culprit: jq -r .version package.json" in culprit_text,
+    )
+
     # graceful handling of a project with no transcripts at all (AC requirement)
     pf.CLAUDE_HOME = fake_home
     pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
@@ -442,7 +821,14 @@ try:
 
     check(
         "analyze_friction: empty/missing transcript dir yields a zeroed report, not a crash",
-        empty_report == {"total_calls": 0, "prompted_estimate": 0, "denied": 0, "patterns": []},
+        empty_report
+        == {
+            "total_calls": 0,
+            "prompted_estimate": 0,
+            "denied": 0,
+            "hook_denied": [],
+            "patterns": [],
+        },
     )
 finally:
     shutil.rmtree(e2e_tmpdir, ignore_errors=True)

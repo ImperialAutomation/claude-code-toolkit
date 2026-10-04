@@ -54,6 +54,12 @@ python3 ~/.claude/bin/permission-friction.py --days 30
 
 This scans the current project's transcripts and reports total Bash calls, an estimated prompted count, explicit denials, and the top prompt-causing patterns — grouped by command and the specific construct that defeated matching (no allow rule, unmatched chain segment, `cd`-prefix, command substitution, heredoc). No hardcoded allowlist: it derives rules live from the merged global + project + local `settings.json` files.
 
+**For a compound command, the row names the segment that actually defeats matching, not the chain's first token.** `grep ... | head; sed ...` is a `sed` problem: `grep` and `head` are already approved, so a remedy aimed at `grep` fixes a command that never prompted. Each row carries a `culprit` (the token a rule or wrapper must name) and a `culprit_example` (that segment verbatim) alongside the full-chain `example` — propose the remedy for the **culprit**.
+
+**A `Denied by hook` bucket is not friction.** Those commands (`sed -n 'X,Yp' <file>`, inline Python opening a file, an until+sleep file wait loop) never showed a prompt; `hook-auto-approve-bash.py` refused them. They are excluded from the prompted estimate, and the remedy is always the native tool the deny message names (Read, Grep, Edit, `wait-for-pattern.sh`) — never an allowlist entry or a new wrapper.
+
+If the project runs a command-**rewriting** PreToolUse hook (RTK's, say) and you have confirmed it answers `allow` for the prefixed form, pass `--rewrite-prefix rtk` to stop counting those as friction. It is off by default on purpose: the transcript records the command the model emitted, not the hook's rewrite, so a prefixed command there is one the model typed itself and is real friction.
+
 **The rule: a pattern seen in >= 2 sessions is a candidate for enforcement, not documentation.** Per the code-review rule ("a convention violated more than once is a hook, not a docs line"), for each pattern the report flags as recurring (`sessions >= 2`), propose ONE concrete remedy in the retro summary:
 
 - **Allowlist rule** — a missing `Bash(cmd *)` entry that would cover the pattern outright (safe, read-only, or already-reviewed commands)
