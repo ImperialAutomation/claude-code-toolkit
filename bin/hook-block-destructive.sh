@@ -17,8 +17,35 @@
 # Exit codes:
 #   0 = allow
 #   2 = block (reason sent to stderr, shown to Claude)
+#   any other = an internal error, converted to a block by the trap below
 
 set -euo pipefail
+
+# Fail closed on an internal error. Claude Code blocks on exit 2 specifically, so
+# every OTHER non-zero exit — a typo in a regex, a missing jq, an unset variable
+# under `set -u` — reads as "allow". That inverts the guard precisely when it is
+# broken, and silently: nothing in the transcript distinguishes "checked, fine"
+# from "crashed before checking".
+#
+# Not hypothetical. While tightening the $HOME pattern (issue #70) an unescaped
+# `$(HOME|...)` became command substitution, the hook exited 127, and every
+# destructive command in the test suite came back ALLOW. The suite caught it
+# because it asserts on BLOCK as well as ALLOW; in a real session nothing would
+# have.
+#
+# The trap fires only on an unexpected exit: both deliberate paths (`exit 0` and
+# `exit 2`) are excluded, so a normal allow stays an allow.
+# SC2329: invoked indirectly, by the `trap ... EXIT` immediately below.
+# shellcheck disable=SC2329
+_fail_closed() {
+    local rc=$?
+    case "$rc" in
+        0 | 2) exit "$rc" ;;
+    esac
+    echo "BLOCKED by hook-block-destructive.sh: the guard itself failed (exit $rc) and cannot say whether this command is safe. Failing closed. This is a bug in the hook, not in the command — report it rather than working around it." >&2
+    exit 2
+}
+trap _fail_closed EXIT
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
@@ -26,6 +53,124 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 if [ -z "$COMMAND" ]; then
     exit 0
 fi
+
+# Split the command line into the pieces a shell would run separately. Every guard
+# below classifies per segment rather than over the whole string, so that a
+# read-only leader excuses its OWN segment and nothing else: a grep for a pattern
+# name followed by `&&` and the real command must block on the second half, even
+# though the first half is only a search.
+#
+# This is a deliberately shallow split, not a shell parser. Writing one in bash is
+# its own source of bugs, and the failure mode of being too shallow is extra
+# segments that match no read-only leader — i.e. a block. Erring toward more
+# segments therefore errs toward refusing, which is the direction to err in.
+# Commands that only READ or PRINT text. A destructive keyword appearing as an
+# argument to one of these is being searched for or quoted, not executed —
+# grepping for a pattern tripped the guard, and so did a commit message naming
+# one. Anchored to the segment's LEADING word, mirroring the git-merge guard
+# below: a read-only leader cannot launder a real command in a later segment,
+# because each segment is classified on its own.
+#
+# This started as an SQL-only skip (issue #67) and now serves the pattern lists
+# too (issue #70), where the same false positive was three times as common: a
+# grep for a pattern name, a word inside an echo, a commit subject. The worst of
+# those was a grep over THIS FILE — the guard blocked the investigation into the
+# guard, with no phrasing available that got past it.
+#
+# Why a leader check and not stripping quoted text, which is the obvious move:
+# quoting an operand is ordinary shell hygiene, not a signal that the text is
+# data. `rm -rf "$HOME"` and `dd if=/dev/zero of="/dev/sda"` destroy exactly as
+# much with the quotes as without, so a strip-then-match pass would have read
+# them as safe. Both were in fact already slipping through for a related reason
+# (the quote broke a literal-text pattern); see the dd/rm notes below. The leader
+# is what separates naming a command from running one, so the leader is what
+# this looks at.
+#
+# Everything not listed here gets no skip, which is the fail-closed half: an
+# unrecognised leader (eval, xargs, bash -c, a project wrapper) still blocks on a
+# quoted keyword. That is noisier than ideal and deliberately so — a false
+# negative here is a destroyed working tree, a false positive is one rephrasing.
+_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
+
+# Leaders whose heredoc body is a program in ANOTHER language, with a QUOTED
+# delimiter. Both halves are required, and each rules out a different mistake.
+#
+# Another language: the body of `python3 - <<'PY'` is Python, so a shell pattern
+# matched against it is matching prose. Issue #70's first observed false positive
+# was exactly this — a Python heredoc printing a sentence that happened to contain
+# a blocked word. These leaders are NOT in _READONLY_LEADER_RE and must not be:
+# python3 runs arbitrary code, so its own command line is judged like any other.
+# Only the body is exempt, and only from the SHELL patterns this hook knows.
+#
+# Quoted delimiter: with `<<PY` the shell expands $(...) and `...` inside the body
+# before the interpreter ever sees it, so a shell command really can hide there.
+# With `<<'PY'` no substitution happens and the body reaches the interpreter
+# verbatim. That is the difference between data and a disguised command line, so
+# the quote is the condition, not a stylistic detail.
+#
+# What this does NOT claim: that the body is safe. Python can shell out, and this
+# hook cannot read Python. It claims only that matching bash patterns against
+# non-bash source produces noise rather than safety — the guard against what the
+# script then does is the interpreter's own command line, which is still judged.
+_INTERPRETER_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(python3?|perl|ruby|node|osascript|Rscript)([[:space:]]|$)'
+
+# Drop heredoc bodies before splitting, but ONLY where the line opening the
+# heredoc is itself read-only. Without this step the body arrives as its own
+# segment whose leading word is the body text, which matches no read-only command
+# and therefore blocks — so a `cat <<EOF` of prose, or a Python script that prints
+# a sentence, trips the guard on a word it merely contains.
+#
+# The leader condition is what keeps this honest, and it is not a refinement: a
+# heredoc body is stdin, and whether stdin is DATA or a PROGRAM depends entirely
+# on what reads it. `cat <<EOF` and `python3 - <<PY` print and interpret text that
+# this hook has no business classifying as shell. `psql -d app <<SQL` EXECUTES
+# every statement in the body, so dropping it would hide a DROP SCHEMA from the
+# SQL guard — which is exactly the test that caught an earlier, leader-blind
+# version of this function.
+#
+# The heredoc's OWN line is always kept, so the command introducing it is judged
+# regardless, and a real command on a line after the closing delimiter is judged
+# on itself. Only the body in between can go.
+#
+# Both `<<DELIM` and `<<'DELIM'` are handled, and the `<<-` tab-stripping form.
+# The quoted delimiter is the one that guarantees no substitution, but that
+# distinction does not matter here: what the body means is settled by its reader,
+# not by its quoting.
+#
+# An unterminated heredoc runs to end of input. Since only a read-only leader can
+# open a stripped body at all, the most that hides is the tail of a `cat` — and
+# the opening line is still judged, so there is nothing to launder a real command
+# with.
+_strip_heredoc_bodies() {
+    local delim body_open=0 line out=""
+    while IFS= read -r line; do
+        if [ "$body_open" -eq 1 ]; then
+            # Closing delimiter: `<<-` allows leading tabs before it.
+            if [ "$(printf '%s' "$line" | sed 's/^[[:space:]]*//')" = "$delim" ]; then
+                body_open=0
+            fi
+            continue
+        fi
+        out+="$line"$'\n'
+        # Opening redirect: capture the delimiter, quoted or bare. A body may be
+        # hidden only under a read-only leader (see the psql note above), or under
+        # an interpreter whose delimiter is QUOTED, which is what stops the shell
+        # expanding a command into the body before the interpreter reads it.
+        if { grep -qE "$_READONLY_LEADER_RE" <<< "$line" ||
+             { grep -qE "$_INTERPRETER_LEADER_RE" <<< "$line" &&
+               grep -qE '<<-?[[:space:]]*('"'"'[^'"'"']+'"'"'|"[^"]+")' <<< "$line"; }; } &&
+           grep -qE '<<-?[[:space:]]*('"'"'[^'"'"']+'"'"'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)' <<< "$line"; then
+            delim=$(grep -oE '<<-?[[:space:]]*('"'"'[^'"'"']+'"'"'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)' <<< "$line" |
+                    tail -1 | sed 's/^<<-\?[[:space:]]*//; s/^['"'"'"]//; s/['"'"'"]$//')
+            [ -n "$delim" ] && body_open=1
+        fi
+    done <<< "$COMMAND"
+    printf '%s' "$out"
+}
+
+_split_segments() {
+    _strip_heredoc_bodies | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g'
+}
 
 # Guard: force-recursive rm of an absolute path, EXCEPT below /tmp.
 #
@@ -53,18 +198,38 @@ _rm_hits_protected_path() {
         echo "$segment" | grep -qE '(^|[[:space:]])-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]|$)' || continue
         echo "$segment" | grep -qE '(^|[[:space:]])-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|$)' || continue
         for token in $segment; do
-            # SC2088 (tilde in quotes) is intentional below: we match a LITERAL
-            # ~ in the command text. Expanding it would defeat the check, since
-            # the tilde reaches this hook unexpanded.
-            # shellcheck disable=SC2088
+            # Strip any surrounding quotes the operand arrived with. Quoting a
+            # path is ordinary shell hygiene and says nothing about intent:
+            # `rm -rf "$HOME"` deletes exactly as much as the bare form. The
+            # quotes are removed only for CLASSIFYING this operand — the skip that
+            # decides data-vs-operation is the segment's leader, not quoting.
+            token=${token#[\"\']}
+            token=${token%[\"\']}
+            # SC2088 (tilde in quotes) and SC2016 ($ in single quotes) are both
+            # intentional below: these patterns match the LITERAL text "~" and
+            # "$HOME" as the command string carries it. Both reach this hook
+            # unexpanded, so expanding either one here would compare the operand
+            # against a resolved value instead of against the text actually seen,
+            # which is what the check is about.
+            # shellcheck disable=SC2088,SC2016
             case "$token" in
                 rm|-*) continue ;;
                 /tmp/?*) continue ;;   # a path UNDER /tmp: allowed
                 /*) return 0 ;;        # any other absolute path
                 '~'|'~/'*) return 0 ;; # home directory (literal ~, see above)
+                # $HOME reaches this hook UNEXPANDED, so the operand is the literal
+                # text "$HOME", matching neither /* nor ~* above. Classifying it
+                # here rather than leaving it to a BLOCKED_PATTERNS regex is what
+                # makes the check flag-order independent: the regex form had to pin
+                # the literal string "rm -rf", so `rm -fr $HOME`, `rm -rfv $HOME`
+                # and `rm -rf --verbose $HOME` all walked past it while the
+                # equivalent `rm -fr /home/jan` blocked. Same action, two answers
+                # depending on flag spelling — the inconsistency this guard exists
+                # to prevent, and the same lesson the git clean pattern learned.
+                '$HOME'|'$HOME/'*|'${HOME}'|'${HOME}/'*) return 0 ;;
             esac
         done
-    done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
+    done < <(_split_segments)
     return 1
 }
 
@@ -93,14 +258,6 @@ _rm_hits_protected_path() {
 # than working around it at the call site.
 _SQL_DESTRUCTIVE_RE='(^|[^[:alnum:]_])(DROP[[:space:]]+(TABLE|DATABASE|SCHEMA)|DROP[[:space:]]+OWNED[[:space:]]+BY|TRUNCATE)([^[:alnum:]_]|$)'
 
-# Commands that only READ or PRINT text. A statement appearing as an argument to
-# one of these is being searched for or quoted, not executed — grepping for a
-# pattern tripped the guard, and so did a commit message naming one. Both were
-# hit while fixing issue #67. Anchored to the segment's LEADING word, mirroring
-# the git-merge guard below: a read-only leader cannot launder a real statement
-# in a later segment, because each segment is classified on its own.
-_SQL_READONLY_LEADER_RE='^[[:space:]]*(sudo[[:space:]]+)?([^[:space:]]*/)?(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|echo|printf|awk|sed|diff|wc|sort|uniq|strings|git-commit\.sh|gh)([[:space:]]|$)'
-
 # An unqualified DELETE empties the table. The pattern this replaces was
 # "DELETE FROM.*WITHOUT.*WHERE", which matched the literal word WITHOUT and so
 # matched nothing anyone types — it read as covered while covering nothing, which
@@ -115,14 +272,84 @@ _sql_destructive_hit() {
         # Classify each segment independently, so one read-only leader does not
         # excuse the rest of the command line, and a qualified delete does not
         # excuse an unqualified one sharing it.
-        echo "$segment" | grep -qE "$_SQL_READONLY_LEADER_RE" && continue
+        echo "$segment" | grep -qE "$_READONLY_LEADER_RE" && continue
         echo "$segment" | grep -qiE "$_SQL_DESTRUCTIVE_RE" && return 0
         if echo "$segment" | grep -qiE "$_SQL_DELETE_RE"; then
             echo "$segment" | grep -qiE "$_SQL_WHERE_RE" || return 0
         fi
-    done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
+    done < <(_split_segments)
     return 1
 }
+
+# Assert every regex the guards depend on is set and non-empty, before the first
+# guard runs. `set -u` is not enough on its own: the guards read their constants
+# inside a `while ... done < <(...)` loop, so an unbound variable kills only the
+# SUBSHELL. The loop then sees end-of-input, reports "no match", and the hook
+# exits 0 — a fail-OPEN whose only trace is a line on stderr that nothing reads.
+#
+# Found by testing for it: a deliberately renamed constant made the hook allow a
+# command it should have blocked, and the EXIT trap above could not catch it
+# because the exit status was a perfectly ordinary 0. Renaming a constant is the
+# realistic way in; this file renamed one while fixing issue #70.
+#
+# Being non-empty is not enough: the regex must also COMPILE. `grep -qE` exits 2
+# on a malformed pattern, and every guard here reads a non-zero grep as "no match",
+# so an invalid regex is indistinguishable from a clean command — the same fail-OPEN
+# as an unset constant, reached by a different route. A stray paren while editing a
+# pattern is the realistic way in, and the emptiness check above sails straight past
+# it. Compiling each one against a throwaway string separates "did not match" from
+# "could not be asked".
+#
+# Listed in one place rather than checked at each use, so a guard added later is
+# covered by adding its constant here instead of re-deriving the reasoning.
+for _required in _READONLY_LEADER_RE _INTERPRETER_LEADER_RE _SQL_DESTRUCTIVE_RE \
+                 _SQL_DELETE_RE _SQL_WHERE_RE; do
+    # This emptiness check is kept for its DIAGNOSIS, not because it is the only
+    # thing standing between an empty pattern and a fail-open. Mutation testing
+    # showed both broken-constant cases still block without it, but each for a
+    # reason you would not want to debug from:
+    #
+    #   renamed  -> `set -u` aborts on the ${!_required} below and the EXIT trap
+    #               converts it, so the message is "unbound variable"
+    #   emptied  -> an empty regex matches EVERYTHING, so the SQL guard blocks
+    #               every command the user types, including `git status`
+    #
+    # Both fail closed, so neither is dangerous; both are opaque, and the second
+    # presents as "the hook has started refusing all my work". Naming the broken
+    # constant turns a confusing afternoon into one line of stderr.
+    if [ -z "${!_required:-}" ]; then
+        echo "BLOCKED by hook-block-destructive.sh: internal error — the pattern '$_required' this guard relies on is unset or empty, so the check cannot run. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
+        exit 2
+    fi
+    # Exit 0 (matched) and 1 (did not match) both mean the regex compiled; only 2
+    # and above signal that grep could not use it at all. The status is captured
+    # via `|| _rc=$?` because `set -e` would otherwise abort on the ordinary
+    # "did not match" case, turning a healthy pattern into a block.
+    _rc=0
+    printf '%s' '' | grep -qE "${!_required}" >/dev/null 2>&1 || _rc=$?
+    if [ "$_rc" -gt 1 ]; then
+        echo "BLOCKED by hook-block-destructive.sh: internal error — the pattern '$_required' this guard relies on is not a valid regex, so grep cannot evaluate it and every check using it would silently report 'no match'. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
+        exit 2
+    fi
+done
+unset _required _rc
+
+# The guards match against SEGMENTS, so a splitter that yields nothing is a
+# fail-OPEN on its own: every guard loops over what it is handed, finds no input,
+# reports "no match", and the hook exits 0. The regex assertions above cannot see
+# this — they check that the patterns are usable, not that there is anything to
+# match them against.
+#
+# Asserted here, in the parent shell, and NOT inside _split_segments. Putting it
+# there is the obvious move and silently does not work: the function runs inside a
+# `done < <(...)` process substitution, so its `exit 2` kills only the subshell
+# while the hook goes on to exit 0. That version printed this very message and
+# still allowed `killall node` — a guard that reports failing closed while failing
+# open, which is worse than the gap it was meant to close.
+if [ -n "${COMMAND//[[:space:]]/}" ] && [ -z "$(_split_segments | tr -d '[:space:]')" ]; then
+    echo "BLOCKED by hook-block-destructive.sh: internal error — the command is non-empty but could not be split into segments, so none of the checks could be applied to it. Failing closed. This is a bug in the hook; report it rather than working around it." >&2
+    exit 2
+fi
 
 if _sql_destructive_hit; then
     echo "BLOCKED by hook-block-destructive.sh: refusing a destructive SQL statement (DROP TABLE/DATABASE/SCHEMA, DROP OWNED BY, TRUNCATE, or a DELETE FROM with no WHERE clause). All of these destroy data irreversibly, including the forms that avoid the word DATABASE. Adding a WHERE clause is fine if that is what you meant. If this targets a throwaway database, say so and ask the user to confirm — do not rephrase the statement to get past this check." >&2
@@ -134,16 +361,38 @@ if _rm_hits_protected_path; then
     exit 2
 fi
 
-# Patterns for destructive operations
+# Patterns for destructive operations.
+#
+# Some of these were tightened after the per-segment rewrite (issue #70) exposed
+# them. Each had the same shape of hole: the pattern pinned LITERAL TEXT, so an
+# ordinary shell habit — quoting an operand, combining short flags — stepped
+# around it. They were found by writing the false-negative cases this change had
+# to avoid introducing, then discovering those cases already passed on main.
+#
+#   dd if=/dev/zero of="/dev/sda"  quoting the target broke `of=/dev/`
+#   git clean -fd                  a combined flag broke `git clean.* -f( |$)`
+#   rm -fr $HOME                   a reordered flag broke `rm -rf \$HOME`
+#                                  (moved out of this list entirely, see below)
+#
+# The lesson generalises: a pattern that must match a FLAG should accept it in a
+# cluster, and one that must match an OPERAND should tolerate quotes around it.
+#
+# The $HOME entry that used to head this list is gone, not relaxed. Tightening it
+# for quotes showed why it was the wrong mechanism: as a regex it had to pin the
+# literal string "rm -rf", so `rm -fr $HOME`, `rm -rfv $HOME` and
+# `rm -rf --verbose $HOME` all walked past it. $HOME is now classified as an
+# OPERAND in _rm_hits_protected_path(), alongside /* and ~*, which is flag-order
+# independent by construction. Keeping both would be two mechanisms for one rule,
+# and the weaker one would go on looking like coverage.
 BLOCKED_PATTERNS=(
-    # Filesystem destruction
-    "rm -rf \\$HOME"
     # Git destructive operations
     "git push.*--force"
     "git push.* -f( |$)"
     "git reset.*--hard"
     "git checkout -- \\."
-    "git clean.* -f( |$)"
+    # `-f` may arrive clustered with other short flags (-fd, -fx, -xdf), which the
+    # earlier `-f( |$)` form required to stand alone.
+    "git clean.* -[a-zA-Z]*f[a-zA-Z]*( |$)"
     # Database destruction is handled by _sql_destructive_hit() above, which
     # covers the DROP SCHEMA / DROP OWNED BY forms these patterns missed and the
     # unqualified DELETE a single regex cannot express.
@@ -153,7 +402,9 @@ BLOCKED_PATTERNS=(
     "shutdown"
     "reboot"
     "mkfs"
-    "dd if=.* of=/dev/"
+    # Writing to a raw device destroys the filesystem on it. The target may be
+    # quoted, which the earlier `of=/dev/` form did not allow for.
+    "dd if=.* of=['\"]?/dev/"
 )
 
 # Case-sensitive patterns: only block uppercase forms (e.g. -D force delete, not -d safe delete)
@@ -228,18 +479,41 @@ if echo "$COMMAND" | grep -qE '(^|[;&|]|&&|\|\|)[[:space:]]*gh[[:space:]]+pr[[:s
     esac
 fi
 
-for pattern in "${CASE_SENSITIVE_PATTERNS[@]}"; do
-    if echo "$COMMAND" | grep -E "$pattern" > /dev/null 2>&1; then
-        echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$pattern'. Rephrase or ask the user for explicit permission." >&2
-        exit 2
-    fi
-done
+# Match the pattern lists per segment, skipping the segments whose leading word
+# only reads or prints (see _READONLY_LEADER_RE). These loops used to grep the
+# whole command string, so a keyword present only as DATA blocked the command:
+# a search term, a word in an echo, a commit subject. Issue #70 collected three
+# such blocks from one session, the sharpest being a grep over this file —
+# looking the pattern up was impossible without tripping it.
+#
+# Echoes the matched SEGMENT, not the whole command line, so the message points
+# at the part that actually matched; with a multi-segment command the pattern
+# alone left you guessing which half was the problem.
+_pattern_hit() { # _pattern_hit <grep-flags> <pattern>...
+    local flags="$1" segment pattern
+    shift
+    while IFS= read -r segment; do
+        grep -qE "$_READONLY_LEADER_RE" <<< "$segment" && continue
+        for pattern in "$@"; do
+            if grep -q"$flags" -- "$pattern" <<< "$segment" 2>/dev/null; then
+                _PATTERN_HIT_PATTERN="$pattern"
+                _PATTERN_HIT_SEGMENT="$segment"
+                return 0
+            fi
+        done
+    done < <(_split_segments)
+    return 1
+}
 
-for pattern in "${BLOCKED_PATTERNS[@]}"; do
-    if echo "$COMMAND" | grep -iE "$pattern" > /dev/null 2>&1; then
-        echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$pattern'. Rephrase or ask the user for explicit permission." >&2
-        exit 2
-    fi
-done
+_PATTERN_HIT_PATTERN=""
+_PATTERN_HIT_SEGMENT=""
+
+# Case-sensitive list first: it distinguishes -D from -d, so folding case would
+# make the two indistinguishable and block the safe form along with the forced one.
+if _pattern_hit E "${CASE_SENSITIVE_PATTERNS[@]}" ||
+   _pattern_hit iE "${BLOCKED_PATTERNS[@]}"; then
+    echo "BLOCKED by hook-block-destructive.sh: command matches destructive pattern '$_PATTERN_HIT_PATTERN' in '$_PATTERN_HIT_SEGMENT'. Rephrase or ask the user for explicit permission. Note that a keyword appearing only as data — a grep pattern, a word inside echo, a commit message — is NOT blocked; if you are reading this, the match is outside quotes or under a command this hook does not recognise as read-only." >&2
+    exit 2
+fi
 
 exit 0

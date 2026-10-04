@@ -73,6 +73,27 @@ run "rm -rf ~/Projects/x"                BLOCK
 run "rm -rf /tmp/a /usr"                 BLOCK
 run "echo cleaning && rm -rf /usr"       BLOCK
 
+# --- rm: $HOME is an operand, so the flag spelling must not matter ---
+# $HOME reaches the hook UNEXPANDED, so the operand is the literal text "$HOME",
+# which the path guard's token check did not recognise — leaving a BLOCKED_PATTERNS
+# regex pinned to the literal string "rm -rf" as the only coverage. Every ordinary
+# variation on those flags therefore walked past it, while the equivalent
+# `rm -fr /home/jan` blocked: the same action getting two answers depending on
+# flag order, which is the inconsistency this guard exists to prevent.
+run "rm -rf \$HOME"                      BLOCK
+run "rm -fr \$HOME"                      BLOCK
+run "rm -f -r \$HOME"                    BLOCK
+run "rm -rfv \$HOME"                     BLOCK
+run "rm -rf --verbose \$HOME"            BLOCK
+run "rm -rf \$HOME/Projects"             BLOCK
+run "rm -rf \${HOME}"                    BLOCK
+run "rm -rf \${HOME}/Projects"           BLOCK
+# The literal-path equivalents, pinned alongside so the two stay in agreement.
+run "rm -fr /home/jan"                   BLOCK
+run "rm -rfv /home/jan"                  BLOCK
+# Searching for the pattern must still be possible (issue #70's whole point).
+run "grep -n 'rm -fr \$HOME' bin/hook-block-destructive.sh"  ALLOW
+
 # --- rm: relative paths are ordinary build hygiene, never matched ---
 run "rm -rf ./build"                     ALLOW
 run "rm -rf build/"                      ALLOW
@@ -167,6 +188,218 @@ run "alembic upgrade head"                                          ALLOW
 # ; && || | alone would miss them if the match were anchored per line.
 run "$(printf 'psql -c "SELECT 1"\npsql -c "DROP SCHEMA public CASCADE"')"  BLOCK
 run "$(printf 'psql -d app <<SQL\nDROP SCHEMA public CASCADE;\nSQL')"       BLOCK
+
+# --- pattern list: naming a destructive command is not running one (issue #70) ---
+# BLOCKED_PATTERNS and CASE_SENSITIVE_PATTERNS used to grep the whole command
+# string, so a keyword appearing only as DATA blocked the command: a search term,
+# a word in an echo, a commit message subject. Three of these were hit in a single
+# session, the third being a grep over this hook's own source — the guard blocked
+# the investigation INTO the guard, with no phrasing available that got past it.
+#
+# The fix reuses what _sql_destructive_hit() already does rather than stripping
+# quotes: split into segments, and skip a segment whose LEADING word is read-only.
+# Quote-stripping was the obvious move and is wrong here — see the "quotes do not
+# launder a real operand" block below for the two patterns it would have opened.
+run "grep -n 'git push --force' bin/hook-block-destructive.sh"       ALLOW
+run "echo 'killall is in the blocked list'"                          ALLOW
+run "grep -rn 'mkfs' docs/"                                          ALLOW
+run "echo 'shutdown the service gracefully'"                         ALLOW
+# SC2088 is intentional: the tilde is fixture TEXT, exactly as a wrapper-script
+# command string reaches the hook. Expanding it would stop testing what it sees.
+# shellcheck disable=SC2088
+run "~/.claude/bin/git-commit.sh 'fix: do not reboot the machine'"    ALLOW
+
+# One ALLOW case per pattern the hook knows (AC: shown per pattern). These are
+# the searches that must stay possible — without them a pattern cannot be looked
+# up, documented or tested without tripping the thing being looked up.
+run "grep -n 'rm -rf \$HOME' bin/hook-block-destructive.sh"          ALLOW
+run "grep -n 'git push.*--force' bin/hook-block-destructive.sh"      ALLOW
+run "grep -n 'git push -f' bin/hook-block-destructive.sh"            ALLOW
+run "grep -n 'git reset --hard' bin/hook-block-destructive.sh"       ALLOW
+run "grep -n 'git checkout -- .' bin/hook-block-destructive.sh"      ALLOW
+run "grep -n 'git clean -f' bin/hook-block-destructive.sh"           ALLOW
+run "grep -n 'kill -9 1' bin/hook-block-destructive.sh"              ALLOW
+run "grep -n 'killall' bin/hook-block-destructive.sh"                ALLOW
+run "grep -n 'shutdown' bin/hook-block-destructive.sh"               ALLOW
+run "grep -n 'reboot' bin/hook-block-destructive.sh"                 ALLOW
+run "grep -n 'mkfs' bin/hook-block-destructive.sh"                   ALLOW
+run "grep -n 'dd if=.* of=/dev/' bin/hook-block-destructive.sh"      ALLOW
+run "grep -n 'git branch.*-D' bin/hook-block-destructive.sh"         ALLOW
+
+# --- pattern list: the real operation still blocks, per pattern ---
+# The mirror of the block above. Each ALLOW case there is only safe because the
+# bare form here still fires; a relaxation is a gap unless both sides are pinned.
+run "git push --force origin main"                                   BLOCK
+run "git push -f origin main"                                        BLOCK
+run "git reset --hard origin/main"                                   BLOCK
+run "git checkout -- ."                                              BLOCK
+run "git clean -fd"                                                  BLOCK
+# PID 1 is init; killing it takes the machine down. The pattern is anchored to end
+# of line ("kill -9 1$"), so this is the ONE form it matches — `kill -9 1234` is an
+# ordinary process kill and must stay allowed. Both sides pinned, because an
+# end-anchored pattern is easy to widen by accident.
+run "kill -9 1"                                                      BLOCK
+run "kill -9 1234"                                                   ALLOW
+run "killall node"                                                   BLOCK
+run "shutdown -h now"                                                BLOCK
+run "reboot"                                                         BLOCK
+run "mkfs.ext4 /dev/sda1"                                            BLOCK
+run "dd if=/dev/zero of=/dev/sda"                                     BLOCK
+run "git branch -D feature"                                          BLOCK
+# Case-sensitive by design: -d refuses to delete an unmerged branch, -D forces it.
+run "git branch -d feature"                                          ALLOW
+
+# --- pattern list: data AND a real operation in one command still blocks ---
+# Per-segment classification is what makes this work: a read-only leader excuses
+# its OWN segment only. Were the skip applied to the whole command string, the
+# search term in the first half would vouch for the operation in the second.
+run "grep -n 'git push --force' README.md && git push --force origin main"  BLOCK
+run "echo 'about to force push' && git push --force origin main"      BLOCK
+run "echo 'killall note'; killall node"                              BLOCK
+run "grep -rn 'reboot' docs/ | head -5 && reboot"                    BLOCK
+
+# --- pattern list: quotes do not launder a real operand ---
+# This is the case that rules out stripping quoted segments before matching, the
+# first thing to reach for and a false negative in two places. Quoting an operand
+# is normal shell hygiene, not a signal that the text is data: both commands below
+# destroy exactly as much with the quotes as without them. The leader is what
+# distinguishes data from operation, so the leader is what the skip looks at.
+run "rm -rf \"\$HOME\""                                              BLOCK
+run "rm -rf '\$HOME'"                                                BLOCK
+run "dd if=/dev/zero of=\"/dev/sda\""                                BLOCK
+run "git push \"--force\" origin main"                               BLOCK
+
+# --- pattern list: a heredoc body is input to a program, not a command ---
+# Text between the delimiters is data for whatever reads stdin. The leader of such
+# a segment is the heredoc body itself, which matches no read-only command, so
+# fail-closed is the default and these cases pin the exception as narrow.
+run "$(printf 'cat <<EOF\nkillall and reboot are blocked\nEOF')"     ALLOW
+run "$(printf 'python3 - <<%s\nprint("git push --force is blocked")\n%s' "'PY'" "PY")"  ALLOW
+# An UNQUOTED delimiter lets the shell expand the body before the interpreter
+# reads it, so a command really can hide in there. Quoted is data, unquoted is
+# not — this pair is the whole reason the delimiter's quoting is a condition and
+# not a stylistic detail.
+run "$(printf 'python3 - <<PY\nprint("ok")\nPY\n')"                   ALLOW
+run "$(printf 'python3 - <<PY\nkillall node\nPY\n')"                  BLOCK
+# A heredoc fed to something that EXECUTES the body is not data: psql runs every
+# statement in it. Pinned in the SQL section above too, and repeated here because
+# this is the case that caught a leader-blind version of the stripping step.
+run "$(printf 'psql -d app <<SQL\nDROP SCHEMA public CASCADE;\nSQL')"  BLOCK
+# A heredoc does not shield a real command on another line.
+run "$(printf 'cat <<EOF\njust text\nEOF\nkillall node')"            BLOCK
+
+# --- pattern list: fail closed on anything not recognised as read-only ---
+# At the boundary the answer must be BLOCK, not ALLOW. An unknown leader gets no
+# skip, so a keyword inside quotes under one still blocks — noisier than ideal and
+# deliberately so: a false negative here is a destroyed working tree, a false
+# positive is one rephrasing. Pinned so a later widening of the leader list has
+# to break a test rather than pass silently.
+run "mystery-tool 'git push --force'"                                BLOCK
+run "eval 'killall node'"                                            BLOCK
+run "bash -c 'git reset --hard origin/main'"                         BLOCK
+run "xargs -I{} git push --force {}"                                 BLOCK
+
+# --- the guard fails closed when the guard itself breaks ---
+# Claude Code blocks on exit 2 specifically, so any OTHER non-zero exit reads as
+# "allow" — the guard inverts exactly when it is broken, and leaves no trace that
+# distinguishes "checked, fine" from "crashed before checking". A real instance:
+# an unescaped `$(HOME|...)` in a pattern became command substitution, the hook
+# exited 127, and every destructive case below came back ALLOW.
+#
+# Driven by breaking the hook on purpose in a copy, since the whole point is
+# behaviour under a fault that cannot be triggered through the normal input.
+run_broken() { # run_broken <label> <sed-expr-to-corrupt-the-hook>
+    local label="$1" corrupt="$2" tmp rc got
+    tmp=$(mktemp)
+    sed "$corrupt" "$HOOK" > "$tmp"
+    chmod +x "$tmp"
+    printf '%s' 'git status' | jq -Rs '{tool_input:{command:.}}' | bash "$tmp" >/dev/null 2>&1
+    rc=$?
+    rm -f "$tmp"
+    got=ALLOW
+    [ "$rc" -eq 2 ] && got=BLOCK
+    if [ "$got" = BLOCK ]; then
+        pass=$((pass + 1))
+        printf 'PASS  %-6s broken hook: %s\n' "$got" "$label"
+    else
+        fail=$((fail + 1))
+        printf 'FAIL  got=%-6s want=BLOCK  broken hook: %s (exit %s)\n' "$got" "$label" "$rc"
+    fi
+}
+
+# A command that does not exist: the shape of the exit-127 incident.
+# SC2016 is the point: these are sed expressions, and $(cat) is the literal text
+# being matched in the hook's source, not something to run here.
+# shellcheck disable=SC2016
+run_broken "unknown command"      's|^INPUT=$(cat)|this-command-does-not-exist-xyz|'
+# A splitter that yields nothing. Every guard matches against SEGMENTS, so no
+# segments means no match means exit 0 — a fail-open the regex assertions cannot
+# see, because they check that the patterns are usable, not that there is anything
+# to match them against.
+#
+# This case earns its place twice over. The first attempt at the fix lived inside
+# _split_segments, which runs in a `done < <(...)` process substitution: its
+# `exit 2` killed only the subshell, so the hook printed "Failing closed" on
+# stderr and then exited 0 anyway. Asserting on the EXIT STATUS rather than on the
+# message is exactly what catches that, which is why run_broken checks the status.
+run_broken "splitter yields nothing" '/^_split_segments()/,/^}/ s/^    _strip_heredoc_bodies.*/    printf ""/'
+
+# A renamed constant: the DEFINITION moves and the use sites keep the old name,
+# which is what a careless rename actually looks like. `set -u` fires inside the
+# guard's `done < <(...)` subshell and kills only that subshell; the loop then
+# reports "no match" and the hook exits a perfectly ordinary 0, so the EXIT trap
+# cannot see it either. Only an up-front assertion catches this one.
+run_broken "renamed constant"     's|^_READONLY_LEADER_RE=|_RENAMED_LEADER_RE=|'
+# An emptied constant: a regex that matches nothing would silently skip nothing,
+# or everything, depending on the guard. Either way the guard stops meaning what
+# it says, so empty is treated as broken rather than as a permissive default.
+run_broken "emptied constant"     "s|^_SQL_DESTRUCTIVE_RE=.*|_SQL_DESTRUCTIVE_RE=''|"
+# A malformed but NON-EMPTY regex: `grep -qE` exits 2 on a pattern it cannot
+# compile, and every guard here reads any non-zero grep as "no match". So an
+# invalid regex looks exactly like a clean command and the hook exits 0 — the same
+# fail-OPEN as an unset constant, reached by a route the emptiness check above
+# cannot see. A stray paren while editing a pattern is how this actually happens.
+run_broken "malformed regex"      "s|^_SQL_DELETE_RE=.*|_SQL_DELETE_RE='(((('|"
+# A second malformed shape, so the check is not pinned to one kind of typo: an
+# inverted character range. (An interval must be written UNescaped to be invalid in
+# ERE — `a\{2,1\}` is an ordinary literal, which is itself an easy fixture mistake.)
+run_broken "malformed leader RE"  "s|^_READONLY_LEADER_RE=.*|_READONLY_LEADER_RE='[z-a]'|"
+
+# --- the deliberate limit of a text-matching guard ---
+# These ALLOW on this branch and BLOCKED on main, so they are a real reduction in
+# coverage and are pinned here rather than left to be discovered.
+#
+# The reduction is not the one it looks like. On main each of these blocked only
+# because the command TEXT happened to contain a keyword; the identical action
+# written without the literal word was allowed there too:
+#
+#   awk 'BEGIN{system("reboot")}'          main BLOCK
+#   awk 'BEGIN{system(ENVIRON["C"])}'      main ALLOW   <- same action
+#   echo killall node | sh                 main BLOCK
+#   cat script.sh | bash                   main ALLOW   <- same action
+#   echo $(reboot)                         main BLOCK
+#   echo $($CMD)                           main ALLOW   <- same action
+#
+# So main did not defend this class; it caught the spelling that named itself. A
+# guard that stops the loud form while the quiet equivalent passes is the exact
+# failure this hook's own comments describe for DROP SCHEMA (issue #67): it teaches
+# rephrasing instead of asking. Keeping the loud half only preserves the illusion.
+#
+# Reaching these properly means understanding what another interpreter will do with
+# a string — awk's system(), a shell reading stdin, command substitution — which
+# text matching cannot do at any level of effort. The honest boundary is here, and
+# ALLOW is pinned so that a future widening of the read-only leader list has to come
+# past these cases deliberately.
+run "awk 'BEGIN{system(\"reboot\")}'"                                ALLOW
+run "gh alias set boom '!killall node'"                              ALLOW
+run "echo killall node | sh"                                         ALLOW
+run "echo \$(reboot)"                                                ALLOW
+# What a read-only leader must still NOT do is excuse a real command beside it.
+# This is the property that makes the limit above a narrow one rather than a hole:
+# the skip is per segment, so the operation is judged on its own leader.
+run "awk '{print}' f.txt && reboot"                                  BLOCK
+run "gh pr list && reboot"                                           BLOCK
+run "sed -n 1p f && git push --force origin main"                    BLOCK
 
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK
