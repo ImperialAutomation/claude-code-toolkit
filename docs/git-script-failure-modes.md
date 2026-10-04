@@ -113,20 +113,14 @@ Two signatures to read for:
 | `CI_GATE: PASS (allowed failing: <names>)` | A check was red and waved through. A weaker claim than a bare `CI_GATE: PASS`, and the only place the bypass is recorded |
 | A `--allow-failing-check` that outlives its cause | The named check has been bypassed on every PR since, including ones where it was red for a new reason |
 
+The second is the one that bites, because nothing expires the flag. Narrowing a
+bypass to its cause by matching the failed job's log is tracked in issue #92.
+
 Both the bypassed list and the `CI_GATE: FAIL` list are comma-joined, so a check
 whose own name contains a comma is ambiguous to read back: `lint, typecheck`
 looks like two checks. The gate's decision is unaffected (matching is on whole
 names, not on the joined string) — only the printed line is ambiguous, so count
 the names against `gh pr checks` rather than splitting on commas.
-
-The second is the one that bites, because nothing expires the flag. Narrowing a
-bypass to its cause by matching the failed job's log is tracked in issue #92.
-
-**How to apply:** before adding the flag, confirm the check is red on the base
-branch too — that is what distinguishes "red repo-wide" from "red because of this
-diff". Remove it from the command line as soon as the underlying cause is fixed,
-and when a `PASS (allowed failing: ...)` line appears in a merge you did not
-expect it on, read the check's log before trusting the merge.
 
 ## How to apply
 
@@ -139,6 +133,10 @@ expect it on, read the check's log before trusting the merge.
 - `CI_GATE: PASS` means every check the gate could see on the pushed commit was
   green, not that every check that will eventually run has. In a repo with
   staggered check triggers, back it with branch protection or merge by hand.
+- Before adding `--allow-failing-check`, confirm the check is red on the base
+  branch too. That is what distinguishes "red repo-wide" from "red because of
+  this diff", and it is the only check on the flag's premise.
 - `CI_GATE: PASS (allowed failing: ...)` means something was red and waved
-  through by name. Treat the named checks as unverified, and drop the flag once
-  the cause that justified it is fixed.
+  through by name. Treat the named checks as unverified, drop the flag once the
+  cause that justified it is fixed, and when the line appears in a merge you did
+  not expect it on, read that check's log before trusting the merge.
