@@ -122,49 +122,85 @@ REASON_CHAIN = "compound command (;/&&/||/|) has an unmatched segment"
 REASON_NO_RULE = "no allow rule covers this command"
 
 
+def _is_segment_covered(segment_tokens, allow_rules):
+    """True if a chain segment would NOT, on its own, cause a prompt.
+
+    Two independent things can cover a segment, and both must be consulted —
+    checking only allow rules (as this code once did) reports a harmless
+    leading `cd /home/jan/Projects/x` as the culprit, because no rule names
+    `cd` even though the hook sees straight through it:
+
+      1. hook-auto-approve-bash.py's `is_segment_safe` — the hook approves the
+         whole command before permission matching ever runs, so a segment it
+         accepts never reaches a prompt;
+      2. an allow rule matching the segment on its own.
+    """
+    if _hook.is_segment_safe(segment_tokens):
+        return True
+    return command_matches_any_rule(" ".join(segment_tokens), allow_rules)
+
+
+def find_chain_culprit(segments, allow_rules):
+    """Return the first segment in `segments` that nothing covers, or None.
+
+    This is the segment that actually defeats permission matching, which is
+    what a remedy has to address. The chain's first token is usually NOT it:
+    `grep ... | head; sed ...` prompts because of `sed`, while `grep` and
+    `head` are both already approved.
+    """
+    for segment_tokens in segments:
+        if not _is_segment_covered(segment_tokens, allow_rules):
+            return segment_tokens
+    return None
+
+
 def classify_command(command, allow_rules, deny_rules):
     """Classify whether `command` would trigger a permission prompt.
 
-    Returns (would_prompt: bool, reason: str | None). reason is None only
-    when the command would NOT prompt. Mirrors hook-auto-approve-bash.py's
-    own safety logic first — a command that hook would silently approve
-    never reaches a prompt in practice, regardless of raw rule coverage.
+    Returns (would_prompt: bool, reason: str | None, culprit: list[str] | None).
+    `reason` is None only when the command would NOT prompt. `culprit` is the
+    offending segment's tokens for REASON_CHAIN, and None for every other
+    reason — those name the whole command, so there is no sub-segment to
+    attribute them to.
+
+    Mirrors hook-auto-approve-bash.py's own safety logic first — a command
+    that hook would silently approve never reaches a prompt in practice,
+    regardless of raw rule coverage.
     """
     if command_matches_any_rule(command, deny_rules):
-        return True, REASON_DENY_MATCH
+        return True, REASON_DENY_MATCH, None
 
     if _hook.is_command_safe(command):
-        return False, None
+        return False, None, None
 
     try:
         segments = _hook.split_segments(command)
     except ValueError:
-        return True, REASON_NO_RULE
+        return True, REASON_NO_RULE, None
 
     if len(segments) > 1:
-        for segment_tokens in segments:
-            segment_command = " ".join(segment_tokens)
-            if not command_matches_any_rule(segment_command, allow_rules):
-                return True, REASON_CHAIN
+        culprit = find_chain_culprit(segments, allow_rules)
+        if culprit is not None:
+            return True, REASON_CHAIN, culprit
 
     segment_tokens = segments[0] if segments else []
 
     if _hook.has_heredoc(segment_tokens):
-        return True, REASON_HEREDOC
+        return True, REASON_HEREDOC, None
     if _hook.has_process_substitution(segment_tokens):
-        return True, REASON_PROCESS_SUBSTITUTION
+        return True, REASON_PROCESS_SUBSTITUTION, None
     if _hook.has_command_substitution(segment_tokens):
-        return True, REASON_COMMAND_SUBSTITUTION
+        return True, REASON_COMMAND_SUBSTITUTION, None
 
     stripped = _hook.strip_env_prefix(_hook.strip_cd_prefix(segment_tokens))
     if stripped != _hook.strip_env_prefix(segment_tokens) and stripped and stripped != segment_tokens:
         if not command_matches_any_rule(command, allow_rules):
-            return True, REASON_CD_PREFIX
+            return True, REASON_CD_PREFIX, None
 
     if command_matches_any_rule(command, allow_rules):
-        return False, None
+        return False, None, None
 
-    return True, REASON_NO_RULE
+    return True, REASON_NO_RULE, None
 
 
 def _encode_project_dir(project_dir):
@@ -321,7 +357,7 @@ def analyze_friction(project_dir, days=30):
         if entry["tool_use_id"] in denied_tool_use_ids:
             denied += 1
 
-        would_prompt, reason = classify_command(command, allow_rules, deny_rules)
+        would_prompt, reason, _culprit = classify_command(command, allow_rules, deny_rules)
         if not would_prompt:
             continue
 

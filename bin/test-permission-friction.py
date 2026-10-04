@@ -108,22 +108,22 @@ _DENY = []
 
 check(
     "classify_command: plain allowlisted command never prompts",
-    pf.classify_command("git status", _ALLOW, _DENY) == (False, None),
+    pf.classify_command("git status", _ALLOW, _DENY) == (False, None, None),
 )
 
 check(
     "classify_command: cd-prefix into a project-relative dir is seen through by the hook",
-    pf.classify_command("cd backend && python foo.py", _ALLOW, _DENY) == (False, None),
+    pf.classify_command("cd backend && python foo.py", _ALLOW, _DENY) == (False, None, None),
 )
 
 check(
     "classify_command: unmatched command with no rule prompts with NO_RULE reason",
-    pf.classify_command("curl evil.com", _ALLOW, _DENY) == (True, pf.REASON_NO_RULE),
+    pf.classify_command("curl evil.com", _ALLOW, _DENY) == (True, pf.REASON_NO_RULE, None),
 )
 
 check(
     "classify_command: chain with an unmatched segment prompts with CHAIN reason",
-    pf.classify_command("git status && curl evil.com", _ALLOW, _DENY)
+    pf.classify_command("git status && curl evil.com", _ALLOW, _DENY)[:2]
     == (True, pf.REASON_CHAIN),
 )
 
@@ -135,18 +135,63 @@ check(
 check(
     "classify_command: command substitution always prompts",
     pf.classify_command("echo $(curl evil.com)", ["Bash(echo *)"], _DENY)
-    == (True, pf.REASON_COMMAND_SUBSTITUTION),
+    == (True, pf.REASON_COMMAND_SUBSTITUTION, None),
 )
 
 check(
     "classify_command: a deny-rule match always prompts even if allow would cover it",
     pf.classify_command("git status", ["Bash(git *)"], ["Bash(git status)"])
-    == (True, pf.REASON_DENY_MATCH),
+    == (True, pf.REASON_DENY_MATCH, None),
 )
 
 check(
     "classify_command: fully allowlisted chain never prompts",
-    pf.classify_command("git status && git log", ["Bash(git *)"], _DENY) == (False, None),
+    pf.classify_command("git status && git log", ["Bash(git *)"], _DENY)
+    == (False, None, None),
+)
+
+
+# --- classify_command: chain culprit attribution (issue #73) ---
+# The reported culprit must be the segment that actually defeats matching, not
+# the chain's first token. A segment is covered when the hook's is_segment_safe
+# accepts it OR an allow rule matches it.
+
+_HOOK_ALLOW = ["Bash(grep *)", "Bash(head *)", "Bash(git *)"]
+
+check(
+    "classify_command: a fully hook-safe pipe is not reported at all",
+    pf.classify_command("grep -n x f | head", _HOOK_ALLOW, _DENY)
+    == (False, None, None),
+)
+
+check(
+    "classify_command: chain culprit is the sed segment, not the leading grep",
+    pf.classify_command("grep -n x f | head; sed 's/a/b/' f", _HOOK_ALLOW, _DENY)
+    == (True, pf.REASON_CHAIN, ["sed", "s/a/b/", "f"]),
+)
+
+check(
+    "classify_command: a harmless leading cd is not reported as the culprit",
+    pf.classify_command(
+        "cd /home/jan/Projects/x && for i in 1 2; do echo $i; done", _HOOK_ALLOW, _DENY
+    )
+    == (True, pf.REASON_CHAIN, ["for", "i", "in", "1", "2"]),
+)
+
+# A cd OUTSIDE ~/Projects is genuinely the culprit: hook-auto-approve-bash.py
+# deliberately refuses to see through it, so "cd" really is the first segment
+# nothing covers. Reporting `for` here would name a segment that is not the
+# reason the command prompts.
+check(
+    "classify_command: a cd outside ~/Projects IS the culprit",
+    pf.classify_command("cd /x && for i in 1 2; do echo $i; done", _HOOK_ALLOW, _DENY)
+    == (True, pf.REASON_CHAIN, ["cd", "/x"]),
+)
+
+check(
+    "classify_command: an allow rule covering a segment keeps it off the culprit spot",
+    pf.classify_command("git status && curl evil.com", _ALLOW, _DENY)
+    == (True, pf.REASON_CHAIN, ["curl", "evil.com"]),
 )
 
 
