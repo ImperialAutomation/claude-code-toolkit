@@ -6,11 +6,15 @@ set -euo pipefail
 # Complements docker-audit.sh (which does static config analysis).
 #
 # Usage: docker-health-check.sh [project-dir] [--timeout SECS] [--filter PREFIX]
+#                               [--project NAME]
 # Example: docker-health-check.sh /path/to/project --filter myapp_ --timeout 300
+
+USAGE="Usage: docker-health-check.sh [project-dir] [--timeout SECS] [--filter PREFIX] [--project NAME]"
 
 PROJECT_DIR=""
 TIMEOUT=120
 FILTER=""
+COMPOSE_PROJECT=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -23,9 +27,13 @@ while [[ $# -gt 0 ]]; do
       FILTER="$2"
       shift 2
       ;;
+    --project)
+      COMPOSE_PROJECT="$2"
+      shift 2
+      ;;
     -*)
       echo "Error: unknown option: $1" >&2
-      echo "Usage: docker-health-check.sh [project-dir] [--timeout SECS] [--filter PREFIX]" >&2
+      echo "$USAGE" >&2
       exit 2
       ;;
     *)
@@ -87,9 +95,22 @@ else
   echo "Docker Runtime Health Check"
   echo "=================================================="
   echo "Compose file: $COMPOSE_REL"
+  if [[ -n "$COMPOSE_PROJECT" ]]; then
+    echo "Compose project: $COMPOSE_PROJECT"
+  fi
   echo ""
 
-  CONTAINERS_JSON=$(docker compose -f "$COMPOSE_FILE" ps --format json 2>/dev/null || true)
+  # Ask for the project by name when one is known. Without -p, Compose derives
+  # the name from the compose file's directory, which is wrong for any stack
+  # started as `docker compose -p <name> ...` — and wrong in the quietest way
+  # available: the query succeeds and returns an empty list, so a running stack
+  # reads exactly like a stopped one.
+  COMPOSE_ARGS=()
+  if [[ -n "$COMPOSE_PROJECT" ]]; then
+    COMPOSE_ARGS+=(-p "$COMPOSE_PROJECT")
+  fi
+
+  CONTAINERS_JSON=$(docker compose "${COMPOSE_ARGS[@]}" -f "$COMPOSE_FILE" ps --format json 2>/dev/null || true)
 
   if [[ -z "$CONTAINERS_JSON" ]]; then
     echo "Error: no containers found for compose file $COMPOSE_REL" >&2

@@ -38,15 +38,29 @@ contains() { # haystack needle -> yes/no
 
 # --- the stub docker ----------------------------------------------------------
 # STUB_PS       one JSON object per line, answer to `docker ps -a ... --format json`
-# STUB_COMPOSE  same, answer to `docker compose -f X ps --format json`
+# STUB_COMPOSE  same, answer to `docker compose [-p N] -f X ps --format json`
+# STUB_PROJECT  the compose project STUB_COMPOSE belongs to. Set it, and the
+#               compose stub answers only when the script asked for that project
+#               by name — which is what Compose itself does. Unset, the stub
+#               answers any query, the pre-fix behaviour.
 # STUB_HEALTH   "name=status" pairs, one per line; inspect reads .State.Health.Status
 # STUB_RESTARTS "name=count" pairs, one per line; absent name means 0
 # STUB_LOGS     text returned by `docker logs` for every container
+# STUB_DAEMON_ERR  when set, every subcommand fails with this on stderr and
+#               exit 1 — a dead daemon or an unreadable socket.
 mkdir -p "$T/bin"
 cat > "$T/bin/docker" <<'STUB'
 #!/bin/bash
 # Stub docker. Dispatches on the first non-flag word.
 sub="$1"; shift
+
+# A broken daemon fails every subcommand the same way: a message on stderr and a
+# non-zero status. Nothing on stdout — which is exactly why swallowing stderr
+# makes this indistinguishable from a stopped stack.
+if [[ -n "${STUB_DAEMON_ERR:-}" ]]; then
+    echo "$STUB_DAEMON_ERR" >&2
+    exit 1
+fi
 
 lookup() { # table name default
     local line
@@ -85,7 +99,23 @@ case "$sub" in
     done <<< "${STUB_PS:-}"
     ;;
   compose)
-    # Only `compose -f <file> ps --format json` is used by the script.
+    # `compose [-p <name>] -f <file> ps --format json`. Record the invocation so
+    # a test can assert which project name the script actually asked for.
+    [[ -n "${STUB_COMPOSE_CALLED:-}" ]] && echo "compose $*" >> "$STUB_COMPOSE_CALLED"
+    asked=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -p|--project-name) asked="$2"; shift 2 ;;
+          *) shift ;;
+        esac
+    done
+    # The heart of the bug being fixed. Compose answers for exactly one project:
+    # ask for the wrong one and you get an empty list, not an error — a running
+    # stack that reads as a stopped one. With STUB_PROJECT set, wrong name means
+    # empty output.
+    if [[ -n "${STUB_PROJECT:-}" && "$asked" != "${STUB_PROJECT}" ]]; then
+        exit 0
+    fi
     printf '%s\n' "${STUB_COMPOSE:-}"
     ;;
   inspect)
@@ -285,6 +315,32 @@ export STUB_PS
 OUT=$(run "$T/no-compose" --filter nosuch_ 2>&1); RC=$?
 check "empty filtered set exits 1" "1"   "$RC"
 check "names the filter used"      "yes" "$(contains "$OUT" "nosuch_")"
+
+echo "== 11. --project names the compose project the stack actually runs under =="
+# The issue: `docker compose -p mystack -f a.yml -f b.yml up` puts the containers
+# in project "mystack", while `docker compose -f a.yml ps` asks for a project
+# named after a.yml's directory. Wrong project, empty answer, healthy stack
+# reported as absent.
+STUB_COMPOSE='{"Name":"shopfront_api","State":"running","Health":"healthy","Status":"Up 6 hours (healthy)"}'
+STUB_PROJECT="shopfront"
+STUB_COMPOSE_CALLED="$T/compose-called-11"
+: > "$STUB_COMPOSE_CALLED"
+export STUB_COMPOSE STUB_PROJECT STUB_COMPOSE_CALLED
+OUT=$(run "$T/with-compose" --project shopfront 2>&1); RC=$?
+check "named project found"        "0"   "$RC"
+check "container is reported"      "yes" "$(contains "$OUT" "shopfront_api")"
+check "1/1 OK"                     "yes" "$(contains "$OUT" "HEALTHY (1/1")"
+check "not reported as absent"     "no"  "$(contains "$OUT" "no containers found")"
+check "project passed to compose"  "yes" \
+    "$(contains "$(cat "$STUB_COMPOSE_CALLED")" "-p shopfront")"
+check "header names the project"   "yes" "$(contains "$OUT" "Compose project: shopfront")"
+unset STUB_COMPOSE_CALLED
+
+# Without the name, the same stack is invisible. This is the asymmetry that makes
+# the option load-bearing rather than cosmetic.
+OUT=$(run "$T/with-compose" 2>&1); RC=$?
+check "same stack unnamed is not found" "1" "$RC"
+unset STUB_PROJECT STUB_COMPOSE
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
