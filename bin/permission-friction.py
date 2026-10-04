@@ -11,6 +11,36 @@ Reads transcripts only (no network) from
 ~/.claude/projects/<encoded-project-dir>/*.jsonl, and derives allow/deny
 rules by parsing the merged settings.json files at runtime — never a
 hardcoded allowlist, so it stays correct as the user's permissions evolve.
+
+Attribution: friction in a compound command is attributed to the SEGMENT that
+defeats matching, not the command's first token. `grep ... | head; sed ...`
+prompts because of `sed`; `grep` and `head` are both already approved, so a
+report blaming `grep` sends the remedy to a command that never prompted.
+
+Three things can cover a segment, and all are consulted: the auto-approve
+hook's own safety logic, an allow rule matching the segment alone, and an
+opted-in rewriting-hook prefix (--rewrite-prefix).
+
+Hook denies (`sed -n 'X,Yp' <file>`, inline Python that opens a file, an
+until+sleep file wait loop) are reported in their own bucket and excluded from
+the prompted estimate: a deny shows no prompt at all. It is the opposite
+signal — a native tool exists — and the remedy is that tool, not an allowlist
+entry.
+
+Rewriting hooks: a PreToolUse hook may rewrite a command and allow it in one
+response, so a command no allow rule covers never prompts. Verified against
+rtk 0.45.0: fed `grep -rn foo src` it answers permissionDecision "allow" with
+updatedInput.command = "rtk grep -rn foo src". The transcript nevertheless
+stores what the MODEL emitted — the rewrite lives in the hook's response and
+is never written back to tool_use.input. Measured over ~21k real transcript
+Bash calls: 516 start with `rtk`, dominated by `rtk proxy` (243) and `rtk
+grep` (222), and `rtk proxy` is RTK's own documented escape hatch, a form no
+rewrite produces. Those are commands the model typed itself, i.e. real
+friction — so prefixed commands count as friction BY DEFAULT. Pass
+--rewrite-prefix to opt out per tool. Only the prefixed form is modelled:
+rtk answers "allow" for `grep` but rewrites `jq`/`curl` with no
+permissionDecision at all, so per-command coverage is not derivable from the
+prefix.
 """
 
 import argparse
@@ -566,6 +596,7 @@ Examples:
   %(prog)s /path/to/project       Scan a specific project directory
   %(prog)s --days 7               Narrow the scan window
   %(prog)s --json                 Output as JSON
+  %(prog)s --rewrite-prefix rtk   Don't count commands a rewriting hook allows
         """,
     )
     parser.add_argument(
