@@ -183,6 +183,23 @@ def _strip_trailing_redirect_to_devnull(tokens):
     return tokens
 
 
+def _is_inside_projects_root(path):
+    """True if `path` resolves to ~/Projects or something under it.
+
+    Normalizes with abspath (not just expanduser) so a traversal like
+    "~/Projects/x/../../etc" is resolved to its real target before the
+    prefix check, instead of matching on the raw string. A RELATIVE path
+    resolves against this hook's own working directory, which is not the
+    one the command will run in — so it can never be proven inside the
+    root and is rejected outright.
+    """
+    if not os.path.isabs(os.path.expanduser(path)):
+        return False
+
+    target = os.path.abspath(os.path.expanduser(path))
+    return target == PROJECTS_ROOT or target.startswith(PROJECTS_ROOT + os.sep)
+
+
 def strip_cd_prefix(segment_tokens):
     """Drop a leading `cd <dir>` when <dir> resolves inside ~/Projects.
 
@@ -195,10 +212,64 @@ def strip_cd_prefix(segment_tokens):
     if len(segment_tokens) < 2 or segment_tokens[0] != "cd":
         return segment_tokens
 
-    target = os.path.abspath(os.path.expanduser(segment_tokens[1]))
-    if target == PROJECTS_ROOT or target.startswith(PROJECTS_ROOT + os.sep):
+    if _is_inside_projects_root(segment_tokens[1]):
         return _strip_trailing_redirect_to_devnull(segment_tokens[2:])
     return segment_tokens
+
+
+# --- env -C <dir> <cmd> -------------------------------------------------------
+# The sanctioned replacement for `cd <dir> && <cmd>` where the command genuinely
+# needs its working directory (a script reading ./.env, npx resolving config
+# from cwd). It is one command, so permission matching works on it normally.
+#
+# It cannot just be allowlisted as `Bash(env -C *)`: that would allow every
+# command behind an env prefix. Approval therefore requires BOTH halves — the
+# directory inside ~/Projects, AND the command after it approved on its own
+# merits by the very same rules. Every guard the hook applies elsewhere (git -c,
+# find -exec, command substitution) still applies, because the remainder is run
+# back through the normal segment check rather than trusted.
+
+
+def strip_env_c_prefix(segment_tokens):
+    """Drop a leading `env [-C <dir>|--chdir=<dir>]` when <dir> is inside
+    ~/Projects, returning the command that follows.
+
+    Returns the tokens unchanged when this is not an `env -C` invocation, when
+    the directory is outside the root, or when no command follows — in each of
+    those cases the segment's first token stays "env", which is not on
+    ALLOWLIST, so the segment is not approved. `env` with only assignments and
+    no -C is therefore left exactly as it was before this rule existed.
+    """
+    if not segment_tokens or segment_tokens[0] != "env":
+        return segment_tokens
+
+    rest = segment_tokens[1:]
+    directory = None
+
+    # Accept `-C <dir>`, `--chdir <dir>` and `--chdir=<dir>`. Assignments may
+    # precede the flag (`env FOO=bar -C <dir> cmd`), so skip over them.
+    index = 0
+    while index < len(rest) and ENV_ASSIGNMENT_RE.match(rest[index]):
+        index += 1
+
+    if index < len(rest) and rest[index] in ("-C", "--chdir"):
+        if index + 1 >= len(rest):
+            return segment_tokens
+        directory = rest[index + 1]
+        remainder = rest[index + 2:]
+    elif index < len(rest) and rest[index].startswith("--chdir="):
+        directory = rest[index].split("=", 1)[1]
+        remainder = rest[index + 1:]
+    else:
+        return segment_tokens
+
+    if not directory or not remainder:
+        return segment_tokens
+
+    if not _is_inside_projects_root(directory):
+        return segment_tokens
+
+    return remainder
 
 
 def _is_allowed_bin_token(token):
@@ -489,7 +560,9 @@ def command_has_cd_prefix_chain(command):
         return False
 
     for index, tokens in enumerate(segments):
-        if strip_env_prefix(tokens)[:1] != ["cd"]:
+        # strip_env_c_prefix too: `env -C <dir> cd /tmp && ...` is the same
+        # mistake wearing the approved prefix, and must not launder past it.
+        if strip_env_prefix(strip_env_c_prefix(tokens))[:1] != ["cd"]:
             continue
         # Only a cd with a command after it defeats a permission match.
         if index + 1 < len(segments):
@@ -502,11 +575,18 @@ def is_segment_safe(segment_tokens):
     """A segment is safe if, after stripping cd/env prefixes, its first
     token is on ALLOWLIST or a ~/.claude/bin/ script — with no command
     substitution anywhere in it (git commit is the sole carve-out, since
-    git-commit.sh already handles quoting/heredoc bodies safely)."""
+    git-commit.sh already handles quoting/heredoc bodies safely).
+
+    `env -C <dir>` is stripped BEFORE plain VAR=value assignments: the
+    remainder of an `env -C <dir> FOO=bar git status` still carries its own
+    assignments, which strip_env_prefix then removes as usual.
+    """
     if not segment_tokens:
         return True
 
-    stripped = strip_env_prefix(strip_cd_prefix(segment_tokens))
+    stripped = strip_env_prefix(
+        strip_env_c_prefix(strip_cd_prefix(segment_tokens))
+    )
     if not stripped:
         return True
 

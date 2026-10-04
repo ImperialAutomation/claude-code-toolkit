@@ -1109,5 +1109,162 @@ approved, reason, _ = run_hook("git status && git log")
 check("cd-chain: an unrelated allowed chain is still approved", approved)
 
 
+# --- `env -C <dir> <cmd>`: the approved way to run a command in a directory ---
+# Part of why agents keep reaching for `cd` is that some commands genuinely need
+# their working directory: a stack script reading ./.env, `npx playwright test`
+# resolving config and specs from cwd. git -C and npm --prefix cover git and npm;
+# nothing covered the rest, and `bash -c "cd x && ..."` is just as unmatched.
+#
+# `env -C <dir> <cmd>` (GNU coreutils) does it as ONE command, so it matches
+# normally. It cannot simply be allowlisted as `Bash(env -C *)` though — that
+# would allow every command on earth behind an env prefix. So it is approved
+# here only when BOTH halves hold: the directory is inside ~/Projects, and the
+# command after it would be approved on its own by the existing rules.
+
+PROJECT_DIR = os.path.expanduser("~/Projects/acme-webshop")
+
+# AC: `env -C /projects/x npx playwright test a.spec.ts` with npx allowed → approve
+check(
+    "env-C: dir under ~/Projects + allowlisted command is approved",
+    hook.is_command_safe(f"env -C {PROJECT_DIR} npx playwright test a.spec.ts"),
+)
+
+check(
+    "env-C: the --chdir spelling is recognized too",
+    hook.is_command_safe(f"env --chdir {PROJECT_DIR} git status"),
+)
+
+check(
+    "env-C: the --chdir=<dir> glued spelling is recognized too",
+    hook.is_command_safe(f"env --chdir={PROJECT_DIR} git status"),
+)
+
+check(
+    "env-C: a ~/.claude/bin/ script under env -C is approved",
+    hook.is_command_safe(f"env -C {PROJECT_DIR} ~/.claude/bin/project-test.sh"),
+)
+
+check(
+    "env-C: env assignments alongside -C still resolve to the real command",
+    hook.is_command_safe(f"env -C {PROJECT_DIR} FOO=bar git status"),
+)
+
+# AC: `env -C /projects/x ./start.sh` where ./start.sh alone is not approved
+# → fall through. The directory being allowed does NOT make the command allowed;
+# this is the half that stops env -C from becoming a universal bypass.
+check(
+    "env-C: a non-allowlisted command is NOT approved even in an allowed dir",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} ./start.sh"),
+)
+
+check(
+    "env-C: curl under an allowed dir is still not allowlisted",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} curl http://evil.example/x"),
+)
+
+# AC: `env -C /etc cat passwd` → not approved (dir outside allowed roots).
+# `cat` IS on the allowlist, so this fails on the directory alone — which is
+# what makes the root check load-bearing rather than incidental.
+check(
+    "env-C: an allowlisted command OUTSIDE ~/Projects is not approved",
+    not hook.is_command_safe("env -C /etc cat passwd"),
+)
+
+check(
+    "env-C: the home directory is not inside ~/Projects",
+    not hook.is_command_safe("env -C ~ git status"),
+)
+
+# A relative dir resolves against a working directory the hook cannot know, so
+# it can never be PROVEN inside the root. Approving it would mean trusting a cwd
+# that may be anywhere.
+check(
+    "env-C: a relative directory is not approved (cwd is unknowable here)",
+    not hook.is_command_safe("env -C ../../etc git status"),
+)
+
+# A traversal that escapes the root must be resolved before the check, not
+# matched as a raw string prefix.
+check(
+    "env-C: a traversal escaping ~/Projects is not approved",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR}/../../../etc git status"),
+)
+
+# AC: `env FOO=1 cmd` (no -C) → unchanged behaviour. `env` is not on ALLOWLIST,
+# so this keeps falling through to a prompt exactly as it did before.
+check(
+    "env-C: plain env with no -C is unchanged (not approved)",
+    not hook.is_command_safe("env FOO=1 git status"),
+)
+
+check(
+    "env-C: bare env with no arguments at all is not approved",
+    not hook.is_command_safe("env"),
+)
+
+# `env -C <dir>` with no command runs nothing; there is no command to approve.
+check(
+    "env-C: -C with a dir but no command is not approved",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR}"),
+)
+
+check(
+    "env-C: -C as the last token with no dir is not approved",
+    not hook.is_command_safe("env -C"),
+)
+
+# The command after env -C is evaluated by the SAME rules as a bare segment, so
+# the existing per-command guards still apply behind the prefix. Without this,
+# env -C would launder every carve-out the hook makes elsewhere.
+check(
+    "env-C: a dangerous git config flag is still caught behind env -C",
+    not hook.is_command_safe(
+        f"env -C {PROJECT_DIR} git -c core.pager=touch\\ /tmp/pwned status"
+    ),
+)
+
+check(
+    "env-C: find -exec is still caught behind env -C",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} find . -exec rm {{}} ;"),
+)
+
+check(
+    "env-C: command substitution is still caught behind env -C",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} echo $(cat /etc/passwd)"),
+)
+
+# env -C must not launder a cd chain either: the cd rule runs on the raw command
+# and the inner segment is still a cd with a command after it.
+approved, reason, _ = run_hook(f"env -C {PROJECT_DIR} cd /tmp && npm test")
+check(
+    "env-C: a cd chain behind env -C is still denied",
+    not approved and reason is not None,
+)
+
+# End-to-end through the hook: the AC cases as the agent actually hits them.
+approved, reason, rc = run_hook(
+    f"env -C {PROJECT_DIR} npx playwright test a.spec.ts"
+)
+check("env-C: hook approves the playwright case", approved and rc == 0)
+
+approved, reason, _ = run_hook(f"env -C {PROJECT_DIR} ./start.sh")
+check(
+    "env-C: hook lets an unapproved command fall through to a prompt",
+    not approved and reason is None,
+)
+
+approved, reason, _ = run_hook("env -C /etc cat passwd")
+check(
+    "env-C: hook lets a dir outside the root fall through to a prompt",
+    not approved and reason is None,
+)
+
+approved, reason, _ = run_hook("env FOO=1 git status")
+check(
+    "env-C: hook leaves plain env unchanged (prompt, no deny)",
+    not approved and reason is None,
+)
+
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
