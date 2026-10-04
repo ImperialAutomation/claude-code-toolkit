@@ -309,6 +309,95 @@ if [[ -z "$PR_NUMBER" ]]; then
     exit 1
 fi
 
+# allow_pattern_for: prints the ERE registered for check name $1, or nothing
+# when that check was allowed by name alone. A linear scan over the parallel
+# arrays — the allow list is a handful of entries, and an associative array
+# cannot be keyed on arbitrary check names.
+#
+# Last wins on a repeated name, matching how a reader expects a later flag to
+# override an earlier one.
+allow_pattern_for() {
+    local want="$1"
+    local i found=""
+    for i in "${!ALLOW_FAILING[@]}"; do
+        if [[ "${ALLOW_FAILING[$i]}" == "$want" ]]; then
+            found="${ALLOW_PATTERN[$i]}"
+        fi
+    done
+    printf '%s' "$found"
+}
+
+# check_log_matches_pattern: decides whether allowed-but-red check $1, whose
+# `gh pr checks` link is $2, failed for the cause described by ERE $3.
+#
+# Returns 0 only on positive evidence: the log was fetched AND the pattern
+# matched. Every other outcome returns non-zero and sets PATTERN_BLOCK_REASON to
+# a phrase naming which outcome it was, because the caller has to tell three
+# cases apart that a single "FAIL" would flatten:
+#   - the log says this is a DIFFERENT failure of the same check (the case the
+#     flag exists to catch);
+#   - the log could not be read, so there is no evidence either way;
+#   - the check has no Actions job log at all (an external commit status).
+# All three block. Conflating them would leave the caller unable to tell a
+# genuine new failure from an API blip, which is the one thing they need in
+# order to react.
+PATTERN_BLOCK_REASON=""
+check_log_matches_pattern() {
+    local name="$1" link="$2" pattern="$3"
+    PATTERN_BLOCK_REASON=""
+
+    # The job ID comes from the check's own link, so the check-name-to-job
+    # mapping is exact. `gh pr checks --json link` gives
+    # `https://github.com/O/R/actions/runs/<run_id>/job/<job_id>` for an Actions
+    # job — no `gh run list` lookup, and no ambiguity for a matrix job whose
+    # check name carries its parameters.
+    local job_id=""
+    if [[ "$link" =~ /actions/runs/[0-9]+/job/([0-9]+) ]]; then
+        job_id="${BASH_REMATCH[1]}"
+    fi
+
+    # An external service posting a commit status has no run log to match
+    # against, so a pattern on such a check can never be satisfied. It blocks
+    # rather than being refused at argument-parse time: nothing about the flag
+    # says what kind of check the name will turn out to refer to, and that only
+    # becomes knowable once the payload arrives.
+    if [[ -z "$job_id" ]]; then
+        if [[ -z "$link" ]]; then
+            PATTERN_BLOCK_REASON="$name: no job log to match the allow pattern against (the check reports no link, so it is not a GitHub Actions job)"
+        else
+            PATTERN_BLOCK_REASON="$name: no job log to match the allow pattern against (link is not a GitHub Actions job: $link)"
+        fi
+        return 1
+    fi
+
+    local log_text
+    local log_exit=0
+    local log_stderr
+    log_stderr=$(mktemp)
+    log_text=$(gh api "/repos/{owner}/{repo}/actions/jobs/${job_id}/logs" 2>"$log_stderr") || log_exit=$?
+
+    if [[ "$log_exit" -ne 0 ]]; then
+        # Logs expire (90 days by default) and the API has outages. Either way
+        # the gate holds no evidence that this red check is the known one, and a
+        # gate whose contract is to fail closed cannot read "could not check" as
+        # "fine". This is what makes the pattern form strictly more fragile than
+        # allowing by name — deliberately so.
+        PATTERN_BLOCK_REASON="$name: could not read the job log to match the allow pattern ($(tr -d '\n' < "$log_stderr"))"
+        rm -f "$log_stderr"
+        return 1
+    fi
+    rm -f "$log_stderr"
+
+    # grep -E, so the pattern is an ERE and a plain advisory ID works unescaped.
+    # -q stops at the first match: job logs reach tens of megabytes.
+    if printf '%s' "$log_text" | grep -qE -e "$pattern"; then
+        return 0
+    fi
+
+    PATTERN_BLOCK_REASON="$name: allow pattern did not match the failed job log"
+    return 1
+}
+
 # wait_for_ci_gate: polls the checks on $PR_NUMBER until they all pass, one
 # fails, or a deadline elapses. Prints a CI_GATE status line and returns
 # non-zero on FAIL/TIMEOUT so the caller can bail before merging.
@@ -398,7 +487,10 @@ wait_for_ci_gate() {
 
         local checks_json
         local checks_exit=0
-        checks_json=$(gh pr checks "$PR_NUMBER" --json name,bucket 2>"$stderr_file") || checks_exit=$?
+        # `link` is fetched for --allow-failing-check's pattern form: it carries
+        # the failed job's ID, which is how a check name is resolved to a log
+        # without guessing at job names (issue #92).
+        checks_json=$(gh pr checks "$PR_NUMBER" --json name,bucket,link 2>"$stderr_file") || checks_exit=$?
         local checks_stderr
         checks_stderr=$(cat "$stderr_file" 2>/dev/null || true)
 
@@ -479,11 +571,74 @@ wait_for_ci_gate() {
             --args -- "${ALLOW_FAILING[@]}") || jq_ok=0
         pending_names=$(echo "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | map(.name) | join(",")') || jq_ok=0
 
+        # The same allowed-and-red set again, one record per line as
+        # `<name>\t<link>`, for the pattern stage below.
+        #
+        # Not the comma-joined list above: a check name may itself contain a
+        # comma, so splitting that back apart would invent checks that do not
+        # exist. Not NUL-separated either, which would be the usual answer —
+        # bash discards NUL bytes in command substitution outright (it warns
+        # "ignored null byte in input"), so name and link would arrive
+        # concatenated into one unparseable string.
+        #
+        # Tab and newline are safe as separators precisely where comma is not:
+        # GitHub rejects both in a check name, so neither can appear inside a
+        # field and the split cannot be fooled.
+        local allowed_failing_records=""
+        if [[ "${#ALLOW_FAILING[@]}" -gt 0 ]]; then
+            allowed_failing_records=$(echo "$checks_json" | jq -r \
+                '.[] | select((.bucket == "fail" or .bucket == "cancel") and ([.name] - $ARGS.positional | length) == 0) | [.name, (.link // "")] | @tsv' \
+                --args -- "${ALLOW_FAILING[@]}") || jq_ok=0
+        fi
+
         # An empty name list is only evidence of "nothing red" when jq actually
-        # succeeded. If any of the three queries failed, the lists carry no
-        # information at all, so fail closed rather than reading silence as green.
+        # succeeded. If any of the queries failed, the lists carry no information
+        # at all, so fail closed rather than reading silence as green.
         if [[ "$jq_ok" -eq 0 ]]; then
             echo "CI_GATE: FAIL — unable to evaluate checks output from gh"
+            return 1
+        fi
+
+        # Second stage of the bypass: a check allowed WITH a pattern is only
+        # allowed when its failed job log matches that pattern (issue #92). A
+        # check allowed by name alone skips this entirely and keeps #75's
+        # behaviour, so no log is fetched for it.
+        #
+        # This runs before the fail_names verdict because a pattern miss has to
+        # be able to move a check from "allowed" back to "blocking". Doing it
+        # after would have already merged.
+        local pattern_blocked=""
+        local still_allowed_names=""
+        if [[ -n "$allowed_failing_records" ]]; then
+            local a_name a_link a_pattern
+            while IFS=$'\t' read -r a_name a_link; do
+                a_pattern=$(allow_pattern_for "$a_name")
+                if [[ -z "$a_pattern" ]]; then
+                    still_allowed_names+="${still_allowed_names:+,}$a_name"
+                    continue
+                fi
+                if check_log_matches_pattern "$a_name" "$a_link" "$a_pattern"; then
+                    still_allowed_names+="${still_allowed_names:+,}$a_name"
+                else
+                    pattern_blocked+="${pattern_blocked:+; }$PATTERN_BLOCK_REASON"
+                fi
+            # `%s\n`, not `%s`: command substitution strips the trailing newline,
+            # and `read` returns false on a final line without one — so the LAST
+            # record would be dropped, silently allowing the check it described.
+            done < <(printf '%s\n' "$allowed_failing_records")
+            allowed_failing_names="$still_allowed_names"
+        fi
+
+        # A pattern that did not match (or a log that could not be read) blocks,
+        # and says which of the two it was. The caller needs that distinction to
+        # react: a new failure of the check means read the log, an unreadable log
+        # means retry or drop the pattern.
+        if [[ -n "$pattern_blocked" ]]; then
+            if [[ -n "$fail_names" ]]; then
+                echo "CI_GATE: FAIL — $fail_names; $pattern_blocked"
+            else
+                echo "CI_GATE: FAIL — $pattern_blocked"
+            fi
             return 1
         fi
 

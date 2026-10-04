@@ -1130,6 +1130,30 @@ assert_file_absent "empty name+pattern: no merge" "$repo29b/merged"
 assert_not_contains "empty name+pattern: nothing pushed" "Pushing" "$(cat "$repo29b/last-output.txt")"
 rm -rf "$repo29b"
 
+# --- Scenario 30: allowed check red, log matches the pattern -> PASS (#92) ---
+# The feature's happy path. The audit is red for the advisory the bypass was
+# opened for, the log says so, and the merge proceeds — same outcome as #75's
+# flag, but now on evidence about the CAUSE rather than the name alone.
+repo30=$(make_repo)
+make_fake_gh "$repo30"
+echo "Test PR body" > "$repo30/body.md"
+JOBLOG_STATE="match"
+run_case "pattern matches log" "$repo30" "fail-allowed" \
+    --allow-failing-check "dependency-audit=GHSA-2xqp-wc4f-hj7p"
+assert_contains "pattern match: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo30/last-output.txt")"
+assert_contains "pattern match: names what was bypassed" "allowed failing: dependency-audit" "$(cat "$repo30/last-output.txt")"
+assert_exit "pattern match: exit code" "0" "$(cat "$repo30/last-exit.txt")"
+assert_file_present "pattern match: merge happened" "$repo30/merged"
+# The verdict must rest on a log that was actually read. Without this, an
+# implementation that skipped the fetch and allowed by name would pass every
+# other assertion in this scenario.
+assert_file_present "pattern match: log was fetched" "$repo30/joblog-fetch-count"
+# And it must be the ALLOWED check's job, not whichever check came first in the
+# payload. `build` is job 9002; a job-ID parse that read the wrong element would
+# fetch that one and match nothing.
+assert_contains "pattern match: fetched the allowed check's job" "/actions/jobs/9001/logs" "$(cat "$repo30/joblog-endpoints")"
+rm -rf "$repo30"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
