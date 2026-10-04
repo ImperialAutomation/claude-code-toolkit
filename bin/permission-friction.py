@@ -455,6 +455,7 @@ def analyze_friction(project_dir, days=30, rewrite_prefixes=DEFAULT_REWRITE_PREF
     pattern_counts = {}
     pattern_sessions = {}
     pattern_examples = {}
+    pattern_culprits = {}
     hook_denied_counts = {}
     hook_denied_examples = {}
     denied = 0
@@ -482,16 +483,25 @@ def analyze_friction(project_dir, days=30, rewrite_prefixes=DEFAULT_REWRITE_PREF
         pattern_counts[key] = pattern_counts.get(key, 0) + 1
         pattern_sessions.setdefault(key, set()).add(session_id)
         pattern_examples.setdefault(key, command)
+        if culprit is not None:
+            pattern_culprits.setdefault(key, culprit)
 
-    patterns = [
-        {
+    patterns = []
+    for key, count in pattern_counts.items():
+        row = {
             "pattern": key,
             "count": count,
             "sessions": len(pattern_sessions[key]),
             "example": pattern_examples[key],
         }
-        for key, count in pattern_counts.items()
-    ]
+        culprit_tokens = pattern_culprits.get(key)
+        if culprit_tokens is not None:
+            # Both halves are useful to a consumer: the token a remedy would
+            # name, and the segment verbatim so the full `example` chain does
+            # not have to be re-parsed to see what actually prompted.
+            row["culprit"] = _culprit_token(culprit_tokens)
+            row["culprit_example"] = " ".join(culprit_tokens)
+        patterns.append(row)
     patterns.sort(key=lambda p: p["count"], reverse=True)
 
     hook_denied = [
@@ -529,6 +539,8 @@ def format_report_text(report, days):
             lines.append(
                 f"    {p['count']:>3}x  {p['pattern']}  (sessions: {p['sessions']}){recurring}"
             )
+            if p.get("culprit_example"):
+                lines.append(f"           culprit: {p['culprit_example']}")
             lines.append(f"           e.g. {p['example']}")
     else:
         lines.append("")

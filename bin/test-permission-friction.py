@@ -699,6 +699,58 @@ try:
         "denied by hook" in pf.format_report_text(deny_report, days=30),
     )
 
+    # --- the culprit is explicit in both reports (issue #73) ---
+    # Reading the culprit out of the `pattern` string means parsing it back
+    # out, and the `example` is the whole chain — so neither tells a consumer
+    # which segment prompted. Both reports name it outright.
+    culprit_dir = fake_projects_root / "-home-jan-Projects-fake-culprit-project"
+    culprit_dir.mkdir(parents=True)
+    (culprit_dir / "session-c.jsonl").write_text(
+        "\n".join(
+            [
+                _bash_line("c1", "git log --oneline | head -20; jq -r '.version' package.json"),
+                _bash_line("c2", "git diff --stat | head; jq '.scripts' package.json"),
+            ]
+        )
+    )
+
+    pf.CLAUDE_HOME = fake_home
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        culprit_report = pf.analyze_friction(
+            "/home/jan/Projects/fake-culprit-project", days=30
+        )
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    row = culprit_report["patterns"][0]
+    check(
+        "analyze_friction: the JSON row carries the culprit token",
+        row.get("culprit") == "jq",
+    )
+    check(
+        "analyze_friction: the JSON row carries the culprit segment verbatim",
+        row.get("culprit_example") == "jq -r .version package.json",
+    )
+    # A non-chain reason names the whole command, so there is no sub-segment to
+    # attribute — the field must be absent rather than echoing the first token.
+    check(
+        "analyze_friction: rows for a non-chain reason carry no culprit",
+        all(
+            p.get("culprit") is None
+            for p in deny_report["patterns"]
+            if pf.REASON_CHAIN not in p["pattern"]
+        )
+        and any(pf.REASON_CHAIN not in p["pattern"] for p in deny_report["patterns"]),
+    )
+
+    culprit_text = pf.format_report_text(culprit_report, days=30)
+    check(
+        "format_report_text: names the culprit segment, not just the full chain",
+        "culprit: jq -r .version package.json" in culprit_text,
+    )
+
     # graceful handling of a project with no transcripts at all (AC requirement)
     pf.CLAUDE_HOME = fake_home
     pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
