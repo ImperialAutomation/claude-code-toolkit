@@ -87,7 +87,11 @@ binnenkomt is een commit op `develop`/`master`/`main` altijd een vergissing.
 (`--repo`, anders cwd) en weigert als die beschermd is. Welke branches dat zijn
 staat per repo in `<repo>/.claude/protected-branches` (één naam per regel) of in
 `git config --get-all toolkit.protectedBranch`; staat er niets, dan is niets
-beschermd en verandert er niets. Een weigering kost één `switch -c`; een commit
+beschermd en verandert er niets. Commit dat bestand: ongetrackt bestaat het
+alleen in de boom waar je het aanmaakte, dus een linked worktree ziet geen
+config en de guard slaat daar nooit aan, precies waar de vergissing het vaakst
+gebeurt. De git-config-route heeft dat probleem niet, want worktrees delen
+`.git/config`. Een weigering kost één `switch -c`; een commit
 op een base branch kost handwerk om te ontwarren. `--allow-protected` overrulet
 het waar een directe commit de bedoeling is. Detached HEAD mag altijd (rebase,
 bisect).

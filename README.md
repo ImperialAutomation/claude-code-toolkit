@@ -163,13 +163,21 @@ Which branches are protected is **per repo**, read from the first source that
 exists:
 
 1. `<repo>/.claude/protected-branches`: one branch name per line; blank lines
-   and `#` comments ignored
+   and `#` comments ignored, so a branch name containing `#` has to go in git
+   config instead
 2. `git config --get-all toolkit.protectedBranch`
 
 The file is the single source when it exists; git config is a fallback, not a
 second contributor, so "why is this branch protected" has one answer. Neither
 present protects nothing, which is the default; repos that commit straight to
 `main` never notice the guard exists. Names match exactly, no globbing.
+
+**Commit the file.** Left untracked it exists only in the tree where it was
+created, so a linked worktree sees no config and the guard never fires there,
+which is the one place the mistake is most likely. Tracking it puts the same
+protection in every checkout. `git config --get-all toolkit.protectedBranch` does
+not have this problem: worktrees share `.git/config`, so a value set once covers
+all of them, at the cost of living outside version control.
 
 A refusal costs one `switch -c`; a commit on a base branch costs a manual
 untangle. `--allow-protected` overrides it where a direct commit is intended.
