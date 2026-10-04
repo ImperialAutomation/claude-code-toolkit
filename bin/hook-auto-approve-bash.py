@@ -461,6 +461,43 @@ def command_has_until_sleep_wait_loop(command):
     return False
 
 
+# --- cd-prefixed chains -------------------------------------------------------
+# `cd <dir> && <cmd>` is the single most common cause of permission prompts:
+# matching only looks at the first word, so the rule that would allow <cmd>
+# never applies and the whole command prompts. git -C, npm --prefix and
+# env -C <dir> <cmd> all express the same intent as one command, which does
+# match.
+#
+# The rule fires inside ~/Projects as well, even though strip_cd_prefix would
+# see through such a chain and approve it. An approved cd chain is
+# indistinguishable, from the agent's side, from one that merely has not
+# prompted yet — so auto-approving it teaches exactly the shape that prompts
+# everywhere else. Denying it uniformly is what makes the alternative stick.
+
+
+def command_has_cd_prefix_chain(command):
+    """True if `command` has a `cd` segment with another command after it.
+
+    A BARE `cd <dir>` is deliberately not matched: it runs nothing after
+    itself, so it defeats no permission match and there is no alternative to
+    point the reader at. Never raises — on unparseable input the caller falls
+    through to the normal prompt.
+    """
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    for index, tokens in enumerate(segments):
+        if strip_env_prefix(tokens)[:1] != ["cd"]:
+            continue
+        # Only a cd with a command after it defeats a permission match.
+        if index + 1 < len(segments):
+            return True
+
+    return False
+
+
 def is_segment_safe(segment_tokens):
     """A segment is safe if, after stripping cd/env prefixes, its first
     token is on ALLOWLIST or a ~/.claude/bin/ script — with no command
@@ -588,6 +625,26 @@ def main():
                     "prompt. The file need not exist yet. Loops waiting on "
                     "anything else (an HTTP status, a container state, a "
                     "command's exit status) are not affected by this rule."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
+    if command_has_cd_prefix_chain(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: `cd <dir> && <cmd>` defeats permission matching — "
+                    "rules match the first word, which is `cd`, so the rule "
+                    "that would allow <cmd> never applies and this prompts "
+                    "every time. Use `git -C <dir> <args>` for git, "
+                    "`npm --prefix <dir> <args>` for npm, or "
+                    "`env -C <dir> <cmd>` for anything else that genuinely "
+                    "needs its working directory. All three are a single "
+                    "command, so they match normally."
                 ),
             }
         }

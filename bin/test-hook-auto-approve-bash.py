@@ -286,8 +286,21 @@ check(
 
 # --- end-to-end via subprocess (real PreToolUse payload shape) ---
 
+# This chain was auto-approved until issue #76: strip_cd_prefix sees through a
+# cd into ~/Projects, so every segment was allowlisted. It is now DENIED by the
+# cd-chain rule, which runs before the allow branch — see the "cd-chain" block
+# at the end of this file for why the deny applies inside ~/Projects too.
+# is_command_safe still returns True for it; what changed is the hook's decision.
 approved, reason, code = run_hook("cd ~/Projects/acme-webshop && git status")
-check("e2e: cd-prefix + git approved, exit 0", approved and code == 0)
+check("e2e: cd-prefix + git now denied (issue #76), exit 0", not approved and code == 0)
+check(
+    "e2e: cd-prefix deny carries the alternatives hint",
+    reason is not None and "env -C" in reason,
+)
+check(
+    "e2e: is_command_safe still sees the chain as safe — the deny overrides it",
+    hook.is_command_safe("cd ~/Projects/acme-webshop && git status"),
+)
 
 approved, reason, code = run_hook("echo $(cat /etc/passwd)")
 check("e2e: command substitution NOT approved, falls through with exit 0", not approved and code == 0)
@@ -970,6 +983,131 @@ check(
     "until-loop: an allowed command containing sleep is still approved",
     approved,
 )
+
+# --- `cd <dir> && ...`: deny with a hint pointing at git -C / npm --prefix / env -C ---
+# Permission rules match on the first word, so `cd X && <cmd>` never matches an
+# allow rule for <cmd> and prompts every time. The global CLAUDE.md has forbidden
+# the shape for a long time; a friction scan over 30 days still found 353 prompts
+# across 66 sessions from it, the most widespread recurring pattern in the report.
+# A convention violated that often is a hook, not another docs line.
+
+check(
+    "cd-chain: cd + && is a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("cd /projects/p && npm test"),
+)
+
+check(
+    "cd-chain: cd + ; is a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("cd /projects/p; npm test"),
+)
+
+check(
+    "cd-chain: cd + | is a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("cd /projects/p | tee /tmp/x"),
+)
+
+# The deny applies INSIDE ~/Projects too, not only outside it. This is the case
+# the hook used to auto-approve via strip_cd_prefix (issue #12): approving it
+# silently taught the shape that causes the friction everywhere else, since the
+# agent cannot tell an approved `cd` chain from one that merely did not prompt
+# yet. Denying it uniformly is the point of the rule.
+check(
+    "cd-chain: a cd into ~/Projects is denied too, not auto-approved",
+    hook.command_has_cd_prefix_chain(
+        f"cd {os.path.expanduser('~/Projects/acme-webshop')} && git status"
+    ),
+)
+
+check(
+    "cd-chain: an env-prefixed cd is still a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("FOO=bar cd /projects/p && npm test"),
+)
+
+# A cd that is not the FIRST segment is the same mistake one link further down
+# the chain, and has the same fix.
+check(
+    "cd-chain: a cd in a later segment is matched too",
+    hook.command_has_cd_prefix_chain("git status && cd /projects/p && npm test"),
+)
+
+# --- the negatives that keep the rule from firing on innocent shapes ---
+
+# A bare `cd` changes the shell's own directory and runs nothing after it, so
+# there is no command whose permission match it defeats, and no alternative to
+# point at. Without this, the rule denies `cd` itself and the hint is nonsense.
+check(
+    "cd-chain: a bare cd with no following command is NOT matched",
+    not hook.command_has_cd_prefix_chain("cd /projects/p"),
+)
+
+check(
+    "cd-chain: a bare cd with a trailing separator and nothing after is NOT matched",
+    not hook.command_has_cd_prefix_chain("cd /projects/p;"),
+)
+
+# `cd` must be the segment's command, not an argument that happens to read "cd".
+check(
+    "cd-chain: cd as an argument to another command is NOT matched",
+    not hook.command_has_cd_prefix_chain("git log --grep cd && npm test"),
+)
+
+check(
+    "cd-chain: the word cd inside a quoted string is NOT matched",
+    not hook.command_has_cd_prefix_chain('echo "cd /tmp && rm" && git status'),
+)
+
+check(
+    "cd-chain: a chain with no cd at all is NOT matched",
+    not hook.command_has_cd_prefix_chain("git status && npm test"),
+)
+
+# Fail open, never raise: unparseable input must fall through to the prompt.
+check(
+    "cd-chain: unparseable input returns False instead of raising",
+    not hook.command_has_cd_prefix_chain("cd '/unterminated && npm test"),
+)
+
+# End-to-end through the hook: deny, with a hint naming all three alternatives.
+# An alternative you have to go look up is not actionable at the moment the
+# command is blocked, so the hint must spell the replacements out.
+approved, reason, rc = run_hook("cd /projects/p && npm test")
+check("cd-chain: hook does not approve it", not approved)
+check(
+    "cd-chain: the hint names git -C",
+    reason is not None and "git -C" in reason,
+)
+check(
+    "cd-chain: the hint names npm --prefix",
+    reason is not None and "npm --prefix" in reason,
+)
+check(
+    "cd-chain: the hint names env -C as the general alternative",
+    reason is not None and "env -C" in reason,
+)
+check("cd-chain: hook still exits 0", rc == 0)
+
+# The case that used to be auto-approved, now denied end-to-end. This is the
+# behaviour reversal the rule introduces, pinned so it cannot regress silently.
+approved, reason, _ = run_hook(
+    f"cd {os.path.expanduser('~/Projects/acme-webshop')} && git status"
+)
+check(
+    "cd-chain: a cd chain inside ~/Projects is denied, not approved",
+    not approved and reason is not None,
+)
+
+# A bare cd keeps its existing behaviour: not denied. (It is also not approved —
+# `cd` is not on ALLOWLIST — so it falls through to a normal prompt.)
+approved, reason, _ = run_hook("cd /projects/p")
+check(
+    "cd-chain: a bare cd falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
+# Unrelated commands keep their existing behaviour.
+approved, reason, _ = run_hook("git status && git log")
+check("cd-chain: an unrelated allowed chain is still approved", approved)
+
 
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
