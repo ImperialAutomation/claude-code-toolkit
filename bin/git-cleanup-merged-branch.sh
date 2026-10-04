@@ -7,6 +7,11 @@
 
 set -e  # Exit on error
 
+# Sourced before the --repo cd, and resolved from BASH_SOURCE rather than the
+# cwd: this script runs from arbitrary directories and bin/ is a symlink.
+# shellcheck source=bin/lib/strip-sandbox-noise.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+
 # Parse an optional --repo flag from the front of the argument list, then cd in
 # BEFORE any git command (including the `git branch --show-current` default).
 if [ "${1:-}" = "--repo" ]; then
@@ -15,7 +20,7 @@ if [ "${1:-}" = "--repo" ]; then
     cd "$REPO_DIR" || { echo "Error: cannot cd into repo '$REPO_DIR'" >&2; exit 1; }
 fi
 
-FEATURE_BRANCH="${1:-$(git branch --show-current)}"
+FEATURE_BRANCH="${1:-$(git_filtered branch --show-current)}"
 BASE_BRANCH="${2:-}"
 
 # Color output
@@ -37,7 +42,7 @@ if [ -z "$BASE_BRANCH" ]; then
     else
         # Fallback: check common base branches
         for candidate in develop master main; do
-            if git show-ref --verify --quiet refs/heads/$candidate; then
+            if git_filtered show-ref --verify --quiet refs/heads/$candidate; then
                 if git merge-base --is-ancestor "$candidate" "$FEATURE_BRANCH" 2>/dev/null; then
                     BASE_BRANCH=$candidate
                     break
@@ -56,13 +61,13 @@ fi
 echo "Base branch: $BASE_BRANCH"
 
 # Verify feature branch exists
-if ! git show-ref --verify --quiet refs/heads/"$FEATURE_BRANCH"; then
+if ! git_filtered show-ref --verify --quiet refs/heads/"$FEATURE_BRANCH"; then
     echo -e "${RED}Error: Branch '$FEATURE_BRANCH' does not exist${NC}"
     exit 1
 fi
 
 # Verify base branch exists
-if ! git show-ref --verify --quiet refs/heads/"$BASE_BRANCH"; then
+if ! git_filtered show-ref --verify --quiet refs/heads/"$BASE_BRANCH"; then
     echo -e "${RED}Error: Base branch '$BASE_BRANCH' does not exist${NC}"
     exit 1
 fi
@@ -74,7 +79,7 @@ if [ "$FEATURE_BRANCH" = "$BASE_BRANCH" ]; then
 fi
 
 # Warn if there are uncommitted changes
-if ! git diff-index --quiet HEAD --; then
+if ! git_filtered diff-index --quiet HEAD --; then
     echo -e "${YELLOW}Warning: You have uncommitted changes${NC}"
     read -p "Continue anyway? (y/N) " -n 1 -r
     echo
@@ -85,22 +90,22 @@ fi
 
 # Step 1: Checkout base branch
 echo -e "\n${GREEN}Step 1: Checking out $BASE_BRANCH${NC}"
-git checkout "$BASE_BRANCH"
+git_filtered checkout "$BASE_BRANCH"
 
 # Step 2: Fetch latest changes and prune stale remote-tracking branches
 echo -e "\n${GREEN}Step 2: Fetching latest changes${NC}"
-git fetch --prune origin
+git_filtered fetch --prune origin
 
 # Step 3: Pull latest changes
 echo -e "\n${GREEN}Step 3: Pulling latest $BASE_BRANCH${NC}"
-git pull --prune origin "$BASE_BRANCH"
+git_filtered pull --prune origin "$BASE_BRANCH"
 
 # Step 4: Delete feature branch (only if fully merged)
 echo -e "\n${GREEN}Step 4: Deleting merged feature branch $FEATURE_BRANCH${NC}"
 
 # Check if feature branch is fully merged
-if git branch --merged "$BASE_BRANCH" | grep -q "^[* ]*$FEATURE_BRANCH$"; then
-    git branch -d "$FEATURE_BRANCH"
+if git_filtered branch --merged "$BASE_BRANCH" | grep -q "^[* ]*$FEATURE_BRANCH$"; then
+    git_filtered branch -d "$FEATURE_BRANCH"
     echo -e "${GREEN}✓ Successfully deleted local branch '$FEATURE_BRANCH'${NC}"
 
     # Try to delete remote branch if it exists
@@ -109,7 +114,7 @@ if git branch --merged "$BASE_BRANCH" | grep -q "^[* ]*$FEATURE_BRANCH$"; then
         read -p "Delete remote branch? (y/N) " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            git push origin --delete "$FEATURE_BRANCH"
+            git_filtered push origin --delete "$FEATURE_BRANCH"
             echo -e "${GREEN}✓ Successfully deleted remote branch 'origin/$FEATURE_BRANCH'${NC}"
         fi
     fi
@@ -122,7 +127,7 @@ else
     echo -e "${YELLOW}Branch '$FEATURE_BRANCH' is not fully merged into '$BASE_BRANCH'${NC}"
     echo "Diagnosing whether that means unmerged work or rewritten history..."
 
-    UNIQUE_COMMITS=$(git log --oneline "$BASE_BRANCH".."$FEATURE_BRANCH")
+    UNIQUE_COMMITS=$(git_filtered log --oneline "$BASE_BRANCH".."$FEATURE_BRANCH")
 
     if [ -z "$UNIQUE_COMMITS" ]; then
         # No unique commits: only a local merge-commit is unreachable.
@@ -138,7 +143,7 @@ else
         # empty result proves the branch adds nothing the base lacks. (Three dots
         # would diff from the merge-base and hide base-side changes -- the wrong
         # question here.)
-        if [ -z "$(git diff "$BASE_BRANCH" "$FEATURE_BRANCH")" ]; then
+        if [ -z "$(git_filtered diff "$BASE_BRANCH" "$FEATURE_BRANCH")" ]; then
             echo -e "\n${GREEN}✓ ...but the trees are identical.${NC}"
             echo "  The content already landed under different commit hashes"
             echo "  (cherry-pick, rebase, or squash-merge). Nothing would be lost."
@@ -146,7 +151,7 @@ else
         else
             echo -e "\n${RED}✗ These commits contain content missing from '$BASE_BRANCH'.${NC}"
             echo "  Files that differ:"
-            git diff --stat "$BASE_BRANCH" "$FEATURE_BRANCH" | sed 's/^/    /'
+            git_filtered diff --stat "$BASE_BRANCH" "$FEATURE_BRANCH" | sed 's/^/    /'
             SAFE_TO_FORCE=0
         fi
     fi
@@ -156,7 +161,7 @@ else
         read -p "Force-delete '$FEATURE_BRANCH'? (y/N) " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            git branch -D "$FEATURE_BRANCH"
+            git_filtered branch -D "$FEATURE_BRANCH"
             echo -e "${GREEN}✓ Deleted local branch '$FEATURE_BRANCH'${NC}"
 
             if git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" &>/dev/null; then
@@ -164,7 +169,7 @@ else
                 read -p "Delete remote branch? (y/N) " -n 1 -r
                 echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
-                    git push origin --delete "$FEATURE_BRANCH"
+                    git_filtered push origin --delete "$FEATURE_BRANCH"
                     echo -e "${GREEN}✓ Deleted remote branch 'origin/$FEATURE_BRANCH'${NC}"
                 fi
             fi
@@ -185,5 +190,5 @@ else
 fi
 
 echo -e "\n${GREEN}=== Cleanup Complete ===${NC}"
-echo "Current branch: $(git branch --show-current)"
-echo "Latest commit: $(git log -1 --oneline)"
+echo "Current branch: $(git_filtered branch --show-current)"
+echo "Latest commit: $(git_filtered log -1 --oneline)"

@@ -54,6 +54,11 @@
 
 set -euo pipefail
 
+# Resolved from BASH_SOURCE, not the cwd: these scripts run from arbitrary
+# working directories and bin/ is reached through a symlink.
+# shellcheck source=bin/lib/strip-sandbox-noise.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+
 BASE=""
 TITLE=""
 BODY_FILE=""
@@ -165,14 +170,14 @@ if ! [[ "$CI_GRACE" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-CURRENT_BRANCH=$(git branch --show-current)
+CURRENT_BRANCH=$(git_filtered branch --show-current)
 if [[ "$CURRENT_BRANCH" == "$BASE" ]]; then
     echo "Error: Current branch ($CURRENT_BRANCH) is the same as base ($BASE)" >&2
     exit 1
 fi
 
 echo "=== Pushing $CURRENT_BRANCH to origin ==="
-git push -u origin "$CURRENT_BRANCH"
+git_filtered push -u origin "$CURRENT_BRANCH"
 
 # PR creation is idempotent: a blocked CI gate leaves the PR open, and the
 # implement-epic recovery path re-runs this script with identical arguments
@@ -344,8 +349,8 @@ if [[ "$DO_MERGE" -eq 1 ]]; then
     gh pr merge "$PR_NUMBER" --merge --delete-branch
 
     echo "=== Returning to $BASE ==="
-    git checkout "$BASE"
-    git pull origin "$BASE"
+    git_filtered checkout "$BASE"
+    git_filtered pull origin "$BASE"
 
     echo "=== Done ==="
     echo "PR_NUMBER: $PR_NUMBER"

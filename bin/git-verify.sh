@@ -23,6 +23,11 @@
 # Read-only by design: it never writes, fetches, checks out or stashes.
 set -euo pipefail
 
+# Resolved from BASH_SOURCE, not the cwd: these scripts run from arbitrary
+# working directories and bin/ is reached through a symlink.
+# shellcheck source=bin/lib/strip-sandbox-noise.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+
 repo=""
 base=""
 want_alembic=0
@@ -57,22 +62,22 @@ repo="${repo:-.}"
 git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || {
   echo "git-verify: not a git repository: $repo" >&2; exit 1; }
 
-branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
+branch=$(git_filtered -C "$repo" rev-parse --abbrev-ref HEAD)
 echo "=== branch ==="
 echo "$branch"
 
 echo
 echo "=== uncommitted (tracked) ==="
 # Untracked files are omitted: sandbox dotfile-masking makes that list noisy.
-if [[ -n "$(git -C "$repo" status --short --untracked-files=no)" ]]; then
-  git -C "$repo" status --short --untracked-files=no
+if [[ -n "$(git_filtered -C "$repo" status --short --untracked-files=no)" ]]; then
+  git_filtered -C "$repo" status --short --untracked-files=no
 else
   echo "(clean)"
 fi
 
 echo
 echo "=== recent commits ==="
-git -C "$repo" log --oneline -5
+git_filtered -C "$repo" log --oneline -5
 
 upstream="$(git -C "$repo" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
 if [[ -n "$upstream" ]]; then
@@ -84,7 +89,7 @@ if [[ -n "$upstream" ]]; then
   # Unpushed work is the thing worth seeing at a glance: it is what a dying
   # background agent loses.
   if [[ "$ahead" != "0" && "$ahead" != "?" ]]; then
-    git -C "$repo" log --oneline "$upstream..HEAD"
+    git_filtered -C "$repo" log --oneline "$upstream..HEAD"
   fi
 else
   echo
@@ -95,13 +100,13 @@ fi
 if [[ -n "$base" ]]; then
   echo
   echo "=== vs $base ==="
-  if git -C "$repo" rev-parse --verify --quiet "$base" >/dev/null; then
-    n=$(git -C "$repo" rev-list --count "$base..HEAD")
+  if git_filtered -C "$repo" rev-parse --verify --quiet "$base" >/dev/null; then
+    n=$(git_filtered -C "$repo" rev-list --count "$base..HEAD")
     echo "commits on HEAD not in $base: $n"
     # Capped: a long-running feature branch can be 50+ commits ahead, and
     # dumping them all is the context cost this script exists to avoid.
     if [[ "$n" != "0" ]]; then
-      git -C "$repo" log --oneline -10 "$base..HEAD"
+      git_filtered -C "$repo" log --oneline -10 "$base..HEAD"
       if [[ "$n" -gt 10 ]]; then echo "... and $((n - 10)) more"; fi
     fi
   else

@@ -18,6 +18,11 @@
 
 set -euo pipefail
 
+# Resolved from BASH_SOURCE, not the cwd: this script is called from arbitrary
+# working directories, and bin/ is reached through a symlink.
+# shellcheck source=bin/lib/strip-sandbox-noise.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+
 AMEND=""
 FROM_STDIN=""
 FROM_FILE=""
@@ -61,7 +66,12 @@ if [[ -n "$FROM_FILE" ]]; then
         echo "Error: File '$FROM_FILE' does not exist or is empty." >&2
         exit 1
     fi
-    exec git commit $AMEND -F "$FROM_FILE"
+    # Not `exec`: exec replaces this shell, leaving nothing to filter git's
+    # stderr. The status is propagated explicitly instead, so callers see the
+    # same exit code they did before.
+    # shellcheck disable=SC2086  # $AMEND is intentionally word-split (may be empty)
+    git_filtered commit $AMEND -F "$FROM_FILE"
+    exit $?
 fi
 
 TMPFILE=$(mktemp /tmp/commit-msg-XXXXXX.txt)
@@ -84,4 +94,7 @@ if [[ ! -s "$TMPFILE" ]]; then
     exit 1
 fi
 
-exec git commit $AMEND -F "$TMPFILE"
+# Not `exec`, for the same reason as the --file path above.
+# shellcheck disable=SC2086  # $AMEND is intentionally word-split (may be empty)
+git_filtered commit $AMEND -F "$TMPFILE"
+exit $?
