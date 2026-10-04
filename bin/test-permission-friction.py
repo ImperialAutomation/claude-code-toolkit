@@ -249,6 +249,57 @@ check(
 )
 
 
+# --- _pattern_key: group chain friction on the culprit (issue #73) ---
+
+check(
+    "_pattern_key: without a culprit, groups on the command's first token",
+    pf._pattern_key("curl evil.com", pf.REASON_NO_RULE)
+    == f"curl — {pf.REASON_NO_RULE}",
+)
+
+check(
+    "_pattern_key: with a culprit, groups on the culprit's first token",
+    pf._pattern_key("grep -n x f | head; sed 's/a/b/' f", pf.REASON_CHAIN, ["sed", "s/a/b/", "f"])
+    == f"sed — {pf.REASON_CHAIN}",
+)
+
+# A `cd <dir> <cmd>` segment (no separator) keeps cd and the command in ONE
+# segment, which is the shape strip_cd_prefix exists for: the key must name the
+# command, since that is what an allow rule or wrapper would have to cover.
+check(
+    "_pattern_key: strips a cd prefix off the culprit so the real command is the key",
+    pf._pattern_key(
+        "cd /home/jan/Projects/x rtk grep foo",
+        pf.REASON_CHAIN,
+        ["cd", "/home/jan/Projects/x", "rtk", "grep", "foo"],
+    )
+    == f"rtk — {pf.REASON_CHAIN}",
+)
+
+# And the end-to-end path: a cd segment plus an uncovered command segment must
+# key on the command, never on the cd.
+check(
+    "classify+_pattern_key: a cd-prefixed chain keys on the uncovered command",
+    pf._pattern_key(
+        "cd /home/jan/Projects/x && rtk grep foo",
+        *pf.classify_command("cd /home/jan/Projects/x && rtk grep foo", ["Bash(grep *)"], [])[1:],
+    )
+    == f"rtk — {pf.REASON_CHAIN}",
+)
+
+check(
+    "_pattern_key: strips an env-var prefix off the culprit",
+    pf._pattern_key("FOO=1 jq .", pf.REASON_CHAIN, ["FOO=1", "jq", "."])
+    == f"jq — {pf.REASON_CHAIN}",
+)
+
+check(
+    "_pattern_key: keeps the reason in the key so /retro can still read it",
+    pf.REASON_CHAIN
+    in pf._pattern_key("a | sed x", pf.REASON_CHAIN, ["sed", "x"]),
+)
+
+
 # --- load_allow_rules ---
 
 tmpdir = tempfile.mkdtemp(prefix="permission-friction-test-")
