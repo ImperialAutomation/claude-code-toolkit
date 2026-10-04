@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32).
+# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71).
 #
 # Covers:
 #    1. No checks reported at all      -> CI_GATE: FAIL after grace, no merge (fail closed)
@@ -17,6 +17,12 @@
 #   11. gh exit 8                        -> read as pending, not "unable to verify"
 #   12. Re-run with an existing open PR   -> reuses it, gate runs again
 #   13. --ci-poll-interval 0              -> rejected up front, never spins
+#   14. --repo targets another worktree    -> acts there, never on the caller's
+#   15. Previous head GREEN, head lagging  -> no merge until the pushed commit
+#                                             is itself green (the fail-open half)
+#   16. Previous head RED, new head green  -> PASS in one invocation
+#   17. Head never catches up              -> FAIL after grace, no merge
+#   18. Unparseable `gh pr view` output     -> FAIL closed, no merge
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
@@ -52,6 +58,7 @@ make_repo() {
 #   - `gh pr list` reports an existing open PR only if $1/existing-pr is present
 #   - `gh pr create` prints a fake PR URL and records the call in $1/create-count
 #   - `gh pr checks` behavior driven by $1/checks-state (see scenarios below)
+#   - `gh pr view` headRefOid driven by $1/head-state (see below)
 #   - `gh pr merge` records that merge happened into $1/merged
 #
 # The stub mirrors two real `gh pr checks` behaviours the earlier version got
@@ -60,6 +67,17 @@ make_repo() {
 #     exit 0 — not the actual checks. Any state combined with --required
 #     therefore looks green, which is the fail-open bug.
 #   - Pending checks exit 8; failing checks exit 1 (see `gh pr checks --help`).
+#
+# It also models the staleness of issue #71: for the first seconds after a push
+# to a branch that already has a PR, GitHub's view of that PR still has the
+# PREVIOUS commit as head, and `gh pr checks` therefore answers for that commit.
+# The `head-state` file drives `gh pr view --json headRefOid`:
+#   current             — always the repo's real HEAD (i.e. the pushed SHA)
+#   stale-then-current  — a foreign SHA for the first 2 calls, then the real HEAD
+#   stale-forever       — always a foreign SHA
+#   malformed           — unparseable output, so there is no SHA to compare
+# The foreign SHA is a well-formed 40-hex object name that simply is not this
+# HEAD, so the script has to actually compare rather than pattern-match.
 make_fake_gh() {
     local workdir="$1"
     local bindir="$workdir/bin"
@@ -89,12 +107,29 @@ case "$1 $2" in
     "pr checks")
         # checks-state file contains one of: none, none-then-pass, none-forever,
         # pass, fail, pending-then-pass, pending-forever, exit8-then-pass,
-        # ratelimit-then-pass, malformed-json
+        # ratelimit-then-pass, malformed-json, stale-green-then-pass,
+        # stale-red-then-pass
         state=$(cat "$WORKDIR/checks-state" 2>/dev/null || echo "none")
         count_file="$WORKDIR/checks-call-count"
         count=$(cat "$count_file" 2>/dev/null || echo "0")
         count=$((count + 1))
         echo "$count" > "$count_file"
+
+        # The two stale-* states answer for whichever commit `head-state` says is
+        # currently head, which is what real gh does: `gh pr checks` reads the
+        # rollup of the PR's head commit, so a lagging head yields the PREVIOUS
+        # commit's completed checks. Deriving it from head-state rather than from
+        # the checks call count keeps the stub truthful either way — a script
+        # that never consults the head still sees the old commit's answer, and
+        # one that waits for the head to catch up sees the new commit's.
+        head_state=$(cat "$WORKDIR/head-state" 2>/dev/null || echo "current")
+        head_is_stale=0
+        if [ "$head_state" = "stale-forever" ]; then
+            head_is_stale=1
+        elif [ "$head_state" = "stale-then-current" ]; then
+            view_count=$(cat "$WORKDIR/view-call-count" 2>/dev/null || echo "0")
+            [ "$view_count" -le 2 ] && head_is_stale=1
+        fi
 
         # Real gh: --required on a branch without protection yields an empty
         # set with exit 0, regardless of the checks that actually ran.
@@ -169,6 +204,34 @@ case "$1 $2" in
                 echo 'not valid json {{{'
                 exit 0
                 ;;
+            stale-green-then-pass)
+                # The dangerous half of issue #71: the previous head was fully
+                # green, so a gate that does not check WHICH commit it is looking
+                # at merges the new commit before any of its checks have started.
+                if [ "$head_is_stale" = "1" ]; then
+                    echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                    exit 0
+                fi
+                # The new head's own checks: pending first, then green.
+                if [ "$count" -lt 5 ]; then
+                    echo '[{"name":"build","state":"PENDING","bucket":"pending"}]'
+                    exit 8
+                fi
+                echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 0
+                ;;
+            stale-red-then-pass)
+                # The other half: the previous head failed a check and the new
+                # commit fixes it. Reading the stale set reports FAIL for a
+                # commit that is green, and the documented recovery ("fix, push,
+                # re-run") then needs a second invocation to come out right.
+                if [ "$head_is_stale" = "1" ]; then
+                    echo '[{"name":"build","state":"FAILURE","bucket":"fail"}]'
+                    exit 1
+                fi
+                echo '[{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                exit 0
+                ;;
             object-json)
                 # Valid JSON but NOT an array — e.g. a GitHub API error body.
                 # jq's `length` succeeds on objects, so this used to pass the
@@ -177,6 +240,40 @@ case "$1 $2" in
                 exit 0
                 ;;
         esac
+        ;;
+    "pr view")
+        # Which commit GitHub currently believes is the PR head. Right after a
+        # push this lags, and `gh pr checks` lags with it — that coupling is the
+        # whole of issue #71.
+        state=$(cat "$WORKDIR/head-state" 2>/dev/null || echo "current")
+        count_file="$WORKDIR/view-call-count"
+        count=$(cat "$count_file" 2>/dev/null || echo "0")
+        count=$((count + 1))
+        echo "$count" > "$count_file"
+
+        # Resolved through the real git: the fake only intercepts push/pull.
+        real_head=$(git -C "$WORKDIR" rev-parse HEAD)
+        stale_head="1f0c8a3e7b94d25610af83cc71e0d4b5926af300"
+
+        case "$state" in
+            stale-then-current)
+                if [ "$count" -le 2 ]; then
+                    echo "{\"headRefOid\":\"$stale_head\"}"
+                else
+                    echo "{\"headRefOid\":\"$real_head\"}"
+                fi
+                ;;
+            stale-forever)
+                echo "{\"headRefOid\":\"$stale_head\"}"
+                ;;
+            malformed)
+                echo 'not json at all {{{'
+                ;;
+            *)
+                echo "{\"headRefOid\":\"$real_head\"}"
+                ;;
+        esac
+        exit 0
         ;;
     "pr merge")
         echo "merged" > "$WORKDIR/merged"
@@ -204,6 +301,11 @@ FAKE_GIT
     chmod +x "$bindir/git"
 }
 
+# HEAD_STATE drives the fake `gh pr view` (see make_fake_gh). Scenarios that do
+# not care about head staleness leave it at "current", which is what every real
+# run converges on within seconds.
+HEAD_STATE="current"
+
 run_case() {
     local name="$1"
     local repo="$2"
@@ -212,7 +314,8 @@ run_case() {
     local extra_args=("$@")
 
     echo "$checks_state" > "$repo/checks-state"
-    rm -f "$repo/merged" "$repo/checks-call-count" "$repo/create-count"
+    echo "$HEAD_STATE" > "$repo/head-state"
+    rm -f "$repo/merged" "$repo/checks-call-count" "$repo/create-count" "$repo/view-call-count"
 
     set +e
     output=$(cd "$repo" && PATH="$repo/bin:$PATH" "$TARGET" --base main --title "Test PR" --body-file "$repo/body.md" "${extra_args[@]}" 2>&1)
@@ -568,6 +671,84 @@ assert_exit "no --repo: exit code" "0" "$exit14d"
 git -C "$repo14" worktree remove --force "$wt14" >/dev/null 2>&1 || true
 git -C "$repo14" worktree remove --force "$main14" >/dev/null 2>&1 || true
 rm -rf "$repo14" "$wt14" "$main14"
+
+# --- Scenario 15: previous head green -> must NOT merge on the stale set (#71) ---
+# The fail-open half. GitHub's view of an existing PR lags a push by seconds, so
+# `gh pr checks` first answers for the PREVIOUS commit. When that commit was
+# fully green, a gate that never asks WHICH commit it is judging prints
+# CI_GATE: PASS and merges the new commit before a single check on it has
+# started — positive evidence about the wrong commit.
+#
+# The merge must still happen, but only after the head catches up and the new
+# commit's own checks go green. So this asserts the ORDER, not just the outcome:
+# no merge while the head is stale.
+repo15=$(make_repo)
+make_fake_gh "$repo15"
+echo "Test PR body" > "$repo15/body.md"
+touch "$repo15/existing-pr"
+HEAD_STATE="stale-then-current"
+run_case "stale green head" "$repo15" "stale-green-then-pass" --ci-timeout 30 --ci-grace 30 --ci-poll-interval 1
+HEAD_STATE="current"
+assert_contains "stale green: ends in PASS" "CI_GATE: PASS" "$(cat "$repo15/last-output.txt")"
+assert_exit "stale green: exit code" "0" "$(cat "$repo15/last-exit.txt")"
+assert_file_present "stale green: merged once the new head was green" "$repo15/merged"
+# The load-bearing assertion: the gate waited out the stale window. With the old
+# code the very first poll returned the previous head's green set, so the run
+# never saw a pending check at all.
+assert_contains "stale green: waited for the pushed commit" "stale" "$(cat "$repo15/last-output.txt")"
+rm -rf "$repo15"
+
+# --- Scenario 16: previous head red, new head green -> PASS in ONE run (#71) ---
+# The false-FAIL half. The documented recovery for a blocked gate is "fix, push
+# to the same branch, re-run with the same arguments". That re-run reuses the
+# open PR, so the first poll answers for the commit that failed — and the fix is
+# reported as a failure. Matching checks to the pushed SHA makes the single
+# invocation come out right, with no second one needed.
+repo16=$(make_repo)
+make_fake_gh "$repo16"
+echo "Test PR body" > "$repo16/body.md"
+touch "$repo16/existing-pr"
+HEAD_STATE="stale-then-current"
+run_case "stale red head" "$repo16" "stale-red-then-pass" --ci-timeout 30 --ci-grace 30 --ci-poll-interval 1
+HEAD_STATE="current"
+assert_contains "stale red: CI_GATE line" "CI_GATE: PASS" "$(cat "$repo16/last-output.txt")"
+assert_not_contains "stale red: never reports the old head's failure" "CI_GATE: FAIL" "$(cat "$repo16/last-output.txt")"
+assert_exit "stale red: exit code" "0" "$(cat "$repo16/last-exit.txt")"
+assert_file_present "stale red: merge happened" "$repo16/merged"
+rm -rf "$repo16"
+
+# --- Scenario 17: head never catches up -> fail closed after grace (#71) ---
+# A head that stays stale is indistinguishable from a push that never landed.
+# There is no evidence about the pushed commit, so the gate must not merge.
+repo17=$(make_repo)
+make_fake_gh "$repo17"
+echo "Test PR body" > "$repo17/body.md"
+touch "$repo17/existing-pr"
+HEAD_STATE="stale-forever"
+run_case "head never catches up" "$repo17" "stale-green-then-pass" --ci-grace 2 --ci-poll-interval 1
+HEAD_STATE="current"
+assert_contains "stale forever: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo17/last-output.txt")"
+assert_not_contains "stale forever: never reports PASS" "CI_GATE: PASS" "$(cat "$repo17/last-output.txt")"
+assert_exit "stale forever: exit code" "1" "$(cat "$repo17/last-exit.txt")"
+assert_file_absent "stale forever: no merge" "$repo17/merged"
+rm -rf "$repo17"
+
+# --- Scenario 18: unparseable head -> fail closed, never merges (#71) ---
+# The guard itself must fail closed. If `gh pr view` cannot be read there is no
+# SHA to compare against, and proceeding would silently restore the old
+# behaviour of judging whatever check set happens to come back.
+repo18=$(make_repo)
+make_fake_gh "$repo18"
+echo "Test PR body" > "$repo18/body.md"
+touch "$repo18/existing-pr"
+HEAD_STATE="malformed"
+run_case "unparseable head" "$repo18" "pass" --ci-grace 2 --ci-poll-interval 1
+HEAD_STATE="current"
+assert_contains "malformed head: CI_GATE line" "CI_GATE: FAIL" "$(cat "$repo18/last-output.txt")"
+assert_not_contains "malformed head: never reports PASS" "CI_GATE: PASS" "$(cat "$repo18/last-output.txt")"
+assert_exit "malformed head: exit code" "1" "$(cat "$repo18/last-exit.txt")"
+assert_file_absent "malformed head: no merge" "$repo18/merged"
+rm -rf "$repo18"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
