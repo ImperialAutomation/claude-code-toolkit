@@ -113,6 +113,36 @@ else
     fi
   fi
 
+  # Still nameless: ask the containers. A stack started as
+  # `docker compose -p <name> -f a.yml -f b.yml up` records the name nowhere on
+  # disk, but every container of it carries com.docker.compose.project, with the
+  # files it was built from in com.docker.compose.project.config_files.
+  #
+  # Each label is requested as its own --format field rather than read out of
+  # .Labels: that field is one comma-joined string, and config_files is itself
+  # comma-separated, so a file separator there is indistinguishable from a label
+  # separator. Filtering is on the label's presence, not its value — the value is
+  # the entire file list, so an exact-match filter on one path finds nothing.
+  if [[ -z "$COMPOSE_PROJECT" ]]; then
+    LABEL_ROWS=$(docker ps -a \
+      --filter "label=com.docker.compose.project" \
+      --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.config_files"}}' \
+      2>/dev/null || true)
+
+    while IFS=$'\t' read -r row_project row_files; do
+      [[ -z "$row_project" || -z "$row_files" ]] && continue
+      # Compare whole path entries. A substring test would accept
+      # docker-compose.yml.bak as a match for docker-compose.yml, adopting the
+      # project of a stack built from a different file.
+      while IFS= read -r candidate_file; do
+        if [[ "$candidate_file" == "$COMPOSE_FILE" ]]; then
+          COMPOSE_PROJECT="$row_project"
+          break 2
+        fi
+      done <<< "${row_files//,/$'\n'}"
+    done <<< "$LABEL_ROWS"
+  fi
+
   echo "Docker Runtime Health Check"
   echo "=================================================="
   echo "Compose file: $COMPOSE_REL"

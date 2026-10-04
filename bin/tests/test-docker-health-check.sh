@@ -48,6 +48,13 @@ contains() { # haystack needle -> yes/no
 # STUB_LOGS     text returned by `docker logs` for every container
 # STUB_DAEMON_ERR  when set, every subcommand fails with this on stderr and
 #               exit 1 — a dead daemon or an unreadable socket.
+# STUB_LABELS   "project<TAB>comma,separated,config,files" rows, one per
+#               container, answering the label query the script uses to discover
+#               a project name. Modelled on measured output: `docker ps` renders
+#               each requested label as its own field, which is why the script
+#               asks for them that way instead of parsing the flat .Labels string
+#               (where a config_files separator is indistinguishable from a label
+#               separator, both being commas).
 mkdir -p "$T/bin"
 cat > "$T/bin/docker" <<'STUB'
 #!/bin/bash
@@ -78,13 +85,21 @@ case "$sub" in
     [[ -n "${STUB_PS_CALLED:-}" ]] && echo "ps $*" >> "$STUB_PS_CALLED"
     # Honour --filter name=<substring> the way Docker does: a substring match,
     # not a prefix match. The script must not rely on this being a prefix.
-    want=""; all=""
+    want=""; all=""; label_query=""
     for a in "$@"; do
         case "$a" in
           name=*) want="${a#name=}" ;;
+          label=*) label_query=1 ;;
           -a|--all) all=1 ;;
         esac
     done
+    # The project-discovery query: filtered on the presence of the compose
+    # project label, formatted as the two label values. Answered from
+    # STUB_LABELS, which is a different fixture from the container list.
+    if [[ -n "$label_query" ]]; then
+        printf '%s\n' "${STUB_LABELS:-}"
+        exit 0
+    fi
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         name=$(printf '%s' "$line" | jq -r '.Names // empty')
@@ -284,8 +299,16 @@ check "error mentions --filter"     "yes" "$(contains "$OUT" "--filter")"
 # it would report on containers that have nothing to do with this project.
 check "no fallback to all containers" "no" "$(contains "$OUT" "HEALTHY")"
 check "stray container not reported"  "no" "$(contains "$OUT" "stray_container")"
-check "compose route never calls docker ps" "0" \
-    "$(wc -l < "$STUB_PS_CALLED" | tr -d ' ')"
+# The compose route may consult `docker ps` to discover a project name from
+# container labels, but never to obtain a container set: a name lookup reads
+# metadata, while listing containers would hand this check a set the compose
+# file never defined. The distinction is the --filter argument, so assert on
+# that rather than on whether `ps` was called at all.
+PS_CALLS=$(cat "$STUB_PS_CALLED")
+check "compose route asks ps only for labels" "no" \
+    "$(contains "$PS_CALLS" "name=")"
+check "any ps call is a label query" "yes" \
+    "$([[ -z "$PS_CALLS" ]] && echo yes || contains "$PS_CALLS" "label=")"
 unset STUB_COMPOSE STUB_PS_CALLED
 
 echo "== 9. the compose candidate list is the Compose-Spec names in the root =="
@@ -398,6 +421,52 @@ OUT=$(run "$T/dotenv-commented" 2>&1)
 check "commented assignment ignored" "no" "$(contains "$OUT" "retired-name")"
 check "no project line at all"       "no" "$(contains "$OUT" "Compose project:")"
 unset STUB_COMPOSE
+
+echo "== 13. with no name given, the project comes from the containers' labels =="
+# The case where nothing on disk records the name: the stack was started as
+# `docker compose -p <name> -f a.yml -f b.yml up` and the name lives only in the
+# shell history. The containers themselves still know it.
+mkdir -p "$T/labelled"
+: > "$T/labelled/docker-compose.yml"
+LABELLED_FILE="$T/labelled/docker-compose.yml"
+STUB_LABELS=$(printf 'invoicing\t%s,%s/docker-compose.prod.yml\n' "$LABELLED_FILE" "$T/labelled")
+STUB_COMPOSE='{"Name":"invoicing_api","State":"running","Health":"healthy","Status":"Up 5 hours (healthy)"}'
+STUB_PROJECT="invoicing"
+export STUB_LABELS STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/labelled" 2>&1); RC=$?
+check "project discovered from labels" "0"   "$RC"
+check "container reported"             "yes" "$(contains "$OUT" "invoicing_api")"
+check "header names the project"       "yes" "$(contains "$OUT" "Compose project: invoicing")"
+
+# A container of a DIFFERENT stack must not donate its project name. Its
+# config_files list does not mention this compose file, and adopting it would
+# report on a stack that has nothing to do with this directory.
+STUB_LABELS=$(printf 'someone-else\t/srv/other/docker-compose.yml\n')
+export STUB_LABELS
+OUT=$(run "$T/labelled" 2>&1); RC=$?
+check "foreign project not adopted" "1"  "$RC"
+check "its name is not used"        "no" "$(contains "$OUT" "someone-else")"
+
+# A path that merely contains the compose file path as a substring is a different
+# file. /srv/app/docker-compose.yml.bak must not match /srv/app/docker-compose.yml.
+STUB_LABELS=$(printf 'backup-stack\t%s.bak\n' "$LABELLED_FILE")
+export STUB_LABELS
+OUT=$(run "$T/labelled" 2>&1); RC=$?
+check "substring path is not a match" "1"  "$RC"
+check "backup stack not adopted"      "no" "$(contains "$OUT" "backup-stack")"
+unset STUB_LABELS STUB_PROJECT STUB_COMPOSE
+
+# An explicit --project still wins: discovery is the fallback, not an override.
+mkdir -p "$T/labelled-override"
+: > "$T/labelled-override/docker-compose.yml"
+STUB_LABELS=$(printf 'from-labels\t%s/docker-compose.yml\n' "$T/labelled-override")
+STUB_COMPOSE='{"Name":"chosen_api","State":"running","Health":"healthy","Status":"Up 1 hour (healthy)"}'
+STUB_PROJECT="chosen"
+export STUB_LABELS STUB_COMPOSE STUB_PROJECT
+OUT=$(run "$T/labelled-override" --project chosen 2>&1); RC=$?
+check "--project beats label discovery" "0"  "$RC"
+check "label name not used"             "no" "$(contains "$OUT" "from-labels")"
+unset STUB_LABELS STUB_PROJECT STUB_COMPOSE
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
