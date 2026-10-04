@@ -253,6 +253,18 @@ git -C <worktree> checkout <feature_branch>
 git -C <worktree> pull origin <feature_branch>
 ```
 
+#### Step 1b: Reset the progress file
+
+**Mandatory before every spawn — see "Reset the progress file before every
+spawn" below.** Overwrite `/tmp/<project>-epic-progress-<N>.txt` with the Write
+tool:
+
+```
+PHASE: SPAWNED
+SPAWNED_AT: <YYYY-MM-DD HH:MM:SS>
+DETAIL: agent for #<N> not started yet
+```
+
 #### Step 2: Fetch issue details and classify
 
 ```bash
@@ -573,6 +585,57 @@ ATTEMPTS: <what was tried>
 LAST_ERROR_OUTPUT: <relevant error output>
 ```
 
+### Reset the progress file before every spawn
+
+Progress file names are fixed per epic and per issue, so they are reused. The
+same path is written by every run: the first attempt at a sub-issue and its
+re-spawn after a recovery, the first Phase Final and the Phase Final that runs
+again after a late sub-issue is merged.
+
+Nothing clears them. A second run therefore starts by reading the previous run's
+file, which already says `PHASE: DONE` — so monitoring ends immediately, and the
+previous run's `DETAIL` is reported as the new agent's result. That is not a
+delayed or partial answer; it is a complete, plausible, wrong one, and nothing in
+the file says which run wrote it. The observed case relayed a WARN that an
+earlier round had already found and fixed, and the new agent then overwrote the
+evidence.
+
+**So: immediately before every `Task` spawn that has a progress file, overwrite
+that file with the Write tool.** Use the spawn's own path and nothing else:
+
+```
+PHASE: SPAWNED
+SPAWNED_AT: <YYYY-MM-DD HH:MM:SS>
+DETAIL: <what was spawned> not started yet
+```
+
+This applies to all of them, with no exceptions:
+
+| Spawn | File |
+|---|---|
+| Per sub-issue (Step 1b above) | `/tmp/<project>-epic-progress-<N>.txt` |
+| Re-spawn after a recovery | `/tmp/<project>-epic-progress-<N>.txt` |
+| Phase Final — Validation & Tests | `/tmp/<project>-epic-verify-validation-<epic>.txt` |
+| Phase Final — Runtime & Smoke Test | `/tmp/<project>-epic-verify-runtime-<epic>.txt` |
+
+Write it, then spawn, then start monitoring — in that order. Resetting after the
+spawn races the agent's own first write and can erase it.
+
+A re-spawn is the case most easily missed, because by then the file is the one
+you have been reading all along and looks like live state. It is the dead
+agent's last words.
+
+**Where the wait is a `wait-for-pattern.sh` call rather than a polling loop**,
+pass the spawn time as well — the reset and the flag guard the same mistake from
+two directions, and the flag is the half that still holds if a reset is ever
+skipped:
+
+```bash
+SPAWNED_AT=$(date +%s)   # capture BEFORE spawning
+~/.claude/bin/wait-for-pattern.sh --newer-than "$SPAWNED_AT" \
+    /tmp/<project>-epic-verify-runtime-<epic>.txt 'DONE|FAILED' 1800
+```
+
 #### Step 3C: Monitor sub-agent progress
 
 **⚠️ TOOL RULE: Use the Read tool to read progress files and TaskOutput to check agent status. NEVER use Bash commands like `tail`, `cat`, `grep`, or `head` for monitoring — these will be blocked by permissions and stall the epic.**
@@ -619,7 +682,11 @@ A sub-agent can die mid-task without ever sending a completion notification or w
    - `git -C <worktree> stash push -u -m "orphaned #<N> work from dead sub-agent: <short description>"` — never `git checkout --` or `git clean` a dead agent's edits.
    - Note the stash reference so it can be referenced when re-spawning. A stash belongs to the repository, not the tree, so say which worktree it was taken from.
 4. If a sub-branch has zero commits (identical tip to the feature branch) and nothing was stashed for it, it is safe to delete (`git -C <worktree> branch -d <sub-branch>`) before re-spawning — nothing is lost.
-5. **Re-spawn** with an explicit note in the prompt:
+5. **Re-spawn** with an explicit note in the prompt. **First reset
+   `/tmp/<project>-epic-progress-<N>.txt`** (see "Reset the progress file before
+   every spawn") — the dead agent's file is still there, and on a re-spawn it is
+   the file you have been reading all along, so it reads like live state rather
+   than a leftover:
    - State plainly that a previous attempt died and this is a fresh attempt.
    - If a stash exists, point to it by name/message and say it MAY be inspected for reference (`git -C <worktree> stash show -p stash@{N}`) but must not be blindly applied — treat it as unverified, not a starting point to resume from.
    - If the second failure signature (confused non-response) was the trigger, add an explicit instruction to actually perform the implementation and not just describe or delegate it (see the hardened Response Format instruction below).
@@ -743,7 +810,12 @@ on another session's branch — both silently, since both trees are valid checko
 
 ### Step 1: Spawn verification sub-agent — Validation & Tests
 
-Spawn a background agent:
+**First reset `/tmp/<project>-epic-verify-validation-<epic>.txt`** with the Write
+tool (see "Reset the progress file before every spawn"). Phase Final is the step
+most likely to run twice on one epic — a late sub-issue merged after the first
+round sends it through again, against a file that already says `DONE`.
+
+Then spawn a background agent:
 
 ```
 ## Task: Project Validation & Test Suite for Epic #<epic_number>
@@ -855,7 +927,10 @@ ERROR: <description>
 
 ### Step 2: Spawn verification sub-agent — Runtime & Smoke Test
 
-Spawn a background agent:
+**First reset `/tmp/<project>-epic-verify-runtime-<epic>.txt`** with the Write
+tool (see "Reset the progress file before every spawn").
+
+Then spawn a background agent:
 
 ```
 ## Task: Runtime Verification & Smoke Test for Epic #<epic_number>
