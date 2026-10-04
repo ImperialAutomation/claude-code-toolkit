@@ -250,14 +250,30 @@ case "$1 $2" in
                 # everything else green. The realistic shape of issue #75: an
                 # advisory landed on a pinned package, so the audit is red in
                 # every PR in the repo regardless of the diff.
-                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail","link":"https://github.com/example/repo/actions/runs/500/job/9001"},{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/example/repo/actions/runs/500/job/9002"}]'
+                exit 1
+                ;;
+            fail-allowed-nonactions)
+                # The allowed red check is an external service's commit status,
+                # not a GitHub Actions job (issue #92, design question 4). Its
+                # link points at the service's own page, so there is no job ID to
+                # resolve and no run log to match a pattern against.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail","link":"https://audit.example.com/reports/abc123"},{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/example/repo/actions/runs/500/job/9002"}]'
+                exit 1
+                ;;
+            fail-allowed-nolink)
+                # A commit status with no target URL at all: `link` is an empty
+                # string. Distinct from nonactions because an empty field and a
+                # foreign URL fail the job-ID parse for different reasons, and a
+                # naive parse could read "" as a successful match of nothing.
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail","link":""},{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/example/repo/actions/runs/500/job/9002"}]'
                 exit 1
                 ;;
             fail-allowed-plus-other)
                 # The allowed check AND a second one are red. The second is about
                 # this diff, so the gate must still block — and must not launder
                 # the allowed name into the failure list.
-                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"FAILURE","bucket":"fail"}]'
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail","link":"https://github.com/example/repo/actions/runs/500/job/9001"},{"name":"build","state":"FAILURE","bucket":"fail","link":"https://github.com/example/repo/actions/runs/500/job/9002"}]'
                 exit 1
                 ;;
             fail-allowed-plus-pending)
@@ -265,14 +281,14 @@ case "$1 $2" in
                 # is blocking YET, which is exactly the state a gate can misread
                 # as "nothing blocking, therefore green" and merge before the
                 # pending check has had its say.
-                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail"},{"name":"build","state":"PENDING","bucket":"pending"}]'
+                echo '[{"name":"dependency-audit","state":"FAILURE","bucket":"fail","link":"https://github.com/example/repo/actions/runs/500/job/9001"},{"name":"build","state":"PENDING","bucket":"pending","link":"https://github.com/example/repo/actions/runs/500/job/9002"}]'
                 exit 1
                 ;;
             fail-allowed-cancelled)
                 # Same bypass, cancel bucket. The gate lumps fail and cancel
                 # together, so the allow list has to cover both or a cancelled
                 # allowed check blocks while a failed one does not.
-                echo '[{"name":"dependency-audit","state":"CANCELLED","bucket":"cancel"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                echo '[{"name":"dependency-audit","state":"CANCELLED","bucket":"cancel","link":"https://github.com/example/repo/actions/runs/500/job/9001"},{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/example/repo/actions/runs/500/job/9002"}]'
                 exit 1
                 ;;
             fail-dashname)
@@ -287,7 +303,7 @@ case "$1 $2" in
                 # Real-world check names carry spaces, dots and parentheses.
                 # These must match exactly as a whole name, with no globbing or
                 # regex interpretation anywhere in the path.
-                echo '[{"name":"test (3.12)","state":"FAILURE","bucket":"fail"},{"name":"build","state":"SUCCESS","bucket":"pass"}]'
+                echo '[{"name":"test (3.12)","state":"FAILURE","bucket":"fail","link":"https://github.com/example/repo/actions/runs/500/job/9001"},{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/example/repo/actions/runs/500/job/9002"}]'
                 exit 1
                 ;;
             object-json)
@@ -337,11 +353,86 @@ case "$1 $2" in
         echo "merged" > "$WORKDIR/merged"
         exit 0
         ;;
-    *)
-        echo "fake gh: unhandled args: $*" >&2
-        exit 1
-        ;;
 esac
+
+# `gh api /repos/{owner}/{repo}/actions/jobs/<id>/logs` — the failed job's log,
+# which is what an allow PATTERN is matched against (issue #92). Real gh returns
+# the log as plain text with exit 0, or prints an API error to stderr and exits
+# non-zero (verified against the live API: a missing job is `HTTP 404`).
+#
+# Every fetch is recorded in joblog-fetch-count. Scenarios assert on that file
+# as well as on the verdict, because "did not fetch" is a real requirement in
+# two directions: a green allowed check must not cost an API call on every PR,
+# and a pattern that is supposed to gate a merge must not pass without reading
+# anything.
+if [ "$1" = "api" ]; then
+    endpoint=""
+    for arg in "$@"; do
+        case "$arg" in
+            */actions/jobs/*/logs) endpoint="$arg" ;;
+        esac
+    done
+
+    if [ -n "$endpoint" ]; then
+        count_file="$WORKDIR/joblog-fetch-count"
+        count=$(cat "$count_file" 2>/dev/null || echo "0")
+        echo $((count + 1)) > "$count_file"
+        # Record which job was asked for, so a scenario can prove the job ID came
+        # from the right check's link rather than from whichever check was first.
+        echo "$endpoint" >> "$WORKDIR/joblog-endpoints"
+
+        state=$(cat "$WORKDIR/joblog-state" 2>/dev/null || echo "match")
+        case "$state" in
+            match)
+                # A realistic audit log: the known advisory the bypass was opened
+                # for, surrounded by the noise a real job log carries.
+                printf '%s\n' \
+                    '2026-10-04T08:06:10.1234567Z ##[group]Run npm audit --audit-level=high' \
+                    '2026-10-04T08:06:12.7654321Z # npm audit report' \
+                    '2026-10-04T08:06:12.7654322Z tar  <6.2.1' \
+                    '2026-10-04T08:06:12.7654323Z Severity: high' \
+                    '2026-10-04T08:06:12.7654324Z Denial of service - GHSA-2xqp-wc4f-hj7p' \
+                    '2026-10-04T08:06:12.7654325Z 1 high severity vulnerability' \
+                    '2026-10-04T08:06:13.0000001Z ##[error]Process completed with exit code 1.'
+                exit 0
+                ;;
+            nomatch)
+                # The same check red for a DIFFERENT cause: a new advisory on a
+                # different package. This is the case the whole issue exists for —
+                # it reads identically to the known one if you only match by name.
+                printf '%s\n' \
+                    '2026-10-04T08:06:10.1234567Z ##[group]Run npm audit --audit-level=high' \
+                    '2026-10-04T08:06:12.7654321Z # npm audit report' \
+                    '2026-10-04T08:06:12.7654322Z lodash  <4.17.21' \
+                    '2026-10-04T08:06:12.7654323Z Severity: critical' \
+                    '2026-10-04T08:06:12.7654324Z Prototype pollution - GHSA-p6mc-m468-83gg' \
+                    '2026-10-04T08:06:12.7654325Z 1 critical severity vulnerability' \
+                    '2026-10-04T08:06:13.0000001Z ##[error]Process completed with exit code 1.'
+                exit 0
+                ;;
+            fetch-fail)
+                # Logs expire (GitHub keeps them 90 days by default), and the API
+                # has its own outages. Either way the gate has no evidence.
+                echo '{"message":"Not Found","status":"404"}'
+                echo "gh: Not Found (HTTP 404)" >&2
+                exit 1
+                ;;
+            empty)
+                # A 200 with an empty body. Distinct from fetch-fail: nothing
+                # failed, so a gate that only checks the exit status would match
+                # an empty string against the pattern and call it a non-match,
+                # which happens to be right here but for the wrong reason.
+                exit 0
+                ;;
+        esac
+    fi
+
+    echo "fake gh: unhandled api endpoint: $*" >&2
+    exit 1
+fi
+
+echo "fake gh: unhandled args: $*" >&2
+exit 1
 FAKE_GH
     chmod +x "$bindir/gh"
     # Bake the workdir path into the script itself (avoids env export plumbing through git push -u).
@@ -364,6 +455,12 @@ FAKE_GIT
 # run converges on within seconds.
 HEAD_STATE="current"
 
+# JOBLOG_STATE drives the fake `gh api .../actions/jobs/<id>/logs` (see
+# make_fake_gh): match, nomatch, fetch-fail or empty. Only the --allow-failing-
+# check pattern scenarios (#92) care; everything else leaves it at "match",
+# which is inert because no pattern is set and so no fetch happens at all.
+JOBLOG_STATE="match"
+
 run_case() {
     local name="$1"
     local repo="$2"
@@ -373,7 +470,9 @@ run_case() {
 
     echo "$checks_state" > "$repo/checks-state"
     echo "$HEAD_STATE" > "$repo/head-state"
-    rm -f "$repo/merged" "$repo/checks-call-count" "$repo/create-count" "$repo/view-call-count"
+    echo "$JOBLOG_STATE" > "$repo/joblog-state"
+    rm -f "$repo/merged" "$repo/checks-call-count" "$repo/create-count" \
+        "$repo/view-call-count" "$repo/joblog-fetch-count" "$repo/joblog-endpoints"
 
     set +e
     output=$(cd "$repo" && PATH="$repo/bin:$PATH" "$TARGET" --base main --title "Test PR" --body-file "$repo/body.md" "${extra_args[@]}" 2>&1)
