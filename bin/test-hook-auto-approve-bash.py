@@ -286,8 +286,21 @@ check(
 
 # --- end-to-end via subprocess (real PreToolUse payload shape) ---
 
+# This chain was auto-approved until issue #76: strip_cd_prefix sees through a
+# cd into ~/Projects, so every segment was allowlisted. It is now DENIED by the
+# cd-chain rule, which runs before the allow branch — see the "cd-chain" block
+# at the end of this file for why the deny applies inside ~/Projects too.
+# is_command_safe still returns True for it; what changed is the hook's decision.
 approved, reason, code = run_hook("cd ~/Projects/acme-webshop && git status")
-check("e2e: cd-prefix + git approved, exit 0", approved and code == 0)
+check("e2e: cd-prefix + git now denied (issue #76), exit 0", not approved and code == 0)
+check(
+    "e2e: cd-prefix deny carries the alternatives hint",
+    reason is not None and "env -C" in reason,
+)
+check(
+    "e2e: is_command_safe still sees the chain as safe — the deny overrides it",
+    hook.is_command_safe("cd ~/Projects/acme-webshop && git status"),
+)
 
 approved, reason, code = run_hook("echo $(cat /etc/passwd)")
 check("e2e: command substitution NOT approved, falls through with exit 0", not approved and code == 0)
@@ -970,6 +983,288 @@ check(
     "until-loop: an allowed command containing sleep is still approved",
     approved,
 )
+
+# --- `cd <dir> && ...`: deny with a hint pointing at git -C / npm --prefix / env -C ---
+# Permission rules match on the first word, so `cd X && <cmd>` never matches an
+# allow rule for <cmd> and prompts every time. The global CLAUDE.md has forbidden
+# the shape for a long time; a friction scan over 30 days still found 353 prompts
+# across 66 sessions from it, the most widespread recurring pattern in the report.
+# A convention violated that often is a hook, not another docs line.
+
+check(
+    "cd-chain: cd + && is a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("cd /projects/p && npm test"),
+)
+
+check(
+    "cd-chain: cd + ; is a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("cd /projects/p; npm test"),
+)
+
+check(
+    "cd-chain: cd + | is a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("cd /projects/p | tee /tmp/x"),
+)
+
+# The deny applies INSIDE ~/Projects too, not only outside it. This is the case
+# the hook used to auto-approve via strip_cd_prefix (issue #12): approving it
+# silently taught the shape that causes the friction everywhere else, since the
+# agent cannot tell an approved `cd` chain from one that merely did not prompt
+# yet. Denying it uniformly is the point of the rule.
+check(
+    "cd-chain: a cd into ~/Projects is denied too, not auto-approved",
+    hook.command_has_cd_prefix_chain(
+        f"cd {os.path.expanduser('~/Projects/acme-webshop')} && git status"
+    ),
+)
+
+check(
+    "cd-chain: an env-prefixed cd is still a cd-prefixed chain",
+    hook.command_has_cd_prefix_chain("FOO=bar cd /projects/p && npm test"),
+)
+
+# A cd that is not the FIRST segment is the same mistake one link further down
+# the chain, and has the same fix.
+check(
+    "cd-chain: a cd in a later segment is matched too",
+    hook.command_has_cd_prefix_chain("git status && cd /projects/p && npm test"),
+)
+
+# --- the negatives that keep the rule from firing on innocent shapes ---
+
+# A bare `cd` changes the shell's own directory and runs nothing after it, so
+# there is no command whose permission match it defeats, and no alternative to
+# point at. Without this, the rule denies `cd` itself and the hint is nonsense.
+check(
+    "cd-chain: a bare cd with no following command is NOT matched",
+    not hook.command_has_cd_prefix_chain("cd /projects/p"),
+)
+
+check(
+    "cd-chain: a bare cd with a trailing separator and nothing after is NOT matched",
+    not hook.command_has_cd_prefix_chain("cd /projects/p;"),
+)
+
+# `cd` must be the segment's command, not an argument that happens to read "cd".
+check(
+    "cd-chain: cd as an argument to another command is NOT matched",
+    not hook.command_has_cd_prefix_chain("git log --grep cd && npm test"),
+)
+
+check(
+    "cd-chain: the word cd inside a quoted string is NOT matched",
+    not hook.command_has_cd_prefix_chain('echo "cd /tmp && rm" && git status'),
+)
+
+check(
+    "cd-chain: a chain with no cd at all is NOT matched",
+    not hook.command_has_cd_prefix_chain("git status && npm test"),
+)
+
+# Fail open, never raise: unparseable input must fall through to the prompt.
+check(
+    "cd-chain: unparseable input returns False instead of raising",
+    not hook.command_has_cd_prefix_chain("cd '/unterminated && npm test"),
+)
+
+# End-to-end through the hook: deny, with a hint naming all three alternatives.
+# An alternative you have to go look up is not actionable at the moment the
+# command is blocked, so the hint must spell the replacements out.
+approved, reason, rc = run_hook("cd /projects/p && npm test")
+check("cd-chain: hook does not approve it", not approved)
+check(
+    "cd-chain: the hint names git -C",
+    reason is not None and "git -C" in reason,
+)
+check(
+    "cd-chain: the hint names npm --prefix",
+    reason is not None and "npm --prefix" in reason,
+)
+check(
+    "cd-chain: the hint names env -C as the general alternative",
+    reason is not None and "env -C" in reason,
+)
+check("cd-chain: hook still exits 0", rc == 0)
+
+# The case that used to be auto-approved, now denied end-to-end. This is the
+# behaviour reversal the rule introduces, pinned so it cannot regress silently.
+approved, reason, _ = run_hook(
+    f"cd {os.path.expanduser('~/Projects/acme-webshop')} && git status"
+)
+check(
+    "cd-chain: a cd chain inside ~/Projects is denied, not approved",
+    not approved and reason is not None,
+)
+
+# A bare cd keeps its existing behaviour: not denied. (It is also not approved —
+# `cd` is not on ALLOWLIST — so it falls through to a normal prompt.)
+approved, reason, _ = run_hook("cd /projects/p")
+check(
+    "cd-chain: a bare cd falls through to a prompt, not a deny",
+    not approved and reason is None,
+)
+
+# Unrelated commands keep their existing behaviour.
+approved, reason, _ = run_hook("git status && git log")
+check("cd-chain: an unrelated allowed chain is still approved", approved)
+
+
+# --- `env -C <dir> <cmd>`: the approved way to run a command in a directory ---
+# Part of why agents keep reaching for `cd` is that some commands genuinely need
+# their working directory: a stack script reading ./.env, `npx playwright test`
+# resolving config and specs from cwd. git -C and npm --prefix cover git and npm;
+# nothing covered the rest, and `bash -c "cd x && ..."` is just as unmatched.
+#
+# `env -C <dir> <cmd>` (GNU coreutils) does it as ONE command, so it matches
+# normally. It cannot simply be allowlisted as `Bash(env -C *)` though — that
+# would allow every command on earth behind an env prefix. So it is approved
+# here only when BOTH halves hold: the directory is inside ~/Projects, and the
+# command after it would be approved on its own by the existing rules.
+
+PROJECT_DIR = os.path.expanduser("~/Projects/acme-webshop")
+
+# AC: `env -C /projects/x npx playwright test a.spec.ts` with npx allowed → approve
+check(
+    "env-C: dir under ~/Projects + allowlisted command is approved",
+    hook.is_command_safe(f"env -C {PROJECT_DIR} npx playwright test a.spec.ts"),
+)
+
+check(
+    "env-C: the --chdir spelling is recognized too",
+    hook.is_command_safe(f"env --chdir {PROJECT_DIR} git status"),
+)
+
+check(
+    "env-C: the --chdir=<dir> glued spelling is recognized too",
+    hook.is_command_safe(f"env --chdir={PROJECT_DIR} git status"),
+)
+
+check(
+    "env-C: a ~/.claude/bin/ script under env -C is approved",
+    hook.is_command_safe(f"env -C {PROJECT_DIR} ~/.claude/bin/project-test.sh"),
+)
+
+check(
+    "env-C: env assignments alongside -C still resolve to the real command",
+    hook.is_command_safe(f"env -C {PROJECT_DIR} FOO=bar git status"),
+)
+
+# AC: `env -C /projects/x ./start.sh` where ./start.sh alone is not approved
+# → fall through. The directory being allowed does NOT make the command allowed;
+# this is the half that stops env -C from becoming a universal bypass.
+check(
+    "env-C: a non-allowlisted command is NOT approved even in an allowed dir",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} ./start.sh"),
+)
+
+check(
+    "env-C: curl under an allowed dir is still not allowlisted",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} curl http://evil.example/x"),
+)
+
+# AC: `env -C /etc cat passwd` → not approved (dir outside allowed roots).
+# `cat` IS on the allowlist, so this fails on the directory alone — which is
+# what makes the root check load-bearing rather than incidental.
+check(
+    "env-C: an allowlisted command OUTSIDE ~/Projects is not approved",
+    not hook.is_command_safe("env -C /etc cat passwd"),
+)
+
+check(
+    "env-C: the home directory is not inside ~/Projects",
+    not hook.is_command_safe("env -C ~ git status"),
+)
+
+# A relative dir resolves against a working directory the hook cannot know, so
+# it can never be PROVEN inside the root. Approving it would mean trusting a cwd
+# that may be anywhere.
+check(
+    "env-C: a relative directory is not approved (cwd is unknowable here)",
+    not hook.is_command_safe("env -C ../../etc git status"),
+)
+
+# A traversal that escapes the root must be resolved before the check, not
+# matched as a raw string prefix.
+check(
+    "env-C: a traversal escaping ~/Projects is not approved",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR}/../../../etc git status"),
+)
+
+# AC: `env FOO=1 cmd` (no -C) → unchanged behaviour. `env` is not on ALLOWLIST,
+# so this keeps falling through to a prompt exactly as it did before.
+check(
+    "env-C: plain env with no -C is unchanged (not approved)",
+    not hook.is_command_safe("env FOO=1 git status"),
+)
+
+check(
+    "env-C: bare env with no arguments at all is not approved",
+    not hook.is_command_safe("env"),
+)
+
+# `env -C <dir>` with no command runs nothing; there is no command to approve.
+check(
+    "env-C: -C with a dir but no command is not approved",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR}"),
+)
+
+check(
+    "env-C: -C as the last token with no dir is not approved",
+    not hook.is_command_safe("env -C"),
+)
+
+# The command after env -C is evaluated by the SAME rules as a bare segment, so
+# the existing per-command guards still apply behind the prefix. Without this,
+# env -C would launder every carve-out the hook makes elsewhere.
+check(
+    "env-C: a dangerous git config flag is still caught behind env -C",
+    not hook.is_command_safe(
+        f"env -C {PROJECT_DIR} git -c core.pager=touch\\ /tmp/pwned status"
+    ),
+)
+
+check(
+    "env-C: find -exec is still caught behind env -C",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} find . -exec rm {{}} ;"),
+)
+
+check(
+    "env-C: command substitution is still caught behind env -C",
+    not hook.is_command_safe(f"env -C {PROJECT_DIR} echo $(cat /etc/passwd)"),
+)
+
+# env -C must not launder a cd chain either: the cd rule runs on the raw command
+# and the inner segment is still a cd with a command after it.
+approved, reason, _ = run_hook(f"env -C {PROJECT_DIR} cd /tmp && npm test")
+check(
+    "env-C: a cd chain behind env -C is still denied",
+    not approved and reason is not None,
+)
+
+# End-to-end through the hook: the AC cases as the agent actually hits them.
+approved, reason, rc = run_hook(
+    f"env -C {PROJECT_DIR} npx playwright test a.spec.ts"
+)
+check("env-C: hook approves the playwright case", approved and rc == 0)
+
+approved, reason, _ = run_hook(f"env -C {PROJECT_DIR} ./start.sh")
+check(
+    "env-C: hook lets an unapproved command fall through to a prompt",
+    not approved and reason is None,
+)
+
+approved, reason, _ = run_hook("env -C /etc cat passwd")
+check(
+    "env-C: hook lets a dir outside the root fall through to a prompt",
+    not approved and reason is None,
+)
+
+approved, reason, _ = run_hook("env FOO=1 git status")
+check(
+    "env-C: hook leaves plain env unchanged (prompt, no deny)",
+    not approved and reason is None,
+)
+
 
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
