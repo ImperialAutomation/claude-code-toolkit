@@ -51,6 +51,7 @@
 #   37. Pattern containing `=`               -> survives the first-`=` split
 #  37b. ERE metacharacters in the pattern    -> honoured as a regex
 #   38. Pattern re-matched on every poll     -> fetch per poll, not cached
+#   39. Pattern is an invalid ERE            -> blocks, named as its own cause
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
