@@ -92,13 +92,34 @@ fi
 echo -e "\n${GREEN}Step 1: Checking out $BASE_BRANCH${NC}"
 git_filtered checkout "$BASE_BRANCH"
 
-# Step 2: Fetch latest changes and prune stale remote-tracking branches
-echo -e "\n${GREEN}Step 2: Fetching latest changes${NC}"
-git_filtered fetch --prune origin
+# Resolve what the base branch actually tracks. A plain `pull origin
+# "$BASE_BRANCH"` assumes a same-named branch on origin, which is wrong twice
+# over: the upstream branch may have a different name, and it may live on a
+# different remote. A linked worktree hits the first case routinely -- the shared
+# base is checked out in the main tree, so the worktree parks on its own branch
+# tracking origin/develop, and the pull dies on "couldn't find remote ref".
+UPSTREAM=$(git_filtered rev-parse --abbrev-ref --symbolic-full-name "$BASE_BRANCH@{upstream}" 2>/dev/null) || {
+    echo -e "${RED}Error: '$BASE_BRANCH' has no upstream${NC}" >&2
+    echo "Set one with: git branch -u <remote>/<branch> $BASE_BRANCH" >&2
+    exit 1
+}
 
-# Step 3: Pull latest changes
-echo -e "\n${GREEN}Step 3: Pulling latest $BASE_BRANCH${NC}"
-git_filtered pull --prune origin "$BASE_BRANCH"
+# The remote to fetch is the one holding the upstream, not a hardcoded origin.
+# Fetching the wrong remote leaves the upstream ref stale, and the
+# fast-forward below would then land on an old commit -- exit 0, quietly wrong.
+UPSTREAM_REMOTE="${UPSTREAM%%/*}"
+
+# Step 2: Fetch latest changes and prune stale remote-tracking branches
+echo -e "\n${GREEN}Step 2: Fetching latest changes from $UPSTREAM_REMOTE${NC}"
+git_filtered fetch --prune "$UPSTREAM_REMOTE"
+
+# Step 3: Bring the base branch up to its upstream
+#
+# --ff-only rather than a merge: if the base has diverged from its upstream,
+# that is a situation to report, not to paper over with a merge commit on the
+# base branch (which a plain `pull` will happily create depending on config).
+echo -e "\n${GREEN}Step 3: Fast-forwarding $BASE_BRANCH to $UPSTREAM${NC}"
+git_filtered merge --ff-only "$UPSTREAM"
 
 # Step 4: Delete feature branch (only if fully merged)
 echo -e "\n${GREEN}Step 4: Deleting merged feature branch $FEATURE_BRANCH${NC}"
