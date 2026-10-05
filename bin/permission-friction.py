@@ -159,11 +159,13 @@ REASON_NO_RULE = "no allow rule covers this command"
 REASON_HOOK_DENY_SED_READ = "denied by hook: sed used as a file reader"
 REASON_HOOK_DENY_PYTHON_READ = "denied by hook: inline Python opens a file"
 REASON_HOOK_DENY_WAIT_LOOP = "denied by hook: until+sleep wait loop on a file"
+REASON_HOOK_DENY_CD_CHAIN = "denied by hook: cd-prefixed chain (use env -C / git -C)"
 
 HOOK_DENY_REASONS = (
     REASON_HOOK_DENY_SED_READ,
     REASON_HOOK_DENY_PYTHON_READ,
     REASON_HOOK_DENY_WAIT_LOOP,
+    REASON_HOOK_DENY_CD_CHAIN,
 )
 
 
@@ -223,6 +225,13 @@ def is_hook_denied(command):
         return REASON_HOOK_DENY_PYTHON_READ
     if _hook.command_has_until_sleep_wait_loop(command):
         return REASON_HOOK_DENY_WAIT_LOOP
+    # Last, matching main()'s own branch order: a command that is both a
+    # cd-chain and, say, a sed read must report the sed deny, because that is
+    # the message the hook emitted. Not the same check as REASON_CD_PREFIX
+    # below, which covers the single-segment `cd <dir> <cmd>` form the hook's
+    # chain check cannot see (it needs a segment boundary).
+    if _hook.command_has_cd_prefix_chain(command):
+        return REASON_HOOK_DENY_CD_CHAIN
     return None
 
 
