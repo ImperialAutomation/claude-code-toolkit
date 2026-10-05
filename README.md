@@ -323,7 +323,7 @@ All scripts are already allowed in the global settings (`~/.claude/settings.json
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json] [--rewrite-prefix CMD]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Chain friction is attributed to the segment that defeats matching, not the first token. Hook denies are reported separately and excluded from the estimate. Used by `/retro`'s Permission Friction phase |
+| `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json] [--rewrite-prefix CMD]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Chain friction is attributed to the segment that defeats matching, not the first token. Hook denies (including `cd <dir> && <cmd>` chains) are reported separately and excluded from the estimate. Used by `/retro`'s Permission Friction phase |
 
 ## Repository Structure
 
