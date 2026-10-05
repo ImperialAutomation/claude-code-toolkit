@@ -111,9 +111,23 @@ check(
     pf.classify_command("git status", _ALLOW, _DENY) == (False, None, None),
 )
 
+# Issue #76 removed the hook's old exemption for a cd-chain inside ~/Projects:
+# such a chain is now DENIED, not seen through. It therefore shows no prompt
+# (would_prompt=False) but carries the deny reason, never REASON_CHAIN.
 check(
-    "classify_command: cd-prefix into a project-relative dir is seen through by the hook",
-    pf.classify_command("cd backend && python foo.py", _ALLOW, _DENY) == (False, None, None),
+    "classify_command: a cd-prefix into a project-relative dir is denied, not approved",
+    pf.classify_command("cd backend && python foo.py", _ALLOW, _DENY)
+    == (False, pf.REASON_HOOK_DENY_CD_CHAIN, None),
+)
+
+# The companion case, kept adjacent so the two are not conflated again: a BARE
+# cd runs nothing after itself, so the hook does not deny it. Whether it prompts
+# is then the allow rules' business — no rule here names `cd`, so it does.
+check(
+    "classify_command: a bare cd is not hook-denied and falls through to the rules",
+    pf.is_hook_denied("cd backend") is None
+    and pf.classify_command("cd backend", _ALLOW, _DENY)
+    == (True, pf.REASON_NO_RULE, None),
 )
 
 check(
@@ -170,12 +184,21 @@ check(
     == (True, pf.REASON_CHAIN, ["sed", "s/a/b/", "f"]),
 )
 
+# These two exercise find_chain_culprit directly rather than through
+# classify_command. Since issue #96 a cd-chain never reaches the culprit search
+# at all — is_hook_denied returns first — but the attribution logic below is
+# still live for every other chain, and a cd segment is still the sharpest case
+# for it: it is the one segment that may or may not be seen through depending
+# only on where it points.
 check(
-    "classify_command: a harmless leading cd is not reported as the culprit",
-    pf.classify_command(
-        "cd /home/jan/Projects/x && for i in 1 2; do echo $i; done", _HOOK_ALLOW, _DENY
+    "find_chain_culprit: a harmless leading cd is not reported as the culprit",
+    pf.find_chain_culprit(
+        pf._hook.split_segments(
+            "cd /home/jan/Projects/x && for i in 1 2; do echo $i; done"
+        ),
+        _HOOK_ALLOW,
     )
-    == (True, pf.REASON_CHAIN, ["for", "i", "in", "1", "2"]),
+    == ["for", "i", "in", "1", "2"],
 )
 
 # A cd OUTSIDE ~/Projects is genuinely the culprit: hook-auto-approve-bash.py
@@ -183,9 +206,12 @@ check(
 # nothing covers. Reporting `for` here would name a segment that is not the
 # reason the command prompts.
 check(
-    "classify_command: a cd outside ~/Projects IS the culprit",
-    pf.classify_command("cd /x && for i in 1 2; do echo $i; done", _HOOK_ALLOW, _DENY)
-    == (True, pf.REASON_CHAIN, ["cd", "/x"]),
+    "find_chain_culprit: a cd outside ~/Projects IS the culprit",
+    pf.find_chain_culprit(
+        pf._hook.split_segments("cd /x && for i in 1 2; do echo $i; done"),
+        _HOOK_ALLOW,
+    )
+    == ["cd", "/x"],
 )
 
 check(
@@ -246,6 +272,59 @@ check(
     "is_hook_denied exposes the matching rule name",
     pf.is_hook_denied("sed -n '1,5p' f") == pf.REASON_HOOK_DENY_SED_READ
     and pf.is_hook_denied("git status") is None,
+)
+
+
+# --- classify_command: the cd-chain deny (issue #96) ---
+# Issue #76 made the hook deny EVERY `cd <dir> && <cmd>`, project-relative
+# included. is_hook_denied() must mirror that branch, or the single most common
+# denied shape gets filed as permission-rule friction and points the reader at
+# the allowlist when the fix is to rewrite the command as env -C / git -C /
+# npm --prefix.
+
+check(
+    "is_hook_denied: a cd-prefixed chain is a hook deny",
+    pf.is_hook_denied("cd backend && python foo.py") == pf.REASON_HOOK_DENY_CD_CHAIN,
+)
+
+check(
+    "is_hook_denied: the cd-chain deny is registered in HOOK_DENY_REASONS",
+    pf.REASON_HOOK_DENY_CD_CHAIN in pf.HOOK_DENY_REASONS,
+)
+
+# A cd outside ~/Projects is the same deny — the hook does not distinguish, and
+# neither may the report.
+check(
+    "is_hook_denied: a cd-chain outside ~/Projects is the same deny",
+    pf.is_hook_denied("cd /etc && cat passwd") == pf.REASON_HOOK_DENY_CD_CHAIN,
+)
+
+check(
+    "classify_command: a cd-prefixed chain is reported as a hook deny, not CHAIN",
+    pf.classify_command("cd backend && python foo.py", _HOOK_ALLOW, _DENY)
+    == (False, pf.REASON_HOOK_DENY_CD_CHAIN, None),
+)
+
+# Branch ORDER, per is_hook_denied's docstring contract: the category reported
+# must be the message the agent actually saw. hook-auto-approve-bash.py's main()
+# evaluates sed-read before its cd-chain check, so a command that is both lands
+# on the sed deny.
+check(
+    "is_hook_denied: an earlier hook branch outranks the cd-chain deny",
+    pf.is_hook_denied("cd backend && sed -n '1,5p' f") == pf.REASON_HOOK_DENY_SED_READ,
+)
+
+# REASON_CD_PREFIX survives the chain deny rather than being dead code: this is
+# the SINGLE-segment form, `cd <dir> <cmd>` with no && between them.
+# command_has_cd_prefix_chain needs a segment boundary to fire, so the hook does
+# not deny this, and classify_command's line-334 branch is still the only thing
+# that explains why it prompts. Both halves asserted together — the deny's
+# absence is what makes the reason reachable.
+check(
+    "classify_command: a single-segment cd prefix still reports CD_PREFIX",
+    pf.is_hook_denied("cd /home/jan/Projects/x jq .") is None
+    and pf.classify_command("cd /home/jan/Projects/x jq .", _ALLOW, _DENY)
+    == (True, pf.REASON_CD_PREFIX, None),
 )
 
 
@@ -410,13 +489,15 @@ check(
     == f"rtk — {pf.REASON_CHAIN}",
 )
 
-# And the end-to-end path: a cd segment plus an uncovered command segment must
-# key on the command, never on the cd.
+# And the end-to-end path: a covered segment plus an uncovered one must key on
+# the uncovered command. This used a cd-prefixed chain until issue #96 made such
+# a chain a hook deny, which never reaches a culprit at all — an allowlisted
+# leading segment puts the same question to the same code.
 check(
-    "classify+_pattern_key: a cd-prefixed chain keys on the uncovered command",
+    "classify+_pattern_key: a chain keys on the uncovered command, not the first",
     pf._pattern_key(
-        "cd /home/jan/Projects/x && rtk grep foo",
-        *pf.classify_command("cd /home/jan/Projects/x && rtk grep foo", ["Bash(grep *)"], [])[1:],
+        "git status && rtk grep foo",
+        *pf.classify_command("git status && rtk grep foo", ["Bash(git *)"], [])[1:],
     )
     == f"rtk — {pf.REASON_CHAIN}",
 )
