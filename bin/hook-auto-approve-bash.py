@@ -272,6 +272,66 @@ def strip_env_c_prefix(segment_tokens):
     return remainder
 
 
+# --- repeat-cmd.sh <count> <cmd> ----------------------------------------------
+# The sanctioned replacement for `for i in 1 2 3; do <cmd>; done` in timing
+# measurements. Unlike env -C it IS matched by an allow rule on its own,
+# Bash(~/.claude/bin/*), which is exactly the problem: it runs whatever it is
+# handed, so that rule alone would approve `repeat-cmd.sh 1 <anything>`.
+#
+# The hook therefore judges the command after the count by the same rules as a
+# bare segment, and main() answers "ask" when it fails — not merely "no
+# decision", which would leave the allow rule to approve it anyway.
+
+REPEAT_CMD_SCRIPT = "repeat-cmd.sh"
+REPEAT_COUNT_RE = re.compile(r"^[1-9][0-9]*$")
+
+
+def is_repeat_cmd_invocation(tokens):
+    """True if `tokens` invokes ~/.claude/bin/repeat-cmd.sh, any spelling."""
+    return (
+        bool(tokens)
+        and _is_allowed_bin_token(tokens[0])
+        and os.path.basename(tokens[0]) == REPEAT_CMD_SCRIPT
+    )
+
+
+def repeat_cmd_inner(tokens):
+    """The command a repeat-cmd.sh invocation runs, or None when the shape is
+    not `repeat-cmd.sh <positive-integer> <cmd> [args...]`.
+
+    A malformed shape returns None rather than a best guess: the wrapper itself
+    rejects it, and approving a guess would mean judging a command it never runs
+    while the real argument vector goes unchecked.
+    """
+    if len(tokens) < 3 or not REPEAT_COUNT_RE.match(tokens[1]):
+        return None
+    return tokens[2:]
+
+
+def command_has_unapprovable_repeat_cmd(command):
+    """True if any segment of `command` is a repeat-cmd.sh invocation the hook
+    will not approve.
+
+    Per segment, not per command: permission rules are matched per segment of a
+    chain, so `git status && repeat-cmd.sh 1 curl x` would otherwise be approved
+    by two rules that each match their own half. Never raises — on unparseable
+    input the caller falls through.
+    """
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    for tokens in segments:
+        stripped = strip_rtk_prefix(
+            strip_env_prefix(strip_env_c_prefix(strip_cd_prefix(tokens)))
+        )
+        if is_repeat_cmd_invocation(stripped) and not is_segment_safe(tokens):
+            return True
+
+    return False
+
+
 # --- model-typed rtk prefix -----------------------------------------------------
 # The RTK hook rewrites commands itself (`grep ...` -> `rtk grep ...`), so the
 # model never needs to type `rtk`. When it does anyway, the first word becomes
@@ -664,6 +724,10 @@ def is_segment_safe(segment_tokens):
     if is_git_commit:
         return not _has_denied_git_config_flag(stripped)
 
+    if is_repeat_cmd_invocation(stripped):
+        inner = repeat_cmd_inner(stripped)
+        return inner is not None and is_segment_safe(inner)
+
     if (
         first not in ALLOWLIST
         and not _is_allowed_bin_token(first)
@@ -784,6 +848,24 @@ def main():
                     "`env -C <dir> <cmd>` for anything else that genuinely "
                     "needs its working directory. All three are a single "
                     "command, so they match normally."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
+    # "ask", not silence: Bash(~/.claude/bin/*) would approve the wrapper
+    # without a prompt, whatever command it was handed.
+    if command_has_unapprovable_repeat_cmd(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+                "permissionDecisionReason": (
+                    "Hook: repeat-cmd.sh runs the command it is given, so it is "
+                    "approved only when `repeat-cmd.sh <count> <cmd>` has a "
+                    "positive integer count and <cmd> would be approved on its "
+                    "own. This one is not, so it needs your confirmation."
                 ),
             }
         }
