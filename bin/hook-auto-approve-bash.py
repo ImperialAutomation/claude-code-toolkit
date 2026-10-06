@@ -311,13 +311,19 @@ def repeat_cmd_inner(tokens):
 
 
 def command_has_unapprovable_repeat_cmd(command):
-    """True if any segment of `command` is a repeat-cmd.sh invocation the hook
-    will not approve.
+    """True if any segment of `command` mentions repeat-cmd.sh and is not one
+    the hook will approve.
 
     Per segment, not per command: permission rules are matched per segment of a
     chain, so `git status && repeat-cmd.sh 1 curl x` would otherwise be approved
-    by two rules that each match their own half. Never raises — on unparseable
-    input the caller falls through.
+    by two rules that each match their own half.
+
+    Any token, not just the first after the known prefixes: Claude Code strips
+    wrappers like `timeout 5`, `time` and `nohup` before matching, so behind one
+    of them the allow rule still matches the script. Recognising every flag of
+    every such wrapper is a losing game; a segment that names the script and is
+    not approvable asks, whatever stands in front. Never raises — on
+    unparseable input the caller falls through.
     """
     try:
         segments = split_segments(command)
@@ -325,10 +331,8 @@ def command_has_unapprovable_repeat_cmd(command):
         return False
 
     for tokens in segments:
-        stripped = strip_rtk_prefix(
-            strip_env_prefix(strip_env_c_prefix(strip_cd_prefix(tokens)))
-        )
-        if is_repeat_cmd_invocation(stripped) and not is_segment_safe(tokens):
+        mentions = any(is_repeat_cmd_invocation([token]) for token in tokens)
+        if mentions and not is_segment_safe(tokens):
             return True
 
     return False

