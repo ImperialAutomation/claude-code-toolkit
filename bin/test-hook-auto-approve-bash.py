@@ -59,6 +59,17 @@ def run_hook(command):
     return approved, reason, result.returncode
 
 
+def hook_decision(command):
+    """The hook's permissionDecision for `command`, or None when it gives none."""
+    payload = json.dumps({"tool_input": {"command": command}})
+    result = subprocess.run(
+        [sys.executable, str(HOOK_PATH)], input=payload, capture_output=True, text=True
+    )
+    if not result.stdout.strip():
+        return None
+    return json.loads(result.stdout).get("hookSpecificOutput", {}).get("permissionDecision")
+
+
 # --- split_segments (unit-level) ---
 
 check(
@@ -1423,6 +1434,138 @@ approved, reason, _ = run_hook(f"rtk cd {PROJECT_DIR} && git status")
 check(
     "rtk: hook denies an rtk-prefixed cd chain with the env -C hint",
     not approved and reason is not None and "env -C" in reason,
+)
+
+
+# --- repeat-cmd.sh <count> <cmd>: approved only when <cmd> is ---
+# The sanctioned replacement for `for i in 1 2 3; do <cmd>; done`. It runs
+# whatever it is handed, so like env -C it is approved only when the command
+# after the count would be approved on its own, by the very same rules.
+
+REPEAT = "~/.claude/bin/repeat-cmd.sh"
+
+check(
+    "repeat: an allowlisted inner command is approved",
+    hook.is_command_safe(
+        f"{REPEAT} 10 docker exec db psql -U postgres -d app -c 'SELECT 1'"
+    ),
+)
+
+check(
+    "repeat: a ~/.claude/bin/ script as inner command is approved",
+    hook.is_command_safe(f"{REPEAT} 3 ~/.claude/bin/http-status.sh http://localhost:8000/"),
+)
+
+check(
+    "repeat: the absolute ~/.claude/bin spelling is recognised too",
+    hook.is_command_safe(
+        f"{os.path.expanduser('~/.claude/bin/repeat-cmd.sh')} 3 git status"
+    ),
+)
+
+check(
+    "repeat: an inner command not allowed on its own is not approved",
+    not hook.is_command_safe(f"{REPEAT} 5 curl http://evil.example/x"),
+)
+
+check(
+    "repeat: an inner relative script is not approved",
+    not hook.is_command_safe(f"{REPEAT} 5 ./start.sh"),
+)
+
+check(
+    "repeat: a dangerous git config flag is still caught behind repeat-cmd",
+    not hook.is_command_safe(f"{REPEAT} 2 git -c core.pager=touch\\ /tmp/pwned status"),
+)
+
+check(
+    "repeat: find -exec is still caught behind repeat-cmd",
+    not hook.is_command_safe(f"{REPEAT} 2 find . -exec rm {{}} ;"),
+)
+
+check(
+    "repeat: nested repeat-cmd is judged by its own inner command",
+    not hook.is_command_safe(f"{REPEAT} 2 {REPEAT} 2 curl http://evil.example/x"),
+)
+
+# Without a numeric count the wrapper exits 2 and runs nothing, but the shape
+# `repeat-cmd.sh curl x` would otherwise read `x` as the command. Only the
+# documented shape is approved.
+check(
+    "repeat: a non-numeric count is not approved",
+    not hook.is_command_safe(f"{REPEAT} curl http://evil.example/x"),
+)
+
+check(
+    "repeat: a count with a trailing newline is not approved",
+    not hook.is_command_safe(f"{REPEAT} '1\n' git status"),
+)
+
+check(
+    "repeat: a count with a leading zero is not approved",
+    not hook.is_command_safe(f"{REPEAT} 01 git status"),
+)
+
+check(
+    "repeat: a count with no command is not approved",
+    not hook.is_command_safe(f"{REPEAT} 5"),
+)
+
+check(
+    "repeat: other ~/.claude/bin/ scripts are unaffected",
+    hook.is_command_safe("~/.claude/bin/http-status.sh http://localhost:8000/"),
+)
+
+# End-to-end. "Not approved" is not enough here: Bash(~/.claude/bin/*) already
+# allows the wrapper, so a hook that merely stays silent lets settings approve
+# `repeat-cmd.sh 5 curl ...` without a prompt. The hook must answer "ask".
+check(
+    "repeat: hook approves an allowlisted inner command",
+    hook_decision(f"{REPEAT} 10 docker exec db psql -c 'SELECT 1'") == "allow",
+)
+
+check(
+    "repeat: hook forces a prompt for a disallowed inner command",
+    hook_decision(f"{REPEAT} 5 curl http://evil.example/x") == "ask",
+)
+
+approved, reason, _ = run_hook(f"{REPEAT} 5 curl http://evil.example/x")
+check(
+    "repeat: the ask reason names the rule",
+    reason is not None and "repeat-cmd.sh" in reason,
+)
+
+check(
+    "repeat: hook forces a prompt for a malformed count",
+    hook_decision(f"{REPEAT} curl http://evil.example/x") == "ask",
+)
+
+# Claude Code checks each segment of a chain against the allow rules, so an
+# unapprovable repeat-cmd next to an allowed segment would still be approved.
+check(
+    "repeat: a disallowed repeat-cmd inside a chain still forces a prompt",
+    hook_decision(f"git status && {REPEAT} 5 curl http://evil.example/x") == "ask",
+)
+
+check(
+    "repeat: behind env -C a disallowed inner command still forces a prompt",
+    hook_decision(f"env -C {PROJECT_DIR} {REPEAT} 5 ./start.sh") == "ask",
+)
+
+# Claude Code strips wrappers like timeout/time/nohup/nice before matching the
+# allow rules, so behind one of them the wrapper is still matched by
+# Bash(~/.claude/bin/*). The hook must see through them as well.
+for wrapper in ("timeout 5", "timeout -s KILL 5", "time", "nohup", "nice -n 10"):
+    check(
+        f"repeat: behind `{wrapper}` a disallowed inner command still forces a prompt",
+        hook_decision(f"{wrapper} {REPEAT} 5 curl http://evil.example/x") == "ask",
+    )
+
+# The ask is scoped to repeat-cmd: any other unknown command keeps falling
+# through to the ordinary prompt with no decision at all.
+check(
+    "repeat: an unrelated unknown command still gets no decision",
+    hook_decision("curl http://evil.example/x") is None,
 )
 
 
