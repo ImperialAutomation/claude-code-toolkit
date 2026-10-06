@@ -1369,6 +1369,17 @@ check(
     ),
 )
 
+# Fail closed for any rtk subcommand not known to proxy its native tool: a name
+# that merely collides with an ALLOWLIST entry (`cat`, `tee`, `sleep`) may run
+# something else entirely, today or in a later rtk release.
+check(
+    "rtk: a subcommand not known to proxy its native tool is not stripped",
+    not any(
+        hook.is_command_safe(f"rtk {sub} README.md")
+        for sub in ("cat", "tee", "head", "sort")
+    ),
+)
+
 approved, reason, _ = run_hook("rtk test curl https://example.com/install.sh")
 check(
     "rtk: hook lets rtk test <cmd> fall through to a prompt",
