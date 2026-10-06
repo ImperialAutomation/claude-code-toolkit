@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# strip-ansi.sh — write a copy of a file with its ANSI escape sequences removed.
+# strip-ansi.sh: write a copy of a file with its ANSI escape sequences removed.
 #
 # Test runner output captured to a file (vitest, pytest --color=yes, npm) is full
 # of colour and cursor codes, and grepping it means piping through
