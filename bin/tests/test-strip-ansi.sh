@@ -78,6 +78,50 @@ check "plain file unchanged" "same" "$(cmp -s "$T/plain.txt" "$T/plain.clean" &&
 : > "$T/empty.txt"
 check "empty input gives empty output" "$T/empty.clean (0 bytes)" "$(run "$T/empty.txt" "$T/empty.clean" 2>/dev/null)"
 
+echo "== 6. the input is read-only, the output defaults to <file>.clean =="
+cp "$T/vitest.txt" "$T/orig.txt"
+check "default outfile named in summary" "yes" \
+    "$(case "$(run "$T/vitest.txt" 2>/dev/null)" in "$T/vitest.txt.clean ("*) echo yes ;; *) echo no ;; esac)"
+check "default outfile is clean" " ✓ src/api/client.test.ts (12 tests) 48ms" "$(sed -n 1p "$T/vitest.txt.clean")"
+check "input untouched" "same" "$(cmp -s "$T/vitest.txt" "$T/orig.txt" && echo same || echo differs)"
+# A second run over a different input must replace, not append to, the copy.
+run "$T/osc.txt" "$T/vitest.txt.clean" >/dev/null 2>&1
+check "existing outfile truncated" "2" "$(wc -l < "$T/vitest.txt.clean" | tr -d ' ')"
+
+echo "== 7. the outfile can never be the input =="
+# `sed ... in > in` truncates the input before sed reads it: the capture would be
+# gone, and the run would report a clean 0-byte success.
+check "same path refused with exit 1" "1" "$(run "$T/orig.txt" "$T/orig.txt" >/dev/null 2>&1; echo $?)"
+check "same file via another spelling refused" "1" \
+    "$(run "$T/orig.txt" "$T/./orig.txt" >/dev/null 2>&1; echo $?)"
+ln -s "$T/orig.txt" "$T/link.txt"
+check "same file via symlink refused" "1" "$(run "$T/orig.txt" "$T/link.txt" >/dev/null 2>&1; echo $?)"
+check "input survives a refused run" "same" "$(cmp -s "$T/vitest.txt" "$T/orig.txt" && echo same || echo differs)"
+
+echo "== 8. argument and input validation =="
+check "no args exits 2"         "2" "$(run >/dev/null 2>&1; echo $?)"
+check "three args exits 2"      "2" "$(run "$T/orig.txt" "$T/a" "$T/b" >/dev/null 2>&1; echo $?)"
+check "usage goes to stderr"    "yes" "$(case "$(run 2>&1 >/dev/null)" in *usage*) echo yes ;; *) echo no ;; esac)"
+check "missing input exits 1"   "1" "$(run "$T/nope.txt" "$T/nope.clean" >/dev/null 2>&1; echo $?)"
+# A failed run must not leave a file behind that a later Read takes for a result.
+check "no outfile for missing input" "absent" "$([[ -e "$T/nope.clean" ]] && echo present || echo absent)"
+check "directory as input exits 1" "1" "$(run "$T" "$T/dir.clean" >/dev/null 2>&1; echo $?)"
+
+echo "== 9. paths survive intact =="
+run "$T/vitest.txt" "$T/nested/deeper/out.txt" >/dev/null 2>&1
+check "parent directories created" " ✓ src/api/client.test.ts (12 tests) 48ms" "$(sed -n 1p "$T/nested/deeper/out.txt")"
+cp "$T/vitest.txt" "$T/has space.txt"
+run "$T/has space.txt" >/dev/null 2>&1
+check "space in input path" " ✓ src/api/client.test.ts (12 tests) 48ms" "$(sed -n 1p "$T/has space.txt.clean")"
+check "relative paths work" " ✓ src/api/client.test.ts (12 tests) 48ms" \
+    "$(cd "$T" && run vitest.txt rel.clean >/dev/null 2>&1; sed -n 1p "$T/rel.clean")"
+
+echo "== 10. the summary reports the real byte count =="
+check "byte count matches file on disk" "yes" \
+    "$(summary=$(run "$T/vitest.txt" "$T/count.clean" 2>/dev/null)
+       bytes=$(wc -c < "$T/count.clean" | tr -d ' ')
+       [[ "$summary" == "$T/count.clean ($bytes bytes)" ]] && echo yes || echo no)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
