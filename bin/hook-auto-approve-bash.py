@@ -272,6 +272,34 @@ def strip_env_c_prefix(segment_tokens):
     return remainder
 
 
+# --- model-typed rtk prefix -----------------------------------------------------
+# The RTK hook rewrites commands itself (`grep ...` -> `rtk grep ...`), so the
+# model never needs to type `rtk`. When it does anyway, the first word becomes
+# `rtk`, which no allow rule names, and a command that is fine on its own
+# prompts. `rtk <cmd>` and `rtk proxy <cmd>` both run <cmd> (filtered or raw),
+# so the prefix is stripped and the remainder judged by the same rules as a
+# bare segment — the prefix itself grants nothing.
+
+RTK_PREFIX = "rtk"
+RTK_PROXY_SUBCOMMAND = "proxy"
+
+
+def strip_rtk_prefix(segment_tokens):
+    """Drop a leading `rtk` or `rtk proxy`, returning the wrapped command.
+
+    Anything else after `rtk` (a meta command like `gain`, a global flag) is
+    left in place as the first token; it is not on ALLOWLIST, so the segment
+    falls through to the normal prompt exactly as before.
+    """
+    if not segment_tokens or segment_tokens[0] != RTK_PREFIX:
+        return segment_tokens
+
+    rest = segment_tokens[1:]
+    if rest[:1] == [RTK_PROXY_SUBCOMMAND]:
+        rest = rest[1:]
+    return rest
+
+
 def _is_allowed_bin_token(token):
     """True if `token` is a ~/.claude/bin/ script reference (any spelling).
 
@@ -579,16 +607,20 @@ def is_segment_safe(segment_tokens):
 
     `env -C <dir>` is stripped BEFORE plain VAR=value assignments: the
     remainder of an `env -C <dir> FOO=bar git status` still carries its own
-    assignments, which strip_env_prefix then removes as usual.
+    assignments, which strip_env_prefix then removes as usual. A model-typed
+    `rtk` / `rtk proxy` prefix is stripped last, so `FOO=1 rtk grep ...` is
+    judged as `grep ...`.
     """
     if not segment_tokens:
         return True
 
-    stripped = strip_env_prefix(
+    env_stripped = strip_env_prefix(
         strip_env_c_prefix(strip_cd_prefix(segment_tokens))
     )
+    stripped = strip_rtk_prefix(env_stripped)
     if not stripped:
-        return True
+        # A bare `rtk` / `rtk proxy` runs no wrapped command; never approve it.
+        return not env_stripped
 
     first = stripped[0]
     is_git_commit = first == "git" and len(stripped) > 1 and stripped[1] == "commit"

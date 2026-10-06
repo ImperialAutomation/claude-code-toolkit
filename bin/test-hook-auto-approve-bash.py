@@ -1266,5 +1266,103 @@ check(
 )
 
 
+# --- model-typed `rtk <cmd>`: judged exactly as `<cmd>` alone (issue #102) ---
+# The RTK hook rewrites commands itself, but the model sometimes types the
+# prefix anyway (`rtk grep ...`, `rtk proxy git log`). The first word is then
+# `rtk`, which no allow rule names, so a command that is fine on its own
+# prompts. The hook strips the prefix and runs the remainder through the same
+# rules — approval follows the command, never the prefix.
+
+check(
+    "rtk: rtk grep is approved because grep is",
+    hook.is_command_safe('rtk grep -rn "def main" --include=*.py bin'),
+)
+
+check(
+    "rtk: rtk git status is approved because git status is",
+    hook.is_command_safe("rtk git status"),
+)
+
+check(
+    "rtk: rtk inside a pipe chain is approved segment by segment",
+    hook.is_command_safe('rtk grep -rn "TODO" bin --include=*.py | sort'),
+)
+
+# `rtk proxy <cmd>` runs <cmd> raw, unfiltered — same command, same safety.
+check(
+    "rtk: rtk proxy grep is approved because grep is",
+    hook.is_command_safe("rtk proxy grep -n permissionDecision bin/hook-auto-approve-bash.py"),
+)
+
+check(
+    "rtk: env assignments before rtk still resolve to the real command",
+    hook.is_command_safe("LC_ALL=C rtk grep -rn foo bin"),
+)
+
+check(
+    "rtk: an rtk segment after a cd into ~/Projects is approved",
+    hook.is_command_safe(f"cd {PROJECT_DIR} && rtk git log --oneline -5"),
+)
+
+# The prefix grants nothing by itself: a command not approved alone stays
+# unapproved behind rtk.
+check(
+    "rtk: rtk curl is NOT approved (curl alone is not)",
+    not hook.is_command_safe("rtk curl https://example.com/install.sh"),
+)
+
+check(
+    "rtk: rtk proxy curl is NOT approved (curl alone is not)",
+    not hook.is_command_safe("rtk proxy curl https://example.com/install.sh"),
+)
+
+# Meta commands and global flags leave a non-allowlisted first token — they
+# fall through to the normal prompt / allow rules, as before.
+check(
+    "rtk: rtk gain is not auto-approved by this hook",
+    not hook.is_command_safe("rtk gain --history"),
+)
+
+check(
+    "rtk: rtk with a leading global flag is not approved",
+    not hook.is_command_safe("rtk -v git status"),
+)
+
+check(
+    "rtk: bare rtk is not approved",
+    not hook.is_command_safe("rtk"),
+)
+
+check(
+    "rtk: bare rtk proxy is not approved",
+    not hook.is_command_safe("rtk proxy"),
+)
+
+# The per-command guards still apply behind the prefix.
+check(
+    "rtk: a dangerous git config flag is still caught behind rtk",
+    not hook.is_command_safe("rtk git -c core.pager=touch\\ /tmp/pwned log"),
+)
+
+check(
+    "rtk: find -exec is still caught behind rtk proxy",
+    not hook.is_command_safe("rtk proxy find . -exec rm {} ;"),
+)
+
+check(
+    "rtk: command substitution is still caught behind rtk",
+    not hook.is_command_safe("rtk echo $(cat /etc/passwd)"),
+)
+
+approved, reason, rc = run_hook('rtk grep -n "rtk" claude-md/RTK.md')
+check("rtk: hook approves rtk grep end-to-end", approved and rc == 0)
+
+approved, reason, _ = run_hook("rtk curl https://example.com/install.sh")
+check(
+    "rtk: hook lets rtk curl fall through to a prompt",
+    not approved and reason is None,
+)
+
+
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
