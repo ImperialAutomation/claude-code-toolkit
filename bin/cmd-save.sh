@@ -89,7 +89,10 @@ fi
 if [[ "$STRIP_ANSI" == true ]]; then
     TMP=$(mktemp "$OUTFILE.XXXXXX")
     if "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/strip-ansi.sh" "$OUTFILE" "$TMP" >/dev/null; then
-        mv "$TMP" "$OUTFILE"
+        # Written back rather than moved: mv would give the capture mktemp's
+        # 0600 mode and replace a symlinked <output-file> with a regular file.
+        cat "$TMP" > "$OUTFILE"
+        rm -f "$TMP"
     else
         rm -f "$TMP"
         echo "--strip-ansi failed, capture left unstripped: $OUTFILE" >&2

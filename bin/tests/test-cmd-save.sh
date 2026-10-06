@@ -179,6 +179,16 @@ check "combines with --stderr merge" "boom" \
 # The intermediate file must not be left next to the capture.
 check "no temp file left behind" "colour-err.txt colour-fail.txt colour.txt" \
     "$(cd "$T" && echo colour*)"
+# The cleaned capture must stay the file the caller named: same mode as a plain
+# capture (not mktemp's 0600), and a symlinked output path keeps pointing where
+# it did instead of being replaced by a regular file.
+run "$T/plain-mode.txt" sh -c "$COLOURED" >/dev/null 2>&1
+check "mode same as a plain capture" "$(stat -c %a "$T/plain-mode.txt")" "$(stat -c %a "$T/colour.txt")"
+: > "$T/link-target.txt"
+ln -s "$T/link-target.txt" "$T/link.txt"
+run --strip-ansi "$T/link.txt" sh -c "$COLOURED" >/dev/null 2>&1
+check "symlinked output stays a symlink" "yes" "$([[ -L "$T/link.txt" ]] && echo yes || echo no)"
+check "symlink target holds the clean capture" "✓ orders.test.ts (3 tests)" "$(cat "$T/link-target.txt")"
 # A copy with no strip-ansi.sh beside it makes the strip fail. A successful
 # command must then not report a clean capture: the raw file is kept and the
 # run fails, so nobody greps escape codes believing they are gone.
