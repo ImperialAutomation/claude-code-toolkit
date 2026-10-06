@@ -661,7 +661,8 @@ Examples:
             "them (e.g. --rewrite-prefix rtk). Repeatable. Off by default: the "
             "transcript records what the model emitted, so a prefixed command "
             "there is one the model typed itself. The auto-approve hook still "
-            "covers `rtk <cmd>` whenever it covers <cmd> alone; any other "
+            "covers `rtk proxy <cmd>` and `rtk <tool>` for a native "
+            "passthrough whenever it covers the command alone; any other "
             "prefixed command counts as friction."
         ),
     )
