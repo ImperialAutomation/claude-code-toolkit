@@ -1363,6 +1363,36 @@ check(
     not approved and reason is None,
 )
 
+# The deny rules see through the prefix too. Otherwise `rtk sed -n ...` would
+# neither be approved nor denied: it would prompt, and the hint naming the
+# native tool would never reach the agent.
+check(
+    "rtk: rtk sed -n 'X,Yp' <file> is a sed file read",
+    hook.command_has_sed_file_read("rtk sed -n '10,40p' bin/hook-auto-approve-bash.py"),
+)
+
+check(
+    "rtk: rtk proxy sed -n 'X,Yp' <file> is a sed file read",
+    hook.command_has_sed_file_read("rtk proxy sed -n '1,20p' README.md"),
+)
+
+approved, reason, _ = run_hook("rtk sed -n '10,40p' bin/hook-auto-approve-bash.py")
+check(
+    "rtk: hook denies rtk sed -n with the Read hint",
+    not approved and reason is not None and "Read" in reason,
+)
+
+check(
+    "rtk: rtk cd <dir> && <cmd> is a cd chain",
+    hook.command_has_cd_prefix_chain(f"rtk cd {PROJECT_DIR} && git status"),
+)
+
+approved, reason, _ = run_hook(f"rtk cd {PROJECT_DIR} && git status")
+check(
+    "rtk: hook denies an rtk-prefixed cd chain with the env -C hint",
+    not approved and reason is not None and "env -C" in reason,
+)
+
 
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

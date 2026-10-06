@@ -590,7 +590,8 @@ def command_has_cd_prefix_chain(command):
     for index, tokens in enumerate(segments):
         # strip_env_c_prefix too: `env -C <dir> cd /tmp && ...` is the same
         # mistake wearing the approved prefix, and must not launder past it.
-        if strip_env_prefix(strip_env_c_prefix(tokens))[:1] != ["cd"]:
+        # Likewise a model-typed `rtk cd ...`.
+        if strip_rtk_prefix(strip_env_prefix(strip_env_c_prefix(tokens)))[:1] != ["cd"]:
             continue
         # Only a cd with a command after it defeats a permission match.
         if index + 1 < len(segments):
@@ -663,7 +664,7 @@ def command_has_sed_file_read(command):
         return False
 
     return any(
-        is_sed_file_read(strip_env_prefix(strip_cd_prefix(segment)))
+        is_sed_file_read(strip_rtk_prefix(strip_env_prefix(strip_cd_prefix(segment))))
         for segment in segments
     )
 
