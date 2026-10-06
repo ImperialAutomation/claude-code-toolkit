@@ -4,7 +4,7 @@ PreToolUse hook for Claude Code — auto-approves safe Bash commands.
 
 Permission matching only checks the first token of a command. Compound
 shapes (cd-prefixed, ;-chains, && chains with a harmless segment, command
-substitution, env-var prefixes) defeat that matching and fall through to a
+substitution, env-var prefixes, a model-typed `rtk` prefix) defeat that matching and fall through to a
 permission prompt even when every actual command in them is already
 allowlisted. This hook tokenizes the full command with shlex and approves
 it only when every segment is provably safe.
@@ -270,6 +270,58 @@ def strip_env_c_prefix(segment_tokens):
         return segment_tokens
 
     return remainder
+
+
+# --- model-typed rtk prefix -----------------------------------------------------
+# The RTK hook rewrites commands itself (`grep ...` -> `rtk grep ...`), so the
+# model never needs to type `rtk`. When it does anyway, the first word becomes
+# `rtk`, which no allow rule names, and a command that is fine on its own
+# prompts. `rtk <cmd>` and `rtk proxy <cmd>` both run <cmd> (filtered or raw),
+# so the prefix is stripped and the remainder judged by the same rules as a
+# bare segment — the prefix itself grants nothing.
+#
+# Stripping and trusting are separate. The deny rules strip ANY `rtk` prefix:
+# seeing a sed read or cd chain behind it can only make the hook stricter.
+# Approval trusts the prefix only for `rtk proxy` and for subcommands rtk
+# documents as compacting the native tool of the same name. A colliding name
+# can mean something else entirely — `rtk test curl x` RUNS `curl x`, while
+# stripped it would read as the allowlisted builtin `test` — so every other
+# subcommand, including names a later rtk release may add, falls through to
+# the prompt.
+
+RTK_PREFIX = "rtk"
+RTK_PROXY_SUBCOMMAND = "proxy"
+# ALLOWLIST names that `rtk --help` (0.45) lists as a proxy for the native tool.
+RTK_NATIVE_PASSTHROUGH = frozenset({
+    "git", "gh", "npm", "npx", "docker", "grep", "find", "ls", "wc",
+    "ruff", "uv", "mypy", "pytest",
+})
+
+
+def strip_rtk_prefix(segment_tokens):
+    """Drop a leading `rtk` or `rtk proxy`, returning the wrapped command.
+
+    Says nothing about whether that command may be trusted; approval checks
+    is_trusted_rtk_wrap separately.
+    """
+    if not segment_tokens or segment_tokens[0] != RTK_PREFIX:
+        return segment_tokens
+
+    rest = segment_tokens[1:]
+    if rest[:1] == [RTK_PROXY_SUBCOMMAND]:
+        rest = rest[1:]
+    return rest
+
+
+def is_trusted_rtk_wrap(segment_tokens):
+    """True if `segment_tokens` is no rtk invocation at all, or one that runs
+    the wrapped command as that command: `rtk proxy <cmd>`, or `rtk <tool>`
+    for a tool in RTK_NATIVE_PASSTHROUGH."""
+    if not segment_tokens or segment_tokens[0] != RTK_PREFIX:
+        return True
+
+    subcommand = segment_tokens[1] if len(segment_tokens) > 1 else None
+    return subcommand == RTK_PROXY_SUBCOMMAND or subcommand in RTK_NATIVE_PASSTHROUGH
 
 
 def _is_allowed_bin_token(token):
@@ -562,7 +614,8 @@ def command_has_cd_prefix_chain(command):
     for index, tokens in enumerate(segments):
         # strip_env_c_prefix too: `env -C <dir> cd /tmp && ...` is the same
         # mistake wearing the approved prefix, and must not launder past it.
-        if strip_env_prefix(strip_env_c_prefix(tokens))[:1] != ["cd"]:
+        # Likewise a model-typed `rtk cd ...`.
+        if strip_rtk_prefix(strip_env_prefix(strip_env_c_prefix(tokens)))[:1] != ["cd"]:
             continue
         # Only a cd with a command after it defeats a permission match.
         if index + 1 < len(segments):
@@ -579,16 +632,22 @@ def is_segment_safe(segment_tokens):
 
     `env -C <dir>` is stripped BEFORE plain VAR=value assignments: the
     remainder of an `env -C <dir> FOO=bar git status` still carries its own
-    assignments, which strip_env_prefix then removes as usual.
+    assignments, which strip_env_prefix then removes as usual. A model-typed
+    `rtk` / `rtk proxy` prefix is stripped last, so `FOO=1 rtk grep ...` is
+    judged as `grep ...`.
     """
     if not segment_tokens:
         return True
 
-    stripped = strip_env_prefix(
+    env_stripped = strip_env_prefix(
         strip_env_c_prefix(strip_cd_prefix(segment_tokens))
     )
+    if not is_trusted_rtk_wrap(env_stripped):
+        return False
+    stripped = strip_rtk_prefix(env_stripped)
     if not stripped:
-        return True
+        # A bare `rtk` / `rtk proxy` runs no wrapped command; never approve it.
+        return not env_stripped
 
     first = stripped[0]
     is_git_commit = first == "git" and len(stripped) > 1 and stripped[1] == "commit"
@@ -631,7 +690,7 @@ def command_has_sed_file_read(command):
         return False
 
     return any(
-        is_sed_file_read(strip_env_prefix(strip_cd_prefix(segment)))
+        is_sed_file_read(strip_rtk_prefix(strip_env_prefix(strip_cd_prefix(segment))))
         for segment in segments
     )
 
