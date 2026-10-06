@@ -1354,6 +1354,27 @@ check(
     not hook.is_command_safe("rtk echo $(cat /etc/passwd)"),
 )
 
+# `rtk test <cmd>` RUNS <cmd>; stripped it would read as the allowlisted shell
+# builtin `test`. Command-running subcommands keep their prefix and prompt.
+check(
+    "rtk: rtk test <cmd> is NOT approved (it runs <cmd>, not the test builtin)",
+    not hook.is_command_safe("rtk test bash -c id"),
+)
+
+check(
+    "rtk: rtk err / summary / run are NOT approved",
+    not any(
+        hook.is_command_safe(f"rtk {sub} ls")
+        for sub in ("err", "summary", "run")
+    ),
+)
+
+approved, reason, _ = run_hook("rtk test curl https://example.com/install.sh")
+check(
+    "rtk: hook lets rtk test <cmd> fall through to a prompt",
+    not approved and reason is None,
+)
+
 approved, reason, rc = run_hook('rtk grep -n "rtk" claude-md/RTK.md')
 check("rtk: hook approves rtk grep end-to-end", approved and rc == 0)
 

@@ -279,9 +279,15 @@ def strip_env_c_prefix(segment_tokens):
 # prompts. `rtk <cmd>` and `rtk proxy <cmd>` both run <cmd> (filtered or raw),
 # so the prefix is stripped and the remainder judged by the same rules as a
 # bare segment — the prefix itself grants nothing.
+#
+# Exception: rtk subcommands that run their ARGUMENTS as a command. `rtk test
+# curl x` runs `curl x`, but stripped it would read as the shell builtin `test
+# curl x`, and `test` is on ALLOWLIST. Such a segment keeps its `rtk` prefix,
+# so its first token is not allowlisted and it prompts.
 
 RTK_PREFIX = "rtk"
 RTK_PROXY_SUBCOMMAND = "proxy"
+RTK_COMMAND_RUNNERS = frozenset({"test", "err", "summary", "run"})
 
 
 def strip_rtk_prefix(segment_tokens):
@@ -289,12 +295,15 @@ def strip_rtk_prefix(segment_tokens):
 
     Anything else after `rtk` (a meta command like `gain`, a global flag) is
     left in place as the first token; it is not on ALLOWLIST, so the segment
-    falls through to the normal prompt exactly as before.
+    falls through to the normal prompt exactly as before. A command-running
+    subcommand (RTK_COMMAND_RUNNERS) is not stripped at all, see above.
     """
     if not segment_tokens or segment_tokens[0] != RTK_PREFIX:
         return segment_tokens
 
     rest = segment_tokens[1:]
+    if rest[:1] and rest[0] in RTK_COMMAND_RUNNERS:
+        return segment_tokens
     if rest[:1] == [RTK_PROXY_SUBCOMMAND]:
         rest = rest[1:]
     return rest

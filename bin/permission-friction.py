@@ -660,7 +660,9 @@ Examples:
             "PreToolUse hook that rewrites commands to that prefix and allows "
             "them (e.g. --rewrite-prefix rtk). Repeatable. Off by default: the "
             "transcript records what the model emitted, so a prefixed command "
-            "there is one the model typed itself and is real friction."
+            "there is one the model typed itself. The auto-approve hook still "
+            "covers `rtk <cmd>` whenever it covers <cmd> alone; any other "
+            "prefixed command counts as friction."
         ),
     )
 
