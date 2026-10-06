@@ -25,7 +25,15 @@ The "up to 90%" figure is what RTK measures on the bash output it filters — it
 not a 90% reduction of the total bill. Command output is one part of a request;
 the system prompt, conversation history and file reads are unaffected.
 
-## Meta Commands (always use rtk directly)
+## Never type `rtk` before an ordinary command
+
+Write `grep -rn foo src`, not `rtk grep -rn foo src`. The hook adds the prefix
+itself; a typed prefix makes `rtk` the first word, which no allow rule names, so
+the command prompts. Only the meta commands below are typed with `rtk`.
+(`hook-auto-approve-bash.py` judges a typed `rtk <cmd>` / `rtk proxy <cmd>` as
+`<cmd>` as a safety net, but anything it does not approve still prompts.)
+
+## Meta Commands (the only commands typed with rtk)
 
 ```bash
 rtk gain              # Show token savings analytics
@@ -47,6 +55,7 @@ which rtk             # Verify correct binary
 ## Hook-Based Usage
 
 All other commands are automatically rewritten by the Claude Code hook.
-Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
+Example: you type `git status`, the hook runs `rtk git status` (transparent,
+0 tokens overhead). Type the bare command; never the `rtk` form.
 
 Refer to CLAUDE.md for full command reference.

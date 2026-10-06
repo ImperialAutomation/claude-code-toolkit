@@ -4,7 +4,7 @@ PreToolUse hook for Claude Code — auto-approves safe Bash commands.
 
 Permission matching only checks the first token of a command. Compound
 shapes (cd-prefixed, ;-chains, && chains with a harmless segment, command
-substitution, env-var prefixes) defeat that matching and fall through to a
+substitution, env-var prefixes, a model-typed `rtk` prefix) defeat that matching and fall through to a
 permission prompt even when every actual command in them is already
 allowlisted. This hook tokenizes the full command with shlex and approves
 it only when every segment is provably safe.
