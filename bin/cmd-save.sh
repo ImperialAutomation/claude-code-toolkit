@@ -7,12 +7,16 @@
 # Bash(~/.claude/bin/*). gh-save.sh is the gh-shaped special case of it.
 #
 # Usage:
-#   cmd-save.sh [--stderr separate|merge] <output-file> <command> [args...]
+#   cmd-save.sh [--stderr separate|merge] [--strip-ansi] <output-file> <command> [args...]
 #
 # Options:
 #   --stderr separate  (default) only stdout goes to the file; stderr passes
 #                      through to the terminal
 #   --stderr merge     stderr is folded into the file alongside stdout
+#   --strip-ansi       remove ANSI colour/cursor codes from the capture (via
+#                      strip-ansi.sh), so coloured test-runner output can be
+#                      grepped without a sed chain; the byte count is of the
+#                      cleaned file
 #
 # stderr is separated by default because a command that warns on stderr would
 # otherwise silently corrupt what the caller reads back as clean data — a
@@ -34,13 +38,15 @@
 #   cmd-save.sh /tmp/inspect.json docker inspect my-container
 #   cmd-save.sh /tmp/schema.sql docker exec db psql -U postgres -d app -t -A -c "SELECT ..."
 #   cmd-save.sh --stderr merge /tmp/build.log npm run build
+#   cmd-save.sh --strip-ansi /tmp/vitest.txt npx vitest run
 
 set -uo pipefail
 
 STDERR_MODE=separate
+STRIP_ANSI=false
 
 usage() {
-    echo "usage: $(basename "$0") [--stderr separate|merge] <output-file> <command> [args...]" >&2
+    echo "usage: $(basename "$0") [--stderr separate|merge] [--strip-ansi] <output-file> <command> [args...]" >&2
     exit 2
 }
 
@@ -55,6 +61,7 @@ while [[ $# -gt 0 ]]; do
                 *) echo "--stderr must be 'separate' or 'merge': $2" >&2; exit 2 ;;
             esac
             shift 2 ;;
+        --strip-ansi) STRIP_ANSI=true; shift ;;
         --) shift; break ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;
         *) break ;;
@@ -74,6 +81,23 @@ if [[ "$STDERR_MODE" == merge ]]; then
     if "$@" > "$OUTFILE" 2>&1; then STATUS=0; else STATUS=$?; fi
 else
     if "$@" > "$OUTFILE"; then STATUS=0; else STATUS=$?; fi
+fi
+
+# Stripped after the fact rather than through a pipe, so $STATUS stays the
+# command's own. A failed strip leaves the raw capture in place and is reported:
+# a command that succeeded must not look like a clean capture when it is not.
+if [[ "$STRIP_ANSI" == true ]]; then
+    TMP=$(mktemp "$OUTFILE.XXXXXX")
+    if "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/strip-ansi.sh" "$OUTFILE" "$TMP" >/dev/null; then
+        # Written back rather than moved: mv would give the capture mktemp's
+        # 0600 mode and replace a symlinked <output-file> with a regular file.
+        cat "$TMP" > "$OUTFILE"
+        rm -f "$TMP"
+    else
+        rm -f "$TMP"
+        echo "--strip-ansi failed, capture left unstripped: $OUTFILE" >&2
+        [[ "$STATUS" -ne 0 ]] || STATUS=1
+    fi
 fi
 
 # The byte count makes an empty capture visible. A zero-byte file is the

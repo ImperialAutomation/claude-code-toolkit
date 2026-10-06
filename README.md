@@ -118,7 +118,8 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
 | `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
-| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] <output-file> <command> [args...]` | Save any command's output to a file. Reports the command's own exit status and the byte count written |
+| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Reports the command's own exit status and the byte count written |
+| `strip-ansi.sh` | `strip-ansi.sh <file> [<outfile>]` | Write a copy of a file without ANSI colour/cursor codes (default `<file>.clean`), so captured test output can be grepped without a `sed` chain |
 
 `cmd-save.sh` is the general case; `gh-save.sh` is the `gh`-shaped shorthand and delegates to it. Reach for it whenever output belongs on disk: to `diff` two captures, to feed one command's output into another, or because the output is too long to be worth putting through the model's context.
 
@@ -136,6 +137,13 @@ Three details it gets right that a bare redirect does not:
 - **The byte count is printed.** A zero-byte capture is the signature of a command that produced nothing, and it is otherwise invisible until something downstream behaves strangely.
 
 Flag parsing stops at the output file, so everything after it belongs to the command and a command's own flags are never eaten as the wrapper's.
+
+Coloured test-runner output (vitest, pytest with colour) is full of ANSI escapes, and grepping it otherwise means a `grep ... | sed 's/\x1b\[[0-9;]*m//g'` chain whose `sed` segment prompts every time. Capture it clean with `cmd-save.sh --strip-ansi`, or clean an existing capture with `strip-ansi.sh` and read the copy with Read/Grep. Both remove cursor codes and terminal hyperlinks too, which that colour-only regex leaves in place.
+
+```bash
+cmd-save.sh --strip-ansi /tmp/vitest.txt npx vitest run
+strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
+```
 
 ### Git utilities
 
@@ -360,6 +368,7 @@ claude-code-toolkit/
 │   ├── gh-issues-export.sh        ← export GitHub issues to JSON file
 │   ├── gh-save.sh                 ← save gh command output to file
 │   ├── cmd-save.sh                ← save any command's output to file
+│   ├── strip-ansi.sh              ← copy a file without ANSI escape codes
 │   ├── sync-toolkit.sh            ← sync toolkit from configured git sources
 │   ├── json-find-key.sh           ← search for keys in nested JSON files
 │   ├── odt2txt.sh                 ← convert ODT to plain text via pandoc

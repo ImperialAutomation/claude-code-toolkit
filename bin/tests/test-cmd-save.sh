@@ -160,6 +160,53 @@ check "relative filename works" "relative" \
 run "$T/tabs.txt" printf 'a\tb\n' >/dev/null 2>&1
 check "tabs preserved" "$(printf 'a\tb')" "$(cat "$T/tabs.txt")"
 
+echo "== 10. --strip-ansi leaves a capture free of escape codes =="
+# Test runners colour their output, and a coloured capture cannot be grepped
+# without piping it through sed, the chain this flag exists to avoid. The
+# stripping itself is strip-ansi.sh's and tested there; this checks the wiring.
+COLOURED='printf "\033[32m✓\033[39m orders.test.ts \033[2m(3 tests)\033[22m\n"'
+run --strip-ansi "$T/colour.txt" sh -c "$COLOURED" >/dev/null 2>&1
+check "escape codes removed" "✓ orders.test.ts (3 tests)" "$(cat "$T/colour.txt")"
+check "byte count is of the cleaned file" "$T/colour.txt (29 bytes, exit 0)" \
+    "$(run --strip-ansi "$T/colour.txt" sh -c "$COLOURED" 2>/dev/null)"
+# Stripping must not launder a failed command into a success.
+check "command status still propagates" "6" \
+    "$(run --strip-ansi "$T/colour-fail.txt" sh -c "$COLOURED; exit 6" >/dev/null 2>&1; echo $?)"
+check "failed command's output still cleaned" "✓ orders.test.ts (3 tests)" "$(cat "$T/colour-fail.txt")"
+check "combines with --stderr merge" "boom" \
+    "$(run --stderr merge --strip-ansi "$T/colour-err.txt" sh -c 'printf "\033[31mboom\033[0m\n" >&2' >/dev/null 2>&1
+       cat "$T/colour-err.txt")"
+# The intermediate file must not be left next to the capture.
+check "no temp file left behind" "colour-err.txt colour-fail.txt colour.txt" \
+    "$(cd "$T" && echo colour*)"
+# The cleaned capture must stay the file the caller named: same mode as a plain
+# capture (not mktemp's 0600), and a symlinked output path keeps pointing where
+# it did instead of being replaced by a regular file.
+run "$T/plain-mode.txt" sh -c "$COLOURED" >/dev/null 2>&1
+check "mode same as a plain capture" "$(stat -c %a "$T/plain-mode.txt")" "$(stat -c %a "$T/colour.txt")"
+: > "$T/link-target.txt"
+ln -s "$T/link-target.txt" "$T/link.txt"
+run --strip-ansi "$T/link.txt" sh -c "$COLOURED" >/dev/null 2>&1
+check "symlinked output stays a symlink" "yes" "$([[ -L "$T/link.txt" ]] && echo yes || echo no)"
+check "symlink target holds the clean capture" "✓ orders.test.ts (3 tests)" "$(cat "$T/link-target.txt")"
+# A copy with no strip-ansi.sh beside it makes the strip fail. A successful
+# command must then not report a clean capture: the raw file is kept and the
+# run fails, so nobody greps escape codes believing they are gone.
+mkdir -p "$T/lonely"
+cp "$SCRIPT" "$T/lonely/cmd-save.sh"
+check "failed strip turns success into exit 1" "1" \
+    "$(bash "$T/lonely/cmd-save.sh" --strip-ansi "$T/lonely/out.txt" sh -c "$COLOURED" >/dev/null 2>&1; echo $?)"
+check "failed strip keeps raw capture" "1" "$(grep -c $'\033\\[32m' "$T/lonely/out.txt")"
+check "failed strip is reported" "yes" \
+    "$(case "$(bash "$T/lonely/cmd-save.sh" --strip-ansi "$T/lonely/out.txt" sh -c "$COLOURED" 2>&1 >/dev/null)" in
+         *"--strip-ansi failed"*) echo yes ;; *) echo no ;; esac)"
+check "failed strip leaves no temp file" "out.txt" "$(cd "$T/lonely" && echo out*)"
+check "failed strip keeps a failing command's status" "6" \
+    "$(bash "$T/lonely/cmd-save.sh" --strip-ansi "$T/lonely/out.txt" sh -c "$COLOURED; exit 6" >/dev/null 2>&1; echo $?)"
+# Without the flag the capture stays verbatim: colour is data some callers want.
+run "$T/raw.txt" sh -c "$COLOURED" >/dev/null 2>&1
+check "no stripping without the flag" "1" "$(grep -c $'\033' "$T/raw.txt")"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
