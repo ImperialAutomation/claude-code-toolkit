@@ -1497,6 +1497,16 @@ check(
 )
 
 check(
+    "repeat: a count with a trailing newline is not approved",
+    not hook.is_command_safe(f"{REPEAT} '1\n' git status"),
+)
+
+check(
+    "repeat: a count with a leading zero is not approved",
+    not hook.is_command_safe(f"{REPEAT} 01 git status"),
+)
+
+check(
     "repeat: a count with no command is not approved",
     not hook.is_command_safe(f"{REPEAT} 5"),
 )

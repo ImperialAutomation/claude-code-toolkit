@@ -283,7 +283,9 @@ def strip_env_c_prefix(segment_tokens):
 # decision", which would leave the allow rule to approve it anyway.
 
 REPEAT_CMD_SCRIPT = "repeat-cmd.sh"
-REPEAT_COUNT_RE = re.compile(r"^[1-9][0-9]*$")
+# fullmatch, not match with ^...$: Python's $ also matches before a trailing
+# newline, which the wrapper's bash =~ does not.
+REPEAT_COUNT_RE = re.compile(r"[1-9][0-9]*")
 
 
 def is_repeat_cmd_invocation(tokens):
@@ -303,7 +305,7 @@ def repeat_cmd_inner(tokens):
     rejects it, and approving a guess would mean judging a command it never runs
     while the real argument vector goes unchecked.
     """
-    if len(tokens) < 3 or not REPEAT_COUNT_RE.match(tokens[1]):
+    if len(tokens) < 3 or not REPEAT_COUNT_RE.fullmatch(tokens[1]):
         return None
     return tokens[2:]
 
