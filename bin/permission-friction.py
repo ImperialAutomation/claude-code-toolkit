@@ -35,8 +35,10 @@ stores what the MODEL emitted — the rewrite lives in the hook's response and
 is never written back to tool_use.input. Measured over ~21k real transcript
 Bash calls: 516 start with `rtk`, dominated by `rtk proxy` (243) and `rtk
 grep` (222), and `rtk proxy` is RTK's own documented escape hatch, a form no
-rewrite produces. Those are commands the model typed itself, i.e. real
-friction — so prefixed commands count as friction BY DEFAULT. Pass
+rewrite produces. Those are commands the model typed itself. The auto-approve
+hook judges `rtk <cmd>` and `rtk proxy <cmd>` as <cmd>, so one whose wrapped
+command is approved alone is not friction; the rest count as friction BY
+DEFAULT. Pass
 --rewrite-prefix to opt out per tool. Only the prefixed form is modelled:
 rtk answers "allow" for `grep` but rewrites `jq`/`curl` with no
 permissionDecision at all, so per-command coverage is not derivable from the
@@ -181,8 +183,11 @@ HOOK_DENY_REASONS = (
 # back to the tool_use input. Measured over ~21k real transcript Bash calls:
 # 516 entries start with `rtk`, dominated by `rtk proxy` (243) and `rtk grep`
 # (222) — `rtk proxy` is RTK's own documented escape hatch, a form no rewrite
-# ever produces. So those are commands the model typed itself, i.e. REAL
-# friction, and an `rtk`-prefixed segment is NOT treated as covered by default.
+# ever produces. So those are commands the model typed itself. The auto-approve
+# hook strips that prefix and judges the wrapped command (strip_rtk_prefix), so
+# `rtk grep` is covered through is_segment_safe exactly as `grep` is; an
+# `rtk`-prefixed segment the hook does not approve is NOT treated as covered by
+# default.
 #
 # Opting in with --rewrite-prefix marks the PREFIXED form (`rtk <cmd>`) as
 # covered — that is the form the hook emits, and the one a user would allowlist

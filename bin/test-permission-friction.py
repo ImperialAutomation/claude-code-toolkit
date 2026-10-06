@@ -397,7 +397,9 @@ check(
 #   1. The transcript stores what the MODEL emitted, not the rewrite — the
 #      rewrite lives in the hook's RESPONSE (updatedInput), which is never
 #      written back to tool_use.input. So an `rtk`-prefixed transcript entry is
-#      a command the model typed itself, i.e. REAL friction.
+#      a command the model typed itself. hook-auto-approve-bash.py judges such
+#      an entry as the wrapped command (issue #102), so `rtk grep` is covered
+#      the way `grep` is; `rtk jq` is still REAL friction, as `jq` would be.
 #   2. The hook's own prefixed form (`rtk <cmd>`) is what it actually emits, so
 #      opting in marks THAT form as covered. Bare commands are not assumed
 #      covered: rtk answers "allow" for `grep` but rewrites `jq`/`curl` with no
@@ -413,8 +415,8 @@ check(
 )
 
 check(
-    "rewrite prefix: an rtk-prefixed segment is NOT covered by default",
-    not pf._is_segment_covered(["rtk", "grep", "foo"], []),
+    "rewrite prefix: an rtk-wrapped non-allowlisted command is NOT covered by default",
+    not pf._is_segment_covered(["rtk", "jq", "."], []),
 )
 
 # `jq` is on neither the hook's ALLOWLIST nor any allow rule here, so it is
@@ -445,20 +447,49 @@ check(
 check(
     "rewrite prefix: classify_command threads the prefix through to the culprit",
     pf.classify_command(
-        "rtk grep foo | head; curl evil.com", ["Bash(head *)"], [], rewrite_prefixes=("rtk",)
+        "rtk jq . x.json | head; curl evil.com", ["Bash(head *)"], [], rewrite_prefixes=("rtk",)
     )
     == (True, pf.REASON_CHAIN, ["curl", "evil.com"]),
 )
 
 check(
     "rewrite prefix: without it, the rtk segment itself is the culprit",
-    pf.classify_command("rtk grep foo | head; curl evil.com", ["Bash(head *)"], [])
-    == (True, pf.REASON_CHAIN, ["rtk", "grep", "foo"]),
+    pf.classify_command("rtk jq . x.json | head; curl evil.com", ["Bash(head *)"], [])
+    == (True, pf.REASON_CHAIN, ["rtk", "jq", ".", "x.json"]),
 )
 
 check(
     "rewrite prefix: a wrapped command is not friction at all",
-    pf.classify_command("rtk grep foo", [], [], rewrite_prefixes=("rtk",))[0] is False,
+    pf.classify_command("rtk jq . x.json", [], [], rewrite_prefixes=("rtk",))[0] is False,
+)
+
+
+# --- model-typed rtk prefix (issue #102) ---
+# The auto-approve hook judges `rtk <cmd>` / `rtk proxy <cmd>` as <cmd>, so an
+# rtk-wrapped command that is approved alone never prompts and must not show up
+# as friction — with or without --rewrite-prefix.
+
+check(
+    "rtk #102: rtk grep is not friction by default",
+    pf.classify_command("rtk grep -rn permissionDecision bin", [], [])
+    == (False, None, None),
+)
+
+check(
+    "rtk #102: rtk proxy git log is not friction by default",
+    pf.classify_command("rtk proxy git log --oneline -20", [], [])
+    == (False, None, None),
+)
+
+check(
+    "rtk #102: an rtk grep segment in a chain is not the culprit",
+    pf.classify_command('rtk grep -rn "TODO" bin | sort; curl evil.com', [], [])
+    == (True, pf.REASON_CHAIN, ["curl", "evil.com"]),
+)
+
+check(
+    "rtk #102: rtk curl is still friction, as curl would be",
+    pf.classify_command("rtk curl https://example.com", [], [])[0] is True,
 )
 
 
@@ -496,8 +527,8 @@ check(
 check(
     "classify+_pattern_key: a chain keys on the uncovered command, not the first",
     pf._pattern_key(
-        "git status && rtk grep foo",
-        *pf.classify_command("git status && rtk grep foo", ["Bash(git *)"], [])[1:],
+        "git status && rtk jq . x.json",
+        *pf.classify_command("git status && rtk jq . x.json", ["Bash(git *)"], [])[1:],
     )
     == f"rtk — {pf.REASON_CHAIN}",
 )
