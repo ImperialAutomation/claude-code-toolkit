@@ -87,11 +87,11 @@ Fetch details for all issues to be added:
 
 Use the Read tool to read the output. For each issue, extract: number, title, state, labels.
 
-#### Step B4: Add Bug Label
+#### Step B4: Add Type Label
 
-For each issue, ensure the `bug` label is present:
+For each issue, ensure the type label chosen per [Label Handling](#label-handling) is present (`bug` or `testing`):
 ```bash
-gh issue edit [issue-number] --add-label "bug"
+gh issue edit [issue-number] --add-label "<type-label>"
 ```
 
 Also inherit relevant labels from the parent issue (e.g., `payment`, `backend`).
@@ -151,7 +151,7 @@ mutation {
 ## Bug Issues Added to Epic
 
 ✅ Added #1042 - 🐛 [title] to tracking PR #[pr-number]
-✅ Bug label added
+✅ Type label added (bug/testing)
 ✅ Closes statements updated
 ✅ Progress: X of Y sub-issues complete (Z%)
 
@@ -274,11 +274,12 @@ Ask with AskUserQuestion: "Ziet dit er goed uit?"
    - If standalone: `🐛 Bug: <title>`
 3. Create the issue:
    ```bash
-   gh issue create --title "<title>" --label "bug" --body-file /tmp/bug-issue.md
+   gh issue create --title "<title>" --label "<type-label>" --body-file /tmp/bug-issue.md
    ```
-4. If severity is Critical or High: add extra label
+   `<type-label>` per [Label Handling](#label-handling).
+4. Add the priority label matching the severity, resolved per [Label Handling](#label-handling):
    ```bash
-   gh issue edit [new-issue] --add-label "priority: high"
+   gh issue edit [new-issue] --add-label "<priority-label>"
    ```
 5. **If parent found:**
    - Link as GitHub sub-issue (same GraphQL as Mode 2, Step 6)
@@ -396,8 +397,10 @@ _This bug blocks the completion of #[parent-issue]_
 
 Then create the issue:
 ```bash
-gh issue create --title "🐛 [Parent #XXX] Bug: [bug title]" --label "bug" --body-file /tmp/bug-issue.md
+gh issue create --title "🐛 [Parent #XXX] Bug: [bug title]" --label "<type-label>" --body-file /tmp/bug-issue.md
 ```
+
+`<type-label>` per [Label Handling](#label-handling).
 
 ### Step 6: Link as Native GitHub Sub-Issue
 
@@ -466,13 +469,20 @@ Closes #[NEW-BUG-ISSUE]  ← Add this
 
 ## Label Handling
 
-Automatically add labels:
-- `bug` - always
-- Inherit relevant labels from parent (e.g., `payment`, `backend`)
-
+Label names differ per repo, so read them first instead of assuming:
 ```bash
-gh issue edit [new-issue] --add-label "bug"
+~/.claude/bin/gh-save.sh /tmp/<project>-labels.json label list --limit 200 --json name,description
 ```
+
+**Type label (exactly one):**
+- `bug` - only when the defect is user-visible behaviour of the application
+- `testing` - a failing or flaky test, a wrong fixture, test tooling or a CI gate, when the repo has that label (otherwise `bug`)
+
+Labelling test failures `bug` makes the label useless as a filter for "what affects users".
+
+**Priority label:** map the severity onto the repo's priority labels (e.g. Critical → `priority:critical`, High → `priority:high`). Use only names that exist in the label list; a misspelt name (`"priority: high"` vs `priority:high`) makes `gh issue edit` fail and the priority is silently never set. If the repo has no priority labels, skip this and mention it in the summary.
+
+**Inherit** relevant domain labels from the parent (e.g., `payment`, `backend`).
 
 ## Example Session
 
