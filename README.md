@@ -114,6 +114,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 |--------|-------|-------------|
 | `batch-issue-view.sh` | `batch-issue-view.sh [--output FILE] <repo> <issues...>` | Fetch full issue details as JSON array |
 | `batch-issue-status.sh` | `batch-issue-status.sh <repo> <issues...>` | Fetch issue number/state/closed as JSON array |
+| `batch-issue-edit.sh` | `batch-issue-edit.sh [--dry-run] <repo> <plan.tsv>` | Apply label/milestone changes from a TSV plan (`<issue>\t<add>\t<remove>\t<milestone>`, `-` = no change) |
 | `batch-pr-for-issues.sh` | `batch-pr-for-issues.sh <repo> <issues...>` | Find merged/open PRs linked to issues |
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
@@ -345,6 +346,7 @@ claude-code-toolkit/
 ├── bin/                       ← helper scripts (batch operations, git utilities)
 │   ├── batch-issue-view.sh    ← fetch multiple issues as JSON array
 │   ├── batch-issue-status.sh  ← fetch issue status as JSON array
+│   ├── batch-issue-edit.sh    ← apply label/milestone changes from a TSV plan
 │   ├── git-find-base-branch   ← detect base branch (of a given worktree)
 │   ├── git-verify.sh          ← read-only git status snapshot in one call
 │   ├── git-resolve-worktree.sh ← resolve a worktree hint to one absolute path
