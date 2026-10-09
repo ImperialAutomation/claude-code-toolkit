@@ -62,6 +62,37 @@ SEGMENT_SEPARATORS = {"&&", "||", ";", "|", "&", "\n"}
 
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# Environment variables that make an allowlisted command load or run arbitrary
+# code: `PAGER="sh -c id" git log` is the env-var spelling of the
+# `git -c core.pager=...` attack _DANGEROUS_GIT_CONFIG_KEYS refuses, and
+# `LD_PRELOAD=/tmp/x.so ls` turns any approved binary into a loader. Their
+# assignment is never stripped, so the segment keeps an unapprovable first
+# token and falls through to the prompt.
+#
+# A denylist, not an allowlist: over ~21k real transcript Bash calls, the
+# env prefixes agents set are nearly all project-specific (PAM_*, POSTGRES_*,
+# TOKEN), so an allowlist would prompt on almost all legitimate use. Whole
+# families are matched by prefix because single names keep lagging behind
+# (GIT_DIR and GIT_CONFIG_GLOBAL point git at an attacker's config, whose
+# core.fsmonitor then runs on `git status`). Matching ignores case: npm reads
+# its config case-insensitively, and for the rest a lowercase lookalike costs
+# at most a prompt.
+_DANGEROUS_ENV_NAMES = frozenset({
+    "PATH", "PAGER", "MANPAGER", "LESSOPEN", "LESSCLOSE", "EDITOR", "VISUAL",
+    "BROWSER", "SHELL", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS",
+    "GCONV_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS",
+    "NODE_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT",
+})
+_DANGEROUS_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "NPM_CONFIG_")
+
+
+def is_dangerous_env_assignment(token):
+    """True if `token` is a VAR=value assignment of a code-loading variable."""
+    if not ENV_ASSIGNMENT_RE.match(token):
+        return False
+    name = token.split("=", 1)[0].upper()
+    return name in _DANGEROUS_ENV_NAMES or name.startswith(_DANGEROUS_ENV_PREFIXES)
+
 
 def _tokenize(command):
     """Tokenize `command` with &&, ||, ;, |, and newline as standalone

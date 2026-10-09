@@ -147,6 +147,63 @@ check(
     hook.strip_env_prefix(["FOO=bar"]) == [],
 )
 
+# --- is_dangerous_env_assignment (issue #108) ---
+# Some variables make an allowlisted command load or run arbitrary code. Their
+# assignment must never be seen through, or `PAGER="sh -c id" git log` launders
+# the very attack `git -c core.pager=...` is refused for.
+
+for token in (
+    "LD_PRELOAD=/tmp/x.so",
+    "PATH=/tmp/sandsim/fakebin:$PATH",
+    "PAGER=sh -c id",
+    "PYTHONPATH=/home/jan/Projects/PAM-dev1/backend/app",
+    "BASH_ENV=/tmp/rc",
+    "LESSOPEN=|/tmp/x %s",
+):
+    check(
+        f"is_dangerous_env_assignment: exact name {token.split('=')[0]} is dangerous",
+        hook.is_dangerous_env_assignment(token),
+    )
+
+# Families: every member is covered, including ones nobody thought to list.
+for token in (
+    "LD_AUDIT=/tmp/x.so",
+    "DYLD_INSERT_LIBRARIES=/tmp/x.dylib",
+    "GIT_SSH_COMMAND=touch /tmp/pwned",
+    "GIT_DIR=/tmp/evil/.git",
+    "GIT_CONFIG_GLOBAL=/tmp/evil.gitconfig",
+    "npm_config_script_shell=/tmp/x",
+    "NPM_CONFIG_NODE_OPTIONS=--require=/tmp/x.js",
+):
+    check(
+        f"is_dangerous_env_assignment: family member {token.split('=')[0]} is dangerous",
+        hook.is_dangerous_env_assignment(token),
+    )
+
+# Real prefixes measured in transcripts, plus the classic harmless ones.
+for token in (
+    "LC_ALL=C",
+    "CI=1",
+    "NO_COLOR=1",
+    "TMPDIR=/tmp/cct-e2e",
+    "POSTGRES_HOST=localhost",
+    "PAM_REPO_ROOT=/home/jan/Projects/PAM",
+    "SCRIPT_UNDER_TEST=bin/git-verify.sh",
+    "UV_TOOL_DIR=/tmp/uvtools",
+    # A name that merely CONTAINS a dangerous one is not that variable.
+    "MYPATH=/opt/x",
+    "LEGIT_FLAG=1",
+):
+    check(
+        f"is_dangerous_env_assignment: {token.split('=')[0]} is harmless",
+        not hook.is_dangerous_env_assignment(token),
+    )
+
+check(
+    "is_dangerous_env_assignment: a non-assignment token is not an assignment",
+    not hook.is_dangerous_env_assignment("git"),
+)
+
 # --- strip_cd_prefix ---
 
 check(
