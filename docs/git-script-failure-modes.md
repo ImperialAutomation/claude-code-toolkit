@@ -144,6 +144,35 @@ looks like two checks. The gate's decision is unaffected (matching is on whole
 names, not on the joined string) — only the printed line is ambiguous, so count
 the names against `gh pr checks` rather than splitting on commas.
 
+## `git-push-pr-merge.sh`: a reused PR takes your title and body, overwriting GitHub edits
+
+When the branch already has an open PR against `--base`, the script reuses it
+instead of creating a second one. That is what makes a re-run after a blocked CI
+gate work with identical arguments. On that path `--title` and `--body-file` are
+still applied: the script reads the PR's current title and body, compares them
+with the arguments, and calls `gh pr edit` only when something differs.
+
+The comparison drops CRs and trailing whitespace first, so a body GitHub stored
+with CRLF line endings or without the final newline is not a change. Whitespace
+inside the text is: an added or removed blank line counts.
+
+Signatures, on stdout next to `PR_NUMBER` and `STATUS`:
+
+| Line | What it means |
+|---|---|
+| `PR_EDIT: UPDATED (title)`, `(body)` or `(title,body)` | The open PR was edited to match your arguments. Anything changed on GitHub in those fields since is gone |
+| `PR_EDIT: UNCHANGED` | The PR already matched; no edit call was made |
+| no `PR_EDIT:` line | No open PR existed; one was created |
+| `STATUS: REUSED` | `--no-merge` run on a PR that already existed (a new one reports `STATUS: CREATED`) |
+
+The one that bites is `UPDATED` on a PR someone else has touched: ticked
+checkboxes or a reviewer's note added through the web UI are replaced by the
+file's contents. The script cannot merge the two, so if the body on GitHub
+holds anything you want to keep, copy it into the body file before re-running.
+
+If the current title and body cannot be read, or `gh pr edit` fails, the script
+exits non-zero with gh's error on stderr, **before** the CI gate and the merge.
+
 ## How to apply
 
 - After **every** `git-commit.sh`, run `git log --oneline -1`. Treat `ok N files
@@ -155,6 +184,9 @@ the names against `gh pr checks` rather than splitting on commas.
 - `CI_GATE: PASS` means every check the gate could see on the pushed commit was
   green, not that every check that will eventually run has. In a repo with
   staggered check triggers, back it with branch protection or merge by hand.
+- Before re-running `git-push-pr-merge.sh` on a branch with an open PR, check
+  whether its body was edited on GitHub. A re-run applies your body file, and
+  `PR_EDIT: UPDATED` is the only trace of what it replaced.
 - Before adding `--allow-failing-check`, confirm the check is red on the base
   branch too. That is what distinguishes "red repo-wide" from "red because of
   this diff", and it is the only check on the flag's premise.

@@ -11,9 +11,38 @@
 # What it does:
 #   1. Push current branch to origin (with -u)
 #   2. Reuse the open PR for this branch, or create one against the base branch
+#      (see Reusing an open PR below)
 #   3. If merging: wait for CI checks to go green (see CI gate below)
 #   4. Merge PR (--merge --delete-branch)
 #   5. Checkout base branch and pull
+#
+# Output (stdout, the last lines of every run that gets that far):
+#   PR_EDIT: UPDATED (<title|body|title,body>) | UNCHANGED   only when reused
+#   PR_NUMBER: <n>
+#   PR_URL: <url>
+#   STATUS: MERGED | CREATED | REUSED | CI_GATE_BLOCKED
+#   CREATED and REUSED are the --no-merge outcomes: a new PR, or an open one
+#   that already existed. On the merge path PR_EDIT carries the reuse story.
+#
+# Reusing an open PR:
+#   An open PR for this branch against --base is reused rather than duplicated.
+#   That keeps a re-run idempotent: a blocked CI gate leaves the PR open, and
+#   re-running with the same arguments re-runs the gate on it.
+#
+#   On reuse, --title and --body-file are still the source of truth. The PR's
+#   current title and body are read (`gh pr view --json title,body`) and
+#   compared with the arguments, after dropping CRs and trailing whitespace so
+#   that GitHub's storage format alone never counts as a change. Any difference
+#   is applied with `gh pr edit` and reported as `PR_EDIT: UPDATED (...)`;
+#   none gives `PR_EDIT: UNCHANGED` and no edit call. A retry with identical
+#   arguments is therefore UNCHANGED.
+#
+#   Consequence: edits made on GitHub to the title or body (ticked boxes, a
+#   reviewer's note) are overwritten by a re-run. PR_EDIT is what tells you.
+#
+#   If the title/body cannot be read or set, the script exits non-zero before
+#   the CI gate and the merge: a PR is never merged under a body the caller
+#   did not ask for.
 #
 # CI gate (skipped entirely when --no-merge is set):
 #   After PR creation, all reported checks (`gh pr checks`) are polled until
@@ -128,8 +157,9 @@
 #                              current directory. A path that is not a worktree
 #                              is an error, never a fallback to the caller's tree
 #   --base <branch>            Target branch for the PR (required)
-#   --title <title>            PR title (required)
-#   --body-file <path>         File containing PR body (required)
+#   --title <title>            PR title (required). Applied to a reused PR too
+#   --body-file <path>         File containing PR body (required). Applied to a
+#                              reused PR too, overwriting edits made on GitHub
 #   --no-merge                 Create PR but don't merge (for manual review) — CI gate is skipped
 #   --no-ci-wait                Merge immediately without waiting for CI checks
 #   --allow-failing-check <name>  Do not block on this check when it is red. Exact
