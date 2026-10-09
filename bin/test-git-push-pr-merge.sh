@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71, #75, #92).
+# Regression tests for git-push-pr-merge.sh's CI gate (issues #13, #32, #71, #75, #92)
+# and its reuse of an open PR (issue #107).
 #
 # Covers:
 #    1. No checks reported at all      -> CI_GATE: FAIL after grace, no merge (fail closed)
@@ -52,6 +53,14 @@
 #  37b. ERE metacharacters in the pattern    -> honoured as a regex
 #   38. Pattern re-matched on every poll     -> fetch per poll, not cached
 #   39. Pattern is an invalid ERE            -> blocks, named as its own cause
+#   40. Reused PR, different body            -> edited, PR_EDIT: UPDATED (body), STATUS: REUSED
+#   41. Reused PR, different title only      -> PR_EDIT: UPDATED (title)
+#  41b. Reused PR, both differ               -> PR_EDIT: UPDATED (title,body)
+#   42. Differs only by CRLF / trailing ws   -> no edit, PR_EDIT: UNCHANGED
+#  42b. Inner whitespace differs             -> a real change, UPDATED (body)
+#   43. `gh pr edit` fails                   -> exit non-zero, no CI wait, no merge
+#  43b. `gh pr view` fails                   -> same, and no edit attempted
+#   44. No existing PR                       -> created, no PR_EDIT line, STATUS: CREATED
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
@@ -88,6 +97,11 @@ make_repo() {
 #   - `gh pr create` prints a fake PR URL and records the call in $1/create-count
 #   - `gh pr checks` behavior driven by $1/checks-state (see scenarios below)
 #   - `gh pr view` headRefOid driven by $1/head-state (see below)
+#   - `gh pr view --json title,body` answers from $1/existing-title and
+#     $1/existing-body (defaults match run_case's own title and body), and fails
+#     when $1/view-fail is present
+#   - `gh pr edit` appends its arguments to $1/edit-calls, and fails when
+#     $1/edit-fail is present
 #   - `gh pr merge` records that merge happened into $1/merged
 #
 # The stub mirrors two real `gh pr checks` behaviours the earlier version got
@@ -332,6 +346,31 @@ case "$1 $2" in
         esac
         ;;
     "pr view")
+        # The reuse path reads the open PR's current title and body (issue
+        # #107). Answered before the headRefOid branch and WITHOUT touching
+        # view-call-count: the stale-head scenarios count head reads, and an
+        # extra call here would shift their stale window by one.
+        for arg in "$@"; do
+            if [ "$arg" = "title,body" ]; then
+                if [ -f "$WORKDIR/view-fail" ]; then
+                    echo "GraphQL: Could not resolve to a PullRequest with the number of 42. (repository.pullRequest)" >&2
+                    exit 1
+                fi
+                title=$(cat "$WORKDIR/existing-title" 2>/dev/null || echo "Test PR")
+                # The `x` sentinel keeps trailing newlines and CRs, which command
+                # substitution would otherwise strip; they are exactly what the
+                # normalisation scenarios are about.
+                if [ -f "$WORKDIR/existing-body" ]; then
+                    body=$(cat "$WORKDIR/existing-body"; printf x)
+                    body="${body%x}"
+                else
+                    body="Test PR body"
+                fi
+                jq -n --arg t "$title" --arg b "$body" '{body: $b, title: $t}'
+                exit 0
+            fi
+        done
+
         # Which commit GitHub currently believes is the PR head. Right after a
         # push this lags, and `gh pr checks` lags with it — that coupling is the
         # whole of issue #71.
@@ -363,6 +402,17 @@ case "$1 $2" in
                 echo "{\"headRefOid\":\"$real_head\"}"
                 ;;
         esac
+        exit 0
+        ;;
+    "pr edit")
+        # One line per call, so a scenario can assert both THAT an edit happened
+        # and which flags it carried.
+        echo "$*" >> "$WORKDIR/edit-calls"
+        if [ -f "$WORKDIR/edit-fail" ]; then
+            echo "GraphQL: Resource not accessible by integration (updatePullRequest)" >&2
+            exit 1
+        fi
+        echo "https://github.com/example/repo/pull/42"
         exit 0
         ;;
     "pr merge")
@@ -488,7 +538,8 @@ run_case() {
     echo "$HEAD_STATE" > "$repo/head-state"
     echo "$JOBLOG_STATE" > "$repo/joblog-state"
     rm -f "$repo/merged" "$repo/checks-call-count" "$repo/create-count" \
-        "$repo/view-call-count" "$repo/joblog-fetch-count" "$repo/joblog-endpoints"
+        "$repo/view-call-count" "$repo/joblog-fetch-count" "$repo/joblog-endpoints" \
+        "$repo/edit-calls"
 
     set +e
     output=$(cd "$repo" && PATH="$repo/bin:$PATH" "$TARGET" --base main --title "Test PR" --body-file "$repo/body.md" "${extra_args[@]}" 2>&1)
@@ -746,6 +797,9 @@ run_case "re-run with existing PR" "$repo12" "pass" --ci-timeout 30 --ci-poll-in
 assert_contains "re-run: reuses PR" "Reusing existing PR #42" "$(cat "$repo12/last-output.txt")"
 assert_file_content "re-run: no second create" "$repo12/create-count" "<absent>"
 assert_contains "re-run: gate ran again" "CI_GATE: PASS" "$(cat "$repo12/last-output.txt")"
+# Identical arguments on a retry change nothing on the PR, and say so (#107).
+assert_contains "re-run: PR left as it was" "PR_EDIT: UNCHANGED" "$(cat "$repo12/last-output.txt")"
+assert_file_content "re-run: no edit call" "$repo12/edit-calls" "<absent>"
 assert_exit "re-run: exit code" "0" "$(cat "$repo12/last-exit.txt")"
 assert_file_present "re-run: merge happened" "$repo12/merged"
 rm -rf "$repo12"
@@ -1440,6 +1494,118 @@ assert_not_contains "invalid ERE: never reports PASS" "CI_GATE: PASS" "$(cat "$r
 assert_exit "invalid ERE: exit code" "1" "$(cat "$repo39/last-exit.txt")"
 assert_file_absent "invalid ERE: no merge" "$repo39/merged"
 rm -rf "$repo39"
+
+# --- Scenario 40: reused PR, different body -> body applied, REUSED (#107) ---
+# A follow-up commit plus a rewritten body went through the reuse path, and the
+# old body stayed on GitHub with nothing in the output saying so. The caller's
+# arguments are the source of truth: the edit happens, and the output names it.
+repo40=$(make_repo)
+make_fake_gh "$repo40"
+printf '%s\n' "## Summary" "" "Adds the retry path." "" "## Known Issues" "" "- none" > "$repo40/body.md"
+printf '%s\n' "## Summary" "" "Adds the retry path." > "$repo40/existing-body"
+touch "$repo40/existing-pr"
+run_case "reuse, new body" "$repo40" "pass" --no-merge
+assert_contains "new body: reports the edit" "PR_EDIT: UPDATED (body)" "$(cat "$repo40/last-output.txt")"
+assert_contains "new body: edit carries --title" "--title Test PR" "$(cat "$repo40/edit-calls" 2>/dev/null)"
+assert_contains "new body: edit carries --body-file" "--body-file $repo40/body.md" "$(cat "$repo40/edit-calls" 2>/dev/null)"
+# Not CREATED: that line is what a fresh PR prints, and the reuse is the point.
+assert_contains "new body: final status" "STATUS: REUSED" "$(cat "$repo40/last-output.txt")"
+assert_not_contains "new body: not reported as created" "STATUS: CREATED" "$(cat "$repo40/last-output.txt")"
+assert_file_content "new body: no second create" "$repo40/create-count" "<absent>"
+assert_exit "new body: exit code" "0" "$(cat "$repo40/last-exit.txt")"
+rm -rf "$repo40"
+
+# --- Scenario 41: reused PR, different title only -> UPDATED (title) (#107) ---
+repo41=$(make_repo)
+make_fake_gh "$repo41"
+echo "Test PR body" > "$repo41/body.md"
+echo "WIP: Test PR" > "$repo41/existing-title"
+touch "$repo41/existing-pr"
+run_case "reuse, new title" "$repo41" "pass" --no-merge
+assert_contains "new title: reports the edit" "PR_EDIT: UPDATED (title)" "$(cat "$repo41/last-output.txt")"
+assert_file_content "new title: one edit call" "$repo41/edit-calls" "pr edit 42 --title Test PR --body-file $repo41/body.md"
+assert_exit "new title: exit code" "0" "$(cat "$repo41/last-exit.txt")"
+rm -rf "$repo41"
+
+# --- Scenario 41b: both differ -> UPDATED (title,body) (#107) ---
+repo41b=$(make_repo)
+make_fake_gh "$repo41b"
+echo "Rewritten body after review" > "$repo41b/body.md"
+echo "WIP: Test PR" > "$repo41b/existing-title"
+touch "$repo41b/existing-pr"
+run_case "reuse, new title and body" "$repo41b" "pass" --no-merge
+assert_contains "both: reports the edit" "PR_EDIT: UPDATED (title,body)" "$(cat "$repo41b/last-output.txt")"
+rm -rf "$repo41b"
+
+# --- Scenario 42: storage-format differences alone are not a change (#107) ---
+# GitHub stores bodies edited in the web UI with CRLF and keeps or drops a
+# trailing newline at will. Reading that as a change would edit the PR on every
+# retry and report UPDATED for a body nobody touched.
+repo42=$(make_repo)
+make_fake_gh "$repo42"
+printf '%s\n' "## Summary" "" "Adds the retry path.  " "" > "$repo42/body.md"
+printf '## Summary\r\n\r\nAdds the retry path.  ' > "$repo42/existing-body"
+printf 'Test PR \n' > "$repo42/existing-title"
+touch "$repo42/existing-pr"
+run_case "reuse, format-only difference" "$repo42" "pass" --no-merge
+assert_contains "format only: unchanged" "PR_EDIT: UNCHANGED" "$(cat "$repo42/last-output.txt")"
+assert_file_content "format only: no edit call" "$repo42/edit-calls" "<absent>"
+assert_contains "format only: still REUSED" "STATUS: REUSED" "$(cat "$repo42/last-output.txt")"
+rm -rf "$repo42"
+
+# --- Scenario 42b: an inner whitespace change IS a change (#107) ---
+# The normalisation only forgives the END of the text. A changed blank line in
+# the middle is content, and must not be absorbed by an over-eager strip.
+repo42b=$(make_repo)
+make_fake_gh "$repo42b"
+printf '%s\n' "- [x] tests" "- [ ] docs" > "$repo42b/body.md"
+printf '%s\n' "- [x] tests" "" "- [ ] docs" > "$repo42b/existing-body"
+touch "$repo42b/existing-pr"
+run_case "reuse, inner whitespace change" "$repo42b" "pass" --no-merge
+assert_contains "inner whitespace: updated" "PR_EDIT: UPDATED (body)" "$(cat "$repo42b/last-output.txt")"
+rm -rf "$repo42b"
+
+# --- Scenario 43: `gh pr edit` fails -> stop before the gate and merge (#107) ---
+# A PR whose body could not be set is not merged: the merge would ship under a
+# description that no longer matches it, and the output would not say so.
+repo43=$(make_repo)
+make_fake_gh "$repo43"
+echo "Rewritten body after review" > "$repo43/body.md"
+touch "$repo43/existing-pr" "$repo43/edit-fail"
+run_case "reuse, edit fails" "$repo43" "pass" --ci-timeout 30 --ci-poll-interval 1
+assert_exit "edit fails: exit code" "1" "$(cat "$repo43/last-exit.txt")"
+assert_contains "edit fails: gh error surfaced" "Resource not accessible by integration" "$(cat "$repo43/last-output.txt")"
+assert_file_content "edit fails: no CI wait" "$repo43/checks-call-count" "<absent>"
+assert_file_absent "edit fails: no merge" "$repo43/merged"
+assert_not_contains "edit fails: no update claimed" "PR_EDIT: UPDATED" "$(cat "$repo43/last-output.txt")"
+rm -rf "$repo43"
+
+# --- Scenario 43b: `gh pr view` fails -> same, no edit attempted (#107) ---
+# Without the current title and body there is nothing to compare against, so
+# neither "unchanged" nor "updated" is a claim the script can make.
+repo43b=$(make_repo)
+make_fake_gh "$repo43b"
+echo "Test PR body" > "$repo43b/body.md"
+touch "$repo43b/existing-pr" "$repo43b/view-fail"
+run_case "reuse, view fails" "$repo43b" "pass" --ci-timeout 30 --ci-poll-interval 1
+assert_exit "view fails: exit code" "1" "$(cat "$repo43b/last-exit.txt")"
+assert_contains "view fails: gh error surfaced" "Could not resolve to a PullRequest" "$(cat "$repo43b/last-output.txt")"
+assert_file_content "view fails: no edit call" "$repo43b/edit-calls" "<absent>"
+assert_file_content "view fails: no CI wait" "$repo43b/checks-call-count" "<absent>"
+assert_file_absent "view fails: no merge" "$repo43b/merged"
+assert_not_contains "view fails: no PR_EDIT verdict" "PR_EDIT:" "$(cat "$repo43b/last-output.txt")"
+rm -rf "$repo43b"
+
+# --- Scenario 44: no existing PR -> created as before, no PR_EDIT line (#107) ---
+repo44=$(make_repo)
+make_fake_gh "$repo44"
+echo "Test PR body" > "$repo44/body.md"
+run_case "fresh PR" "$repo44" "pass" --no-merge
+assert_file_content "fresh PR: created once" "$repo44/create-count" "1"
+assert_contains "fresh PR: final status" "STATUS: CREATED" "$(cat "$repo44/last-output.txt")"
+assert_not_contains "fresh PR: no PR_EDIT line" "PR_EDIT:" "$(cat "$repo44/last-output.txt")"
+assert_file_content "fresh PR: no edit call" "$repo44/edit-calls" "<absent>"
+rm -rf "$repo44"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
