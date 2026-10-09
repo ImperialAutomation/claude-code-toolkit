@@ -189,9 +189,19 @@ def has_process_substitution(segment_tokens):
 
 
 def strip_env_prefix(segment_tokens):
-    """Drop leading VAR=value tokens (e.g. `FOO=bar git status` -> `git status`)."""
+    """Drop leading VAR=value tokens (e.g. `FOO=bar git status` -> `git status`).
+
+    Stops at a dangerous assignment (is_dangerous_env_assignment): that token
+    then stays the segment's first token, which no allowlist names, so the
+    segment is not approved. This also keeps an assignment-only segment like
+    `PATH=/tmp/evil:$PATH;` from reducing to empty, i.e. to "safe".
+    """
     i = 0
-    while i < len(segment_tokens) and ENV_ASSIGNMENT_RE.match(segment_tokens[i]):
+    while (
+        i < len(segment_tokens)
+        and ENV_ASSIGNMENT_RE.match(segment_tokens[i])
+        and not is_dangerous_env_assignment(segment_tokens[i])
+    ):
         i += 1
     return segment_tokens[i:]
 

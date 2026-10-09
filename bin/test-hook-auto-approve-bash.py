@@ -1494,6 +1494,60 @@ check(
 )
 
 
+# --- dangerous env-var prefixes fall through to the prompt (issue #108) ---
+# strip_env_prefix used to drop every VAR=value token unseen, so an assignment
+# of a code-loading variable laundered an allowlisted command. Such a command
+# must now get NO decision: not approved, and not denied either, since there is
+# no native tool to point at.
+
+check(
+    "env-danger: strip_env_prefix stops at a dangerous assignment",
+    hook.strip_env_prefix(["CI=1", "LD_PRELOAD=/tmp/x.so", "ls"])
+    == ["LD_PRELOAD=/tmp/x.so", "ls"],
+)
+
+check(
+    "env-danger: an assignment-only segment of a dangerous variable is not emptied",
+    hook.strip_env_prefix(["PATH=/tmp/evil:$PATH"]) == ["PATH=/tmp/evil:$PATH"],
+)
+
+for command in (
+    # The three from the issue.
+    "LD_PRELOAD=/tmp/x.so ls",
+    'GIT_SSH_COMMAND="touch /tmp/pwned" git fetch',
+    'PAGER="sh -c id" git log',
+    # Family members nobody listed by name.
+    "GIT_DIR=/tmp/evil/.git git status",
+    "GIT_CONFIG_GLOBAL=/tmp/evil.gitconfig git log",
+    "LD_AUDIT=/tmp/x.so ls",
+    "npm_config_script_shell=/tmp/x npm test",
+    # A harmless assignment in front does not hide a dangerous one behind it.
+    "CI=1 LD_PRELOAD=/tmp/x.so ls",
+    # An assignment-only segment: PATH is already exported, so the bare
+    # assignment changes the environment of every segment after it.
+    "PATH=/tmp/evil:$PATH; git status",
+    # Ahead of a model-typed rtk prefix.
+    "LD_PRELOAD=/tmp/x.so rtk grep -rn foo bin",
+    # In a later chain segment.
+    'git status && PAGER="sh -c id" git log',
+    # Ahead of an approved ~/.claude/bin/ script: the fake-bin stubbing seen in
+    # real transcripts, which is exactly how such a script is made to run code.
+    "PATH=/tmp/sandsim/fakebin:$PATH ~/.claude/bin/git-verify.sh --repo /tmp/sandsim/repo",
+):
+    check(f"env-danger: `{command}` is not approved", not hook.is_command_safe(command))
+    check(f"env-danger: `{command}` gets no decision (prompt)", hook_decision(command) is None)
+
+for command in (
+    "LC_ALL=C grep -rn foo bin",
+    "CI=1 npm test",
+    "FOO=1; git status",
+    "POSTGRES_HOST=localhost POSTGRES_PORT=5433 ~/.claude/bin/project-test.sh tests/",
+    "TMPDIR=/tmp/cct-e2e ~/.claude/bin/epic-prepare-context.sh 632",
+    "LC_ALL=C rtk grep -rn foo bin",
+):
+    check(f"env-danger: harmless `{command}` is still approved", hook_decision(command) == "allow")
+
+
 # --- repeat-cmd.sh <count> <cmd>: approved only when <cmd> is ---
 # The sanctioned replacement for `for i in 1 2 3; do <cmd>; done`. It runs
 # whatever it is handed, so like env -C it is approved only when the command
