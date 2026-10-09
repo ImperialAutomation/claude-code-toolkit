@@ -342,8 +342,62 @@ EXISTING_PR=$(gh pr list --head "$CURRENT_BRANCH" --base "$BASE" --state open --
 PR_NUMBER=$(echo "$EXISTING_PR" | jq -r '.[0].number // empty')
 PR_URL=$(echo "$EXISTING_PR" | jq -r '.[0].url // empty')
 
+# normalize_pr_text: prints $1 without CRs and without trailing whitespace, so
+# the form GitHub happens to store a title or body in (CRLF from the web editor,
+# a trailing newline kept or dropped) never counts as a change. Only the END of
+# the text is forgiven: whitespace inside it is content.
+normalize_pr_text() {
+    local s="${1//$'\r'/}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+# Set on the reuse path only, and printed in the summary next to STATUS. Empty
+# for a freshly created PR, whose title and body need no comparison.
+PR_EDIT=""
+REUSED=0
+
 if [[ -n "$PR_NUMBER" ]]; then
+    REUSED=1
     echo "=== Reusing existing PR #$PR_NUMBER: $PR_URL ==="
+
+    # The caller's --title and --body-file are the source of truth on reuse too
+    # (issue #107): a follow-up push usually comes with an updated body, and
+    # ignoring it left the old one on GitHub while the output read as success.
+    # The cost is that manual edits on GitHub are overwritten; PR_EDIT is what
+    # makes that visible.
+    #
+    # Both failures below exit before the CI gate and the merge: a PR whose
+    # body could not be read or set must not be merged under the old one.
+    if ! CURRENT_PR=$(gh pr view "$PR_NUMBER" --json title,body); then
+        echo "Error: could not read the title and body of PR #$PR_NUMBER" >&2
+        exit 1
+    fi
+    if ! CURRENT_TITLE=$(echo "$CURRENT_PR" | jq -er 'if type == "object" and (.title | type) == "string" then .title else error end' 2>/dev/null) \
+        || ! CURRENT_BODY=$(echo "$CURRENT_PR" | jq -er 'if type == "object" and (.body | type) == "string" then .body else error end' 2>/dev/null); then
+        echo "Error: could not parse the title and body of PR #$PR_NUMBER (got: $CURRENT_PR)" >&2
+        exit 1
+    fi
+
+    CHANGED=()
+    if [[ "$(normalize_pr_text "$CURRENT_TITLE")" != "$(normalize_pr_text "$TITLE")" ]]; then
+        CHANGED+=("title")
+    fi
+    if [[ "$(normalize_pr_text "$CURRENT_BODY")" != "$(normalize_pr_text "$(cat "$BODY_FILE")")" ]]; then
+        CHANGED+=("body")
+    fi
+
+    if [[ "${#CHANGED[@]}" -gt 0 ]]; then
+        # stdout is the PR URL, which the summary already prints; gh's errors
+        # stay on stderr.
+        if ! gh pr edit "$PR_NUMBER" --title "$TITLE" --body-file "$BODY_FILE" >/dev/null; then
+            echo "Error: could not update the title/body of PR #$PR_NUMBER; not merging" >&2
+            exit 1
+        fi
+        PR_EDIT="UPDATED ($(IFS=,; echo "${CHANGED[*]}"))"
+    else
+        PR_EDIT="UNCHANGED"
+    fi
 else
     echo "=== Creating PR: $TITLE ==="
     PR_URL=$(gh pr create --title "$TITLE" --base "$BASE" --body-file "$BODY_FILE")
@@ -748,14 +802,23 @@ wait_for_ci_gate() {
     done
 }
 
+# print_summary: the machine-readable tail callers parse. PR_EDIT only appears
+# when an existing PR was reused, so its absence means the PR was just created.
+print_summary() {
+    if [[ -n "$PR_EDIT" ]]; then
+        echo "PR_EDIT: $PR_EDIT"
+    fi
+    echo "PR_NUMBER: $PR_NUMBER"
+    echo "PR_URL: $PR_URL"
+    echo "STATUS: $1"
+}
+
 if [[ "$DO_MERGE" -eq 1 ]]; then
     if [[ "$CI_WAIT" -eq 1 ]]; then
         echo "=== Waiting for CI checks on PR #$PR_NUMBER ==="
         if ! wait_for_ci_gate; then
             echo "=== CI gate failed — leaving PR #$PR_NUMBER open ===" >&2
-            echo "PR_NUMBER: $PR_NUMBER"
-            echo "PR_URL: $PR_URL"
-            echo "STATUS: CI_GATE_BLOCKED"
+            print_summary "CI_GATE_BLOCKED"
             exit 1
         fi
     else
@@ -770,12 +833,12 @@ if [[ "$DO_MERGE" -eq 1 ]]; then
     git_filtered pull origin "$BASE"
 
     echo "=== Done ==="
-    echo "PR_NUMBER: $PR_NUMBER"
-    echo "PR_URL: $PR_URL"
-    echo "STATUS: MERGED"
+    print_summary "MERGED"
 else
     echo "=== Done (no merge) ==="
-    echo "PR_NUMBER: $PR_NUMBER"
-    echo "PR_URL: $PR_URL"
-    echo "STATUS: CREATED"
+    if [[ "$REUSED" -eq 1 ]]; then
+        print_summary "REUSED"
+    else
+        print_summary "CREATED"
+    fi
 fi
