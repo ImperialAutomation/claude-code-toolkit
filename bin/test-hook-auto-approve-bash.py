@@ -159,6 +159,12 @@ for token in (
     "PYTHONPATH=/home/jan/Projects/PAM-dev1/backend/app",
     "BASH_ENV=/tmp/rc",
     "LESSOPEN=|/tmp/x %s",
+    # gh's own spellings of BROWSER/PAGER/EDITOR, and the program ssh runs
+    # under `git fetch` when SSH_ASKPASS_REQUIRE=force.
+    "GH_BROWSER=touch /tmp/pwned",
+    "GH_PAGER=sh -c id",
+    "GH_EDITOR=sh -c id",
+    "SSH_ASKPASS=/tmp/x",
 ):
     check(
         f"is_dangerous_env_assignment: exact name {token.split('=')[0]} is dangerous",
@@ -190,6 +196,9 @@ for token in (
     "PAM_REPO_ROOT=/home/jan/Projects/PAM",
     "SCRIPT_UNDER_TEST=bin/git-verify.sh",
     "UV_TOOL_DIR=/tmp/uvtools",
+    # gh's non-executing variables stay harmless: no GH_ family match.
+    "GH_TOKEN=x",
+    "GH_REPO=owner/repo",
     # A name that merely CONTAINS a dangerous one is not that variable.
     "MYPATH=/opt/x",
     "LEGIT_FLAG=1",
@@ -1536,6 +1545,9 @@ for command in (
     "GIT_CONFIG_GLOBAL=/tmp/evil.gitconfig git log",
     "LD_AUDIT=/tmp/x.so ls",
     "npm_config_script_shell=/tmp/x npm test",
+    # gh runs GH_BROWSER on `gh browse`; ssh runs SSH_ASKPASS under git fetch.
+    'GH_BROWSER="touch /tmp/pwned" gh browse',
+    "SSH_ASKPASS=/tmp/x SSH_ASKPASS_REQUIRE=force git fetch",
     # A harmless assignment in front does not hide a dangerous one behind it.
     "CI=1 LD_PRELOAD=/tmp/x.so ls",
     # An assignment-only segment: PATH is already exported, so the bare
@@ -1559,6 +1571,7 @@ for command in (
     "POSTGRES_HOST=localhost POSTGRES_PORT=5433 ~/.claude/bin/project-test.sh tests/",
     "TMPDIR=/tmp/cct-e2e ~/.claude/bin/epic-prepare-context.sh 632",
     "LC_ALL=C rtk grep -rn foo bin",
+    "GH_REPO=owner/repo gh pr list",
 ):
     check(f"env-danger: harmless `{command}` is still approved", hook_decision(command) == "allow")
 
