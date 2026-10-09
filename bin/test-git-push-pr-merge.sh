@@ -358,7 +358,7 @@ case "$1 $2" in
                 fi
                 title=$(cat "$WORKDIR/existing-title" 2>/dev/null || echo "Test PR")
                 # The `x` sentinel keeps trailing newlines and CRs, which command
-                # substitution would otherwise strip — they are exactly what the
+                # substitution would otherwise strip; they are exactly what the
                 # normalisation scenarios are about.
                 if [ -f "$WORKDIR/existing-body" ]; then
                     body=$(cat "$WORKDIR/existing-body"; printf x)
