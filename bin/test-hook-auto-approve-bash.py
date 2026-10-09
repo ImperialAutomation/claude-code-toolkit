@@ -147,6 +147,72 @@ check(
     hook.strip_env_prefix(["FOO=bar"]) == [],
 )
 
+# --- is_dangerous_env_assignment (issue #108) ---
+# Some variables make an allowlisted command load or run arbitrary code. Their
+# assignment must never be seen through, or `PAGER="sh -c id" git log` launders
+# the very attack `git -c core.pager=...` is refused for.
+
+for token in (
+    "LD_PRELOAD=/tmp/x.so",
+    "PATH=/tmp/sandsim/fakebin:$PATH",
+    "PAGER=sh -c id",
+    "PYTHONPATH=/home/jan/Projects/PAM-dev1/backend/app",
+    "BASH_ENV=/tmp/rc",
+    "LESSOPEN=|/tmp/x %s",
+    # gh's own spellings of BROWSER/PAGER/EDITOR, and the program ssh runs
+    # under `git fetch` when SSH_ASKPASS_REQUIRE=force.
+    "GH_BROWSER=touch /tmp/pwned",
+    "GH_PAGER=sh -c id",
+    "GH_EDITOR=sh -c id",
+    "SSH_ASKPASS=/tmp/x",
+):
+    check(
+        f"is_dangerous_env_assignment: exact name {token.split('=')[0]} is dangerous",
+        hook.is_dangerous_env_assignment(token),
+    )
+
+# Families: every member is covered, including ones nobody thought to list.
+for token in (
+    "LD_AUDIT=/tmp/x.so",
+    "DYLD_INSERT_LIBRARIES=/tmp/x.dylib",
+    "GIT_SSH_COMMAND=touch /tmp/pwned",
+    "GIT_DIR=/tmp/evil/.git",
+    "GIT_CONFIG_GLOBAL=/tmp/evil.gitconfig",
+    "npm_config_script_shell=/tmp/x",
+    "NPM_CONFIG_NODE_OPTIONS=--require=/tmp/x.js",
+):
+    check(
+        f"is_dangerous_env_assignment: family member {token.split('=')[0]} is dangerous",
+        hook.is_dangerous_env_assignment(token),
+    )
+
+# Real prefixes measured in transcripts, plus the classic harmless ones.
+for token in (
+    "LC_ALL=C",
+    "CI=1",
+    "NO_COLOR=1",
+    "TMPDIR=/tmp/cct-e2e",
+    "POSTGRES_HOST=localhost",
+    "PAM_REPO_ROOT=/home/jan/Projects/PAM",
+    "SCRIPT_UNDER_TEST=bin/git-verify.sh",
+    "UV_TOOL_DIR=/tmp/uvtools",
+    # gh's non-executing variables stay harmless: no GH_ family match.
+    "GH_TOKEN=x",
+    "GH_REPO=owner/repo",
+    # A name that merely CONTAINS a dangerous one is not that variable.
+    "MYPATH=/opt/x",
+    "LEGIT_FLAG=1",
+):
+    check(
+        f"is_dangerous_env_assignment: {token.split('=')[0]} is harmless",
+        not hook.is_dangerous_env_assignment(token),
+    )
+
+check(
+    "is_dangerous_env_assignment: a non-assignment token is not an assignment",
+    not hook.is_dangerous_env_assignment("git"),
+)
+
 # --- strip_cd_prefix ---
 
 check(
@@ -1160,6 +1226,21 @@ check(
     hook.is_command_safe(f"env -C {PROJECT_DIR} FOO=bar git status"),
 )
 
+check(
+    "env-C: a harmless assignment before -C still resolves to the real command",
+    hook.is_command_safe(f"env CI=1 -C {PROJECT_DIR} git status"),
+)
+
+# Issue #108: a code-loading variable must not ride in on either side of -C.
+for command in (
+    f"env LD_PRELOAD=/tmp/x.so -C {PROJECT_DIR} ls",
+    f"env CI=1 PAGER=sh\\ -c\\ id --chdir={PROJECT_DIR} git log",
+    f'env -C {PROJECT_DIR} PAGER="sh -c id" git log',
+    f"env -C {PROJECT_DIR} GIT_SSH_COMMAND=touch\\ /tmp/pwned git fetch",
+):
+    check(f"env-C: `{command}` is not approved", not hook.is_command_safe(command))
+    check(f"env-C: `{command}` gets no decision (prompt)", hook_decision(command) is None)
+
 # AC: `env -C /projects/x ./start.sh` where ./start.sh alone is not approved
 # → fall through. The directory being allowed does NOT make the command allowed;
 # this is the half that stops env -C from becoming a universal bypass.
@@ -1435,6 +1516,64 @@ check(
     "rtk: hook denies an rtk-prefixed cd chain with the env -C hint",
     not approved and reason is not None and "env -C" in reason,
 )
+
+
+# --- dangerous env-var prefixes fall through to the prompt (issue #108) ---
+# strip_env_prefix used to drop every VAR=value token unseen, so an assignment
+# of a code-loading variable laundered an allowlisted command. Such a command
+# must now get NO decision: not approved, and not denied either, since there is
+# no native tool to point at.
+
+check(
+    "env-danger: strip_env_prefix stops at a dangerous assignment",
+    hook.strip_env_prefix(["CI=1", "LD_PRELOAD=/tmp/x.so", "ls"])
+    == ["LD_PRELOAD=/tmp/x.so", "ls"],
+)
+
+check(
+    "env-danger: an assignment-only segment of a dangerous variable is not emptied",
+    hook.strip_env_prefix(["PATH=/tmp/evil:$PATH"]) == ["PATH=/tmp/evil:$PATH"],
+)
+
+for command in (
+    # The three from the issue.
+    "LD_PRELOAD=/tmp/x.so ls",
+    'GIT_SSH_COMMAND="touch /tmp/pwned" git fetch',
+    'PAGER="sh -c id" git log',
+    # Family members nobody listed by name.
+    "GIT_DIR=/tmp/evil/.git git status",
+    "GIT_CONFIG_GLOBAL=/tmp/evil.gitconfig git log",
+    "LD_AUDIT=/tmp/x.so ls",
+    "npm_config_script_shell=/tmp/x npm test",
+    # gh runs GH_BROWSER on `gh browse`; ssh runs SSH_ASKPASS under git fetch.
+    'GH_BROWSER="touch /tmp/pwned" gh browse',
+    "SSH_ASKPASS=/tmp/x SSH_ASKPASS_REQUIRE=force git fetch",
+    # A harmless assignment in front does not hide a dangerous one behind it.
+    "CI=1 LD_PRELOAD=/tmp/x.so ls",
+    # An assignment-only segment: PATH is already exported, so the bare
+    # assignment changes the environment of every segment after it.
+    "PATH=/tmp/evil:$PATH; git status",
+    # Ahead of a model-typed rtk prefix.
+    "LD_PRELOAD=/tmp/x.so rtk grep -rn foo bin",
+    # In a later chain segment.
+    'git status && PAGER="sh -c id" git log',
+    # Ahead of an approved ~/.claude/bin/ script: the fake-bin stubbing seen in
+    # real transcripts, which is exactly how such a script is made to run code.
+    "PATH=/tmp/sandsim/fakebin:$PATH ~/.claude/bin/git-verify.sh --repo /tmp/sandsim/repo",
+):
+    check(f"env-danger: `{command}` is not approved", not hook.is_command_safe(command))
+    check(f"env-danger: `{command}` gets no decision (prompt)", hook_decision(command) is None)
+
+for command in (
+    "LC_ALL=C grep -rn foo bin",
+    "CI=1 npm test",
+    "FOO=1; git status",
+    "POSTGRES_HOST=localhost POSTGRES_PORT=5433 ~/.claude/bin/project-test.sh tests/",
+    "TMPDIR=/tmp/cct-e2e ~/.claude/bin/epic-prepare-context.sh 632",
+    "LC_ALL=C rtk grep -rn foo bin",
+    "GH_REPO=owner/repo gh pr list",
+):
+    check(f"env-danger: harmless `{command}` is still approved", hook_decision(command) == "allow")
 
 
 # --- repeat-cmd.sh <count> <cmd>: approved only when <cmd> is ---
