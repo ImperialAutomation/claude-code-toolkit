@@ -288,9 +288,12 @@ def strip_env_c_prefix(segment_tokens):
     directory = None
 
     # Accept `-C <dir>`, `--chdir <dir>` and `--chdir=<dir>`. Assignments may
-    # precede the flag (`env FOO=bar -C <dir> cmd`), so skip over them.
+    # precede the flag (`env FOO=bar -C <dir> cmd`), so skip over them. A
+    # dangerous one leaves the segment as it was: its first token stays "env".
     index = 0
     while index < len(rest) and ENV_ASSIGNMENT_RE.match(rest[index]):
+        if is_dangerous_env_assignment(rest[index]):
+            return segment_tokens
         index += 1
 
     if index < len(rest) and rest[index] in ("-C", "--chdir"):

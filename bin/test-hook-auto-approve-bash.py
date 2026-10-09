@@ -1217,6 +1217,21 @@ check(
     hook.is_command_safe(f"env -C {PROJECT_DIR} FOO=bar git status"),
 )
 
+check(
+    "env-C: a harmless assignment before -C still resolves to the real command",
+    hook.is_command_safe(f"env CI=1 -C {PROJECT_DIR} git status"),
+)
+
+# Issue #108: a code-loading variable must not ride in on either side of -C.
+for command in (
+    f"env LD_PRELOAD=/tmp/x.so -C {PROJECT_DIR} ls",
+    f"env CI=1 PAGER=sh\\ -c\\ id --chdir={PROJECT_DIR} git log",
+    f'env -C {PROJECT_DIR} PAGER="sh -c id" git log',
+    f"env -C {PROJECT_DIR} GIT_SSH_COMMAND=touch\\ /tmp/pwned git fetch",
+):
+    check(f"env-C: `{command}` is not approved", not hook.is_command_safe(command))
+    check(f"env-C: `{command}` gets no decision (prompt)", hook_decision(command) is None)
+
 # AC: `env -C /projects/x ./start.sh` where ./start.sh alone is not approved
 # → fall through. The directory being allowed does NOT make the command allowed;
 # this is the half that stops env -C from becoming a universal bypass.
