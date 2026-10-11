@@ -88,7 +88,7 @@ Assign each finding to exactly one category:
 | Project pattern | Section in project CLAUDE.md under `## Project Patterns` | Project repo only |
 | Environment/config note | Section in project CLAUDE.md under `## Environment Notes` | Project repo only |
 | Claude Code tool behaviour | Memory file in `~/.claude/projects/*/memory/` | Memory only |
-| Toolkit candidate | All of the above PLUS a proposal file | Project repo + `~/.claude/toolkit-proposals/` |
+| Toolkit candidate | All of the above PLUS a GitHub issue | Project repo + toolkit repo issue |
 
 **Default is always project-local.** A finding is a toolkit candidate ONLY if it meets ALL of these criteria:
 - It is not tied to a specific project's URLs, endpoints, or data model
@@ -240,7 +240,7 @@ Steps:
 
 **The toolkit repo is PUBLIC. Strip project-identifying context before anything goes there.**
 
-This applies to every artefact that lands in the toolkit — proposal files, `rules/`,
+This applies to every artefact that lands in the toolkit — `rules/`,
 `skills/`, `claude-md/`, and just as much to the **GitHub issue bodies, PR bodies and
 commit messages** you write against that repo. The project-local version keeps the full
 story; the toolkit version gets the generalised lesson.
@@ -268,11 +268,24 @@ Scan the body before publishing, not after:
 grep -oiE "<project>|<client>|<product-domain>|#[0-9]{3}" <body-file>
 ```
 
-Then do everything above for the project-local version, and ALSO create a proposal file at `~/.claude/toolkit-proposals/<name>.md` containing:
-- Name and one-line description
-- The problem pattern it solves (generic, not project-specific)
-- Which projects would benefit
-- A sketch of what the generalised version would look like (parameterised script, or skill SKILL.md outline)
+Then do everything above for the project-local version, and ALSO, for a candidate
+Phase 3b classified as **new** (or as a recurrence of a closed issue), create a GitHub
+issue in the toolkit repo after confirmation. Write the body with the Write tool to
+`/tmp/<project>-toolkit-issue-<slug>.md`, run the scan above on it, then:
+
+```bash
+gh issue create --repo <owner>/<repo> --title "<area>: <one-line description>" --body-file /tmp/<project>-toolkit-issue-<slug>.md
+```
+
+The body contains:
+- **Problem**: the pattern it solves (generic, not project-specific)
+- **Who benefits**: which kinds of projects
+- **Sketch**: what the generalised version would look like (parameterised script, hook change, or skill SKILL.md outline)
+- **Tests**: how the change would be verified
+- For a recurrence: a reference to the closed issue and what still happens
+
+Never write a local proposal file instead: a file on one machine is invisible to
+every other machine and to the duplicate check in Phase 3b.
 
 ## Phase 3b: Check Existing Toolkit Issues
 
@@ -325,7 +338,7 @@ Group output into sections:
 - memory/<topic>.md: <what was captured> (tool behaviour or fallback only)
 
 ### Toolkit candidates (if any)
-- <name>: <one-line description> → ~/.claude/toolkit-proposals/<name>.md
+- <name>: <one-line description> [new → create issue | existing open #N (comment: <new evidence> / none) | existing closed #N → new issue referencing it]
 
 ### Permission friction (if any recurring patterns found)
 - <pattern>: seen in N sessions → proposed remedy (allowlist rule / bin/ wrapper / hook change)
