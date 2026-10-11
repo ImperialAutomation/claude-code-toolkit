@@ -407,7 +407,6 @@ claude-code-toolkit/
 │   ├── test/
 │   ├── pre-merge/
 │   ├── retro/
-│   ├── promote/
 │   └── sync-toolkit/
 ├── rules/                     ← contextual rules → ~/.claude/rules/
 │   ├── error-handling.md      ← error propagation, RFC 9457, boundary translation
@@ -422,7 +421,7 @@ claude-code-toolkit/
 │   ├── settings-global.jsonc  ← global permissions → ~/.claude/settings.json
 │   ├── project-template.md    ← template for project-specific CLAUDE.md
 │   ├── settings-template.jsonc ← template for project-specific settings
-│   └── procedures/            ← shared procedure snippets (created via /promote)
+│   └── procedures/            ← shared procedure snippets (added through a toolkit issue)
 ├── install.sh                 ← creates symlinks + copies settings
 └── README.md
 ```
@@ -534,7 +533,6 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 | `/debug` | `/debug <description>` | Systematic debugging — find root cause before fixes |
 | `/ss` | `/ss [number]` | Find recent screenshots |
 | `/retro` | `/retro [focus-area]` | End-of-session retrospective — capture knowledge as scripts, procedures, decisions, or skill proposals |
-| `/promote` | `/promote <script-or-procedure>` | Promote a project-local script or procedure to the shared toolkit |
 | `/verify` | `/verify [quick\|full\|browser]` | Runtime verification — containers, API health, migrations, browser smoke test |
 | `/review` | `/review [--staged\|--branch\|--file PATH]` | On-demand code review of current changes with automated checks |
 | `/test` | `/test [--all\|--affected]` | Smart test runner that scopes tests based on changed files |
@@ -619,12 +617,13 @@ flowchart TD
 
 ## Knowledge Capture
 
-Two skills work together to prevent knowledge loss across sessions:
+Knowledge moves from a working session into the shared toolkit in three steps:
 
-- `/retro` captures knowledge from any working session — debug, implementation, configuration, deployment — as project-local artefacts (scripts, CLAUDE.md procedures, design decisions, auto-memory entries). Findings that look reusable across projects are flagged as toolkit candidates.
-- `/promote` generalises a project-local script or procedure into the shared toolkit, leaving a thin wrapper in the original project.
+1. `/retro` captures knowledge from any working session (debug, implementation, configuration, deployment) as project-local artefacts: scripts, CLAUDE.md procedures, design decisions, auto-memory entries.
+2. A finding that is reusable across projects also becomes a GitHub issue in this repo, written without anything that identifies the source project. Next to its local version, the source project gets a note to replace it once that issue is merged.
+3. `/implement <issue>` in this repo builds the generalised version with a branch, tests and a PR. After the merge, the source project acts on its note: the local script becomes a thin wrapper around the toolkit version (or goes), and its CLAUDE.md points at the toolkit.
 
-The rule: capture locally first, promote when you have seen the pattern twice.
+The rule: capture locally first, file a toolkit issue when you have seen the pattern twice.
 
 ## Multi-Device Sync
 
