@@ -274,6 +274,37 @@ Then do everything above for the project-local version, and ALSO create a propos
 - Which projects would benefit
 - A sketch of what the generalised version would look like (parameterised script, or skill SKILL.md outline)
 
+## Phase 3b: Check Existing Toolkit Issues
+
+Mandatory for every toolkit candidate and every permission-friction remedy, before
+anything is proposed. The same idea is often already filed: a retro that proposes
+four hook changes which all exist as open issues has produced only duplicates.
+
+Find the toolkit repo the way `/promote` does (resolve the `~/.claude/skills`
+symlink to the toolkit repo root), then read its GitHub slug from the remote:
+
+```bash
+git -C <toolkit-repo-root> remote get-url origin
+```
+
+Fetch all issues, **open and closed**, once, and filter locally. One listing is
+cheaper than a search per candidate and catches issues that phrase the topic
+differently:
+
+```bash
+~/.claude/bin/gh-save.sh /tmp/<project>-toolkit-issues-retro.json issue list --repo <owner>/<repo> --state all --limit 1000 --json number,title,state,body
+```
+
+Read the file and match each candidate on its key terms (script name, hook name,
+the construct involved). Classify each one:
+
+- **new**: no matching issue. Propose creating one (see "For toolkit candidates").
+- **existing open (#N)**: name the issue. Propose a comment only if this retro adds
+  new evidence (a fresh measurement, a new failure shape); otherwise propose nothing.
+- **existing closed (#N)**: name it and check whether the fix landed and the pattern
+  still recurs. A recurrence is a regression or an incomplete fix: propose a new
+  issue that references the closed one.
+
 ## Phase 4: Present Summary and Confirm
 
 Group output into sections:
@@ -298,7 +329,11 @@ Group output into sections:
 
 ### Permission friction (if any recurring patterns found)
 - <pattern>: seen in N sessions → proposed remedy (allowlist rule / bin/ wrapper / hook change)
+  [new | existing open #N | existing closed #N]
 ```
+
+Every toolkit candidate and friction remedy carries its Phase 3b label, so "already
+filed as #N" is visible before confirmation.
 
 The consolidation section is not optional and `net +0` is the good outcome, not a sign
 the retro found nothing. A retro that folded three findings into existing documents and
@@ -330,6 +365,7 @@ Artefacts:
 - Keep procedures concise. Future sessions need to scan them quickly.
 - If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.
+- Search the toolkit repo's open and closed issues before proposing any toolkit candidate or friction remedy (Phase 3b). A duplicate issue is noise, not capture.
 - When in doubt about toolkit candidacy, keep it project-local. Promote later via `/promote`.
 - Claude Code tool behaviour (permissions, Bash patterns, sandbox workarounds) ALWAYS goes to memory, never to `docs/development/`.
 - The toolkit repo is public: never put project names, client names, product URLs or other repos' issue/PR numbers in toolkit files, issues, PRs or commit messages. Generalise the lesson, drop the attribution.
