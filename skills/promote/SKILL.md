@@ -9,14 +9,14 @@ user-invocable: true
 
 Move a proven project-local pattern to the shared toolkit (`claude-code-toolkit` repo) so it is available across all projects and devices.
 
-**When to use:** When the same pattern has appeared in two or more projects, or when a `/retro` toolkit proposal is ready to be acted on.
+**When to use:** When the same pattern has appeared in two or more projects, or when a toolkit issue filed by `/retro` is ready to be acted on.
 
 ## Input
 
 The argument is one of: `$ARGUMENTS`
 - A path to a script (e.g. `scripts/api-login.sh`)
 - A procedure name from CLAUDE.md (e.g. "FastAPI session auth")
-- A toolkit proposal file (e.g. `~/.claude/toolkit-proposals/fastapi-session-login.md`)
+- A toolkit repo issue number (e.g. `#42`); read it with `gh issue view <nr> --repo <owner>/<repo>`
 
 ## Phase 1: Locate Source and Toolkit
 
@@ -58,7 +58,7 @@ delete + recreate.
 Scan before publishing:
 
 ```bash
-grep -oiE "<project>|<client>|<product-domain>|#[0-9]{3}" <body-file>
+grep -oiE "<project>|<repo-owner>|<client>|<product-domain>|<project-script-or-file>|#[0-9]+" <body-file>
 ```
 
 ## Phase 3: Determine Toolkit Location
@@ -146,6 +146,6 @@ Wait for confirmation before making any changes.
 - Do not auto-commit to the toolkit repo. Show what needs to be added; the user handles the commit.
 - The project-local version must keep working after promotion (via the wrapper).
 - Check the toolkit for existing similar scripts/skills before creating duplicates.
-- If a toolkit proposal file exists for this pattern, use it as input but verify it is still accurate.
-- Clean up the toolkit proposal file after successful promotion.
+- If a toolkit issue exists for this pattern, use it as input but verify it is still accurate.
+- Reference that issue with `Closes #N` in the toolkit PR, so it closes when the promotion merges.
 - The toolkit repo is public: never put project names, client names, product URLs or other repos' issue/PR numbers in toolkit files, issues, PRs or commit messages. Generalise the lesson, drop the attribution.

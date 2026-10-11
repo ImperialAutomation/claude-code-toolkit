@@ -88,7 +88,7 @@ Assign each finding to exactly one category:
 | Project pattern | Section in project CLAUDE.md under `## Project Patterns` | Project repo only |
 | Environment/config note | Section in project CLAUDE.md under `## Environment Notes` | Project repo only |
 | Claude Code tool behaviour | Memory file in `~/.claude/projects/*/memory/` | Memory only |
-| Toolkit candidate | All of the above PLUS a proposal file | Project repo + `~/.claude/toolkit-proposals/` |
+| Toolkit candidate | All of the above PLUS a GitHub issue | Project repo + toolkit repo issue |
 
 **Default is always project-local.** A finding is a toolkit candidate ONLY if it meets ALL of these criteria:
 - It is not tied to a specific project's URLs, endpoints, or data model
@@ -240,13 +240,13 @@ Steps:
 
 **The toolkit repo is PUBLIC. Strip project-identifying context before anything goes there.**
 
-This applies to every artefact that lands in the toolkit — proposal files, `rules/`,
-`skills/`, `claude-md/`, and just as much to the **GitHub issue bodies, PR bodies and
-commit messages** you write against that repo. The project-local version keeps the full
-story; the toolkit version gets the generalised lesson.
+This applies to every artefact that lands in the toolkit — `rules/`,
+`skills/`, `claude-md/`, and just as much to **every text you publish against that repo:
+issue bodies, issue and PR comments, PR bodies and commit messages**. The project-local
+version keeps the full story; the toolkit version gets the generalised lesson.
 
-Remove: project names, client/person names, product URLs and hostnames, and internal
-issue/PR numbers from other repos. Keep: the lesson, the reasoning, and any number that
+Remove: project names, client/person names, product URLs and hostnames, the project's
+own script, file and directory names, and internal issue/PR numbers from other repos. Keep: the lesson, the reasoning, and any number that
 is load-bearing for the lesson (pool sizes, timeouts) — without the attribution.
 
 Write "a FastAPI project shipped dozens of async-def routes holding a sync Session",
@@ -260,19 +260,76 @@ Two traps worth knowing:
 - `gh issue edit` does NOT clean up a body that was already published: GitHub keeps the
   previous version in the "edited" menu. Fixing a leak means `gh issue delete` +
   recreate, `gh pr close --delete-branch`, and rewriting the commit message if it
-  carried the context too.
+  carried the context too. An edited comment keeps its history the same way; fixing
+  it means deleting the comment.
 
-Scan the body before publishing, not after:
+Scan every body and comment before publishing, not after. Fill the pattern from this
+session, not from memory: the project's directory and repo name, client names, the
+hostnames and domains that came up, and the names of the project scripts and files the
+finding is about:
 
 ```bash
-grep -oiE "<project>|<client>|<product-domain>|#[0-9]{3}" <body-file>
+grep -oiE "<project>|<repo-owner>|<client>|<product-domain>|<project-script-or-file>|#[0-9]+" <body-file>
 ```
 
-Then do everything above for the project-local version, and ALSO create a proposal file at `~/.claude/toolkit-proposals/<name>.md` containing:
-- Name and one-line description
-- The problem pattern it solves (generic, not project-specific)
-- Which projects would benefit
-- A sketch of what the generalised version would look like (parameterised script, or skill SKILL.md outline)
+Every hit must be either gone or a deliberate reference: an `#N` is only allowed when
+it is an issue or PR in the toolkit repo itself.
+
+Then do everything above for the project-local version, and ALSO, for a candidate
+Phase 3b classified as **new** (or as a recurrence of a closed issue), create a GitHub
+issue in the toolkit repo after confirmation. Write the body with the Write tool to
+`/tmp/<project>-toolkit-issue-<slug>.md`, run the scan above on it, then:
+
+```bash
+gh issue create --repo <owner>/<repo> --title "<area>: <one-line description>" --body-file /tmp/<project>-toolkit-issue-<slug>.md
+```
+
+The body contains:
+- **Problem**: the pattern it solves (generic, not project-specific)
+- **Who benefits**: which kinds of projects
+- **Sketch**: what the generalised version would look like (parameterised script, hook change, or skill SKILL.md outline)
+- **Tests**: how the change would be verified
+- For a recurrence: a reference to the closed issue and what still happens
+
+Never write a local proposal file instead: a file on one machine is invisible to
+every other machine and to the duplicate check in Phase 3b.
+
+## Phase 3b: Check Existing Toolkit Issues
+
+Mandatory for every toolkit candidate and every permission-friction remedy, before
+anything is proposed. The same idea is often already filed: a retro that proposes
+four hook changes which all exist as open issues has produced only duplicates.
+
+Find the toolkit repo the way `/promote` does (resolve the `~/.claude/skills`
+symlink to the toolkit repo root), then read its GitHub slug from the remote:
+
+```bash
+git -C <toolkit-repo-root> remote get-url origin
+```
+
+The URL is `git@github.com:<owner>/<repo>.git` or `https://github.com/<owner>/<repo>.git`;
+`<owner>/<repo>` without `.git` is what `--repo` takes below.
+
+Fetch all issues, **open and closed**, once, and filter locally. One listing is
+cheaper than a search per candidate and catches issues that phrase the topic
+differently:
+
+```bash
+~/.claude/bin/gh-save.sh /tmp/<project>-toolkit-issues-retro.json issue list --repo <owner>/<repo> --state all --limit 1000 --json number,title,state,body
+```
+
+Read the file and match each candidate on its key terms (script name, hook name,
+the construct involved). Classify each one:
+
+- **new**: no matching issue. Propose creating one (see "For toolkit candidates").
+- **existing open (#N)**: name the issue. Propose a comment only if this retro adds
+  new evidence (a fresh measurement, a new failure shape); otherwise propose nothing.
+  After confirmation, write the comment to `/tmp/<project>-toolkit-comment-<N>.md`, run
+  the public-repo scan from "For toolkit candidates" on it, then
+  `gh issue comment <N> --repo <owner>/<repo> --body-file <file>`.
+- **existing closed (#N)**: name it and check whether the fix landed and the pattern
+  still recurs. A recurrence is a regression or an incomplete fix: propose a new
+  issue that references the closed one.
 
 ## Phase 4: Present Summary and Confirm
 
@@ -294,11 +351,15 @@ Group output into sections:
 - memory/<topic>.md: <what was captured> (tool behaviour or fallback only)
 
 ### Toolkit candidates (if any)
-- <name>: <one-line description> → ~/.claude/toolkit-proposals/<name>.md
+- <name>: <one-line description> [new → create issue | existing open #N (comment: <new evidence> / none) | existing closed #N → new issue referencing it]
 
 ### Permission friction (if any recurring patterns found)
 - <pattern>: seen in N sessions → proposed remedy (allowlist rule / bin/ wrapper / hook change)
+  [new | existing open #N | existing closed #N]
 ```
+
+Every toolkit candidate and friction remedy carries its Phase 3b label, so "already
+filed as #N" is visible before confirmation.
 
 The consolidation section is not optional and `net +0` is the good outcome, not a sign
 the retro found nothing. A retro that folded three findings into existing documents and
@@ -330,6 +391,7 @@ Artefacts:
 - Keep procedures concise. Future sessions need to scan them quickly.
 - If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.
+- Search the toolkit repo's open and closed issues before proposing any toolkit candidate or friction remedy (Phase 3b). A duplicate issue is noise, not capture.
 - When in doubt about toolkit candidacy, keep it project-local. Promote later via `/promote`.
 - Claude Code tool behaviour (permissions, Bash patterns, sandbox workarounds) ALWAYS goes to memory, never to `docs/development/`.
-- The toolkit repo is public: never put project names, client names, product URLs or other repos' issue/PR numbers in toolkit files, issues, PRs or commit messages. Generalise the lesson, drop the attribution.
+- The toolkit repo is public: never put project names, client names, product URLs, project script or file names, or other repos' issue/PR numbers in toolkit files, issues, comments, PRs or commit messages. Generalise the lesson, drop the attribution.
