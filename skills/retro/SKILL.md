@@ -289,10 +289,26 @@ The body contains:
 - **Who benefits**: which kinds of projects
 - **Sketch**: what the generalised version would look like (parameterised script, hook change, or skill SKILL.md outline)
 - **Tests**: how the change would be verified
+- **Follow-up**: one generic line saying a source project keeps a local version to
+  replace once this issue is merged. Never name that project, its scripts or its files.
 - For a recurrence: a reference to the closed issue and what still happens
 
 Never write a local proposal file instead: a file on one machine is invisible to
 every other machine and to the duplicate check in Phase 3b.
+
+Once the issue exists, leave the follow-up where its details belong: in the source
+project, next to the local version (its CLAUDE.md entry, or the doc that references
+the script), add
+
+```markdown
+> Replace with the toolkit version once toolkit issue <owner>/<repo>#N is merged.
+```
+
+This note names the local script or procedure; the toolkit issue does not. The
+toolkit side is ordinary issue work (`/implement <N>` in the toolkit repo). After
+that PR merges, act on the note: replace the local script with a thin wrapper around
+the toolkit version (or delete it), point the CLAUDE.md entry at the toolkit version,
+and remove the note.
 
 ## Phase 3b: Check Existing Toolkit Issues
 
@@ -300,8 +316,10 @@ Mandatory for every toolkit candidate and every permission-friction remedy, befo
 anything is proposed. The same idea is often already filed: a retro that proposes
 four hook changes which all exist as open issues has produced only duplicates.
 
-Find the toolkit repo the way `/promote` does (resolve the `~/.claude/skills`
-symlink to the toolkit repo root), then read its GitHub slug from the remote:
+Find the toolkit repo root by resolving the `~/.claude/skills` symlink
+(`readlink -f ~/.claude/skills`, then its parent directory). If `~/.claude/skills`
+is not a symlink, ask the user for the toolkit repo path. Then read its GitHub slug
+from the remote:
 
 ```bash
 git -C <toolkit-repo-root> remote get-url origin
@@ -351,7 +369,7 @@ Group output into sections:
 - memory/<topic>.md: <what was captured> (tool behaviour or fallback only)
 
 ### Toolkit candidates (if any)
-- <name>: <one-line description> [new → create issue | existing open #N (comment: <new evidence> / none) | existing closed #N → new issue referencing it]
+- <name>: <one-line description> [new → create issue + follow-up note in <project file> | existing open #N (comment: <new evidence> / none) | existing closed #N → new issue referencing it]
 
 ### Permission friction (if any recurring patterns found)
 - <pattern>: seen in N sessions → proposed remedy (allowlist rule / bin/ wrapper / hook change)
@@ -392,6 +410,6 @@ Artefacts:
 - If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.
 - Search the toolkit repo's open and closed issues before proposing any toolkit candidate or friction remedy (Phase 3b). A duplicate issue is noise, not capture.
-- When in doubt about toolkit candidacy, keep it project-local. Promote later via `/promote`.
+- When in doubt about toolkit candidacy, keep it project-local. File a toolkit issue later, once the pattern recurs.
 - Claude Code tool behaviour (permissions, Bash patterns, sandbox workarounds) ALWAYS goes to memory, never to `docs/development/`.
 - The toolkit repo is public: never put project names, client names, product URLs, project script or file names, or other repos' issue/PR numbers in toolkit files, issues, comments, PRs or commit messages. Generalise the lesson, drop the attribution.
