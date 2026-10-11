@@ -300,6 +300,9 @@ symlink to the toolkit repo root), then read its GitHub slug from the remote:
 git -C <toolkit-repo-root> remote get-url origin
 ```
 
+The URL is `git@github.com:<owner>/<repo>.git` or `https://github.com/<owner>/<repo>.git`;
+`<owner>/<repo>` without `.git` is what `--repo` takes below.
+
 Fetch all issues, **open and closed**, once, and filter locally. One listing is
 cheaper than a search per candidate and catches issues that phrase the topic
 differently:
