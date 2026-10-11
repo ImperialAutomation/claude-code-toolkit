@@ -241,12 +241,12 @@ Steps:
 **The toolkit repo is PUBLIC. Strip project-identifying context before anything goes there.**
 
 This applies to every artefact that lands in the toolkit — `rules/`,
-`skills/`, `claude-md/`, and just as much to the **GitHub issue bodies, PR bodies and
-commit messages** you write against that repo. The project-local version keeps the full
-story; the toolkit version gets the generalised lesson.
+`skills/`, `claude-md/`, and just as much to **every text you publish against that repo:
+issue bodies, issue and PR comments, PR bodies and commit messages**. The project-local
+version keeps the full story; the toolkit version gets the generalised lesson.
 
-Remove: project names, client/person names, product URLs and hostnames, and internal
-issue/PR numbers from other repos. Keep: the lesson, the reasoning, and any number that
+Remove: project names, client/person names, product URLs and hostnames, the project's
+own script, file and directory names, and internal issue/PR numbers from other repos. Keep: the lesson, the reasoning, and any number that
 is load-bearing for the lesson (pool sizes, timeouts) — without the attribution.
 
 Write "a FastAPI project shipped dozens of async-def routes holding a sync Session",
@@ -260,13 +260,20 @@ Two traps worth knowing:
 - `gh issue edit` does NOT clean up a body that was already published: GitHub keeps the
   previous version in the "edited" menu. Fixing a leak means `gh issue delete` +
   recreate, `gh pr close --delete-branch`, and rewriting the commit message if it
-  carried the context too.
+  carried the context too. An edited comment keeps its history the same way; fixing
+  it means deleting the comment.
 
-Scan the body before publishing, not after:
+Scan every body and comment before publishing, not after. Fill the pattern from this
+session, not from memory: the project's directory and repo name, client names, the
+hostnames and domains that came up, and the names of the project scripts and files the
+finding is about:
 
 ```bash
-grep -oiE "<project>|<client>|<product-domain>|#[0-9]{3}" <body-file>
+grep -oiE "<project>|<repo-owner>|<client>|<product-domain>|<project-script-or-file>|#[0-9]+" <body-file>
 ```
+
+Every hit must be either gone or a deliberate reference: an `#N` is only allowed when
+it is an issue or PR in the toolkit repo itself.
 
 Then do everything above for the project-local version, and ALSO, for a candidate
 Phase 3b classified as **new** (or as a recurrence of a closed issue), create a GitHub
@@ -317,6 +324,9 @@ the construct involved). Classify each one:
 - **new**: no matching issue. Propose creating one (see "For toolkit candidates").
 - **existing open (#N)**: name the issue. Propose a comment only if this retro adds
   new evidence (a fresh measurement, a new failure shape); otherwise propose nothing.
+  After confirmation, write the comment to `/tmp/<project>-toolkit-comment-<N>.md`, run
+  the public-repo scan from "For toolkit candidates" on it, then
+  `gh issue comment <N> --repo <owner>/<repo> --body-file <file>`.
 - **existing closed (#N)**: name it and check whether the fix landed and the pattern
   still recurs. A recurrence is a regression or an incomplete fix: propose a new
   issue that references the closed one.
@@ -384,4 +394,4 @@ Artefacts:
 - Search the toolkit repo's open and closed issues before proposing any toolkit candidate or friction remedy (Phase 3b). A duplicate issue is noise, not capture.
 - When in doubt about toolkit candidacy, keep it project-local. Promote later via `/promote`.
 - Claude Code tool behaviour (permissions, Bash patterns, sandbox workarounds) ALWAYS goes to memory, never to `docs/development/`.
-- The toolkit repo is public: never put project names, client names, product URLs or other repos' issue/PR numbers in toolkit files, issues, PRs or commit messages. Generalise the lesson, drop the attribution.
+- The toolkit repo is public: never put project names, client names, product URLs, project script or file names, or other repos' issue/PR numbers in toolkit files, issues, comments, PRs or commit messages. Generalise the lesson, drop the attribution.

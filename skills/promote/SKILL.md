@@ -58,7 +58,7 @@ delete + recreate.
 Scan before publishing:
 
 ```bash
-grep -oiE "<project>|<client>|<product-domain>|#[0-9]{3}" <body-file>
+grep -oiE "<project>|<repo-owner>|<client>|<product-domain>|<project-script-or-file>|#[0-9]+" <body-file>
 ```
 
 ## Phase 3: Determine Toolkit Location
