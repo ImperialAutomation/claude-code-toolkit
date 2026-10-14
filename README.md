@@ -326,6 +326,7 @@ not.
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
+| `hook-post-prune-branch-config.sh` | PostToolUse hook in settings.json | After a branch deletion, remove `[branch "<name>"]` config sections whose branch no longer exists. A sandboxed `git branch -d` cannot write `.git/config` and leaves them behind; the hook runs outside the sandbox and touches nothing else |
 
 All scripts are already allowed in the global settings (`~/.claude/settings.json`) installed by the toolkit.
 
@@ -384,6 +385,7 @@ claude-code-toolkit/
 │   ├── hook-block-foreign-worktree-git.sh ← PreToolUse hook: block cross-worktree git destruction
 │   ├── test-hook-block-foreign-worktree-git.sh ← standalone tests for the above
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
+│   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
 │   └── test-permission-friction.py ← standalone tests for the above
 ├── skills/                    ← skill definitions (procedures)
