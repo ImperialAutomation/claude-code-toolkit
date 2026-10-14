@@ -165,6 +165,10 @@ for token in (
     "GH_PAGER=sh -c id",
     "GH_EDITOR=sh -c id",
     "SSH_ASKPASS=/tmp/x",
+    # Point an approved `docker` command at a different daemon (issue #127).
+    "DOCKER_HOST=tcp://evil.example:2375",
+    "DOCKER_CONTEXT=evil",
+    "DOCKER_CONFIG=/tmp/evil-docker",
 ):
     check(
         f"is_dangerous_env_assignment: exact name {token.split('=')[0]} is dangerous",
@@ -1560,6 +1564,11 @@ for command in (
     # Ahead of an approved ~/.claude/bin/ script: the fake-bin stubbing seen in
     # real transcripts, which is exactly how such a script is made to run code.
     "PATH=/tmp/sandsim/fakebin:$PATH ~/.claude/bin/git-verify.sh --repo /tmp/sandsim/repo",
+    # _is_safe_docker_invocation checks flags only; these redirect the approved
+    # command to another daemon or credential store (issue #127).
+    "DOCKER_HOST=tcp://evil.example:2375 docker ps",
+    "DOCKER_CONTEXT=evil docker ps",
+    "DOCKER_CONFIG=/tmp/evil-docker docker ps",
 ):
     check(f"env-danger: `{command}` is not approved", not hook.is_command_safe(command))
     check(f"env-danger: `{command}` gets no decision (prompt)", hook_decision(command) is None)

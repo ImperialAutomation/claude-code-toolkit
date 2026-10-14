@@ -77,12 +77,17 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # core.fsmonitor then runs on `git status`). Matching ignores case: npm reads
 # its config case-insensitively, and for the rest a lowercase lookalike costs
 # at most a prompt.
+#
+# The DOCKER_* names do not load code into the local process, but they send an
+# approved `docker` command to another daemon or credential store, which
+# _is_safe_docker_invocation (a flag check) cannot see.
 _DANGEROUS_ENV_NAMES = frozenset({
     "PATH", "PAGER", "MANPAGER", "LESSOPEN", "LESSCLOSE", "EDITOR", "VISUAL",
     "BROWSER", "GH_BROWSER", "GH_PAGER", "GH_EDITOR", "SSH_ASKPASS",
     "SHELL", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS",
     "GCONV_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS",
     "NODE_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT",
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
 })
 _DANGEROUS_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "NPM_CONFIG_")
 
