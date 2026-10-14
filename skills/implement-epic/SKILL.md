@@ -766,13 +766,21 @@ and treat the agent as still starting.
 
 ### Sub-agent Liveness & Recovery
 
-A sub-agent can die mid-task without ever sending a completion notification or writing a final progress line — the task ID simply stops resolving via `TaskOutput`. This is distinct from a `FAILED` response (which is an active, intentional report) and distinct from "still working, hasn't hit a milestone yet" (a fresh agent may take several minutes before its first progress-file write). Do not assume either of the other two cases — verify.
+A sub-agent can die mid-task without ever sending a hand-back or writing a final progress line. This is distinct from a `FAILED` response (which is an active, intentional report) and distinct from "still working, hasn't hit a milestone yet" (a fresh agent may take several minutes before its first progress-file write). Do not assume either of the other two cases — verify.
 
 **Also watch for a second, different failure signature:** a sub-agent that terminates after only 1-2 tool calls with a vague, self-referential, non-implementing response (e.g. "the agent is running in the background, I'll wait for it to complete") instead of actually doing the work or returning SUCCESS/FAILED. This is not a silent death — it sent a normal completion notification — but it is equally a non-result: no branch, no commits, no PR. Detect it the same way as a silent death (the `git -C <worktree> log`/`status` checks in step 2 below) since the response text alone is not trustworthy signal that real work happened.
 
 **When either signature is suspected, before concluding anything is lost:**
 
-1. Call `TaskOutput` with `block: false` on the task ID. If it errors with "No task found", the process is confirmed gone (not just slow).
+1. Establish whether the agent is confirmed dead, not just slow. It is when either holds:
+   - a task-completion notification arrived without a usable hand-back (no
+     SUCCESS / AUDIT_COMPLETE / FAILED block), or
+   - no notification and no progress-file change for ~40 minutes, with the clock
+     started when you began watching this spawn.
+
+   Where the harness provides `TaskOutput`, it is an optional stronger check:
+   `block: false` on the task ID erroring with "No task found" confirms the
+   process is gone without waiting out the 40 minutes.
 2. Check the expected sub-branch for real work, in this order. **Every command
    here needs `-C <worktree>`** — this section stashes and deletes, so aiming it
    at the wrong tree destroys work instead of rescuing it:
@@ -815,7 +823,8 @@ A sub-agent can die mid-task without ever sending a completion notification or w
    | POSTING_REPORT | Posting report |
    | DONE | Complete |
 
-4. **On completion**, report the final result to the user before proceeding:
+4. **On the hand-back**, report the final result to the user before proceeding
+   — for an implement issue only after the merge check in Step 4:
    - For implement: `✅ #<N> — <summary> | PR #<pr> | <files> files | <tests_passed>/<tests_total> tests`
    - For audit: `🔍 #<N> — <summary> | <findings> findings, <critical> critical | <recommendation>`
    - For failure: `❌ #<N> — Failed: <error summary>`
@@ -834,6 +843,15 @@ Parse the sub-agent's response:
 
 **On success** (response contains `SUCCESS`):
 - Extract PR number, summary, files changed, tests written, and tests passed
+- **Verify the merge before reporting anything.** Neither the progress file nor
+  the hand-back is proof that the PR landed: `MERGING_PR` is written *before*
+  the merge, and the CI gate can leave the PR open after it. Check it:
+  ```bash
+  ~/.claude/bin/gh-save.sh /tmp/<project>-sub-pr-<N>.json pr view <PR_NUMBER> --json state,mergedAt
+  ```
+  Read the file. Only `"state": "MERGED"` with a `mergedAt` timestamp counts as
+  complete. An open PR is not a success: report it with its PR number and
+  handle it as a failure (below), so its dependents are skipped.
 - Record: issue #N → ✅ Complete, PR #X
 
 **On failure** (response contains `FAILED`):
