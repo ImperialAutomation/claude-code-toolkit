@@ -367,13 +367,29 @@ at the wrong one lands on another session's branch and exits 0.
    and everything not yet pushed is lost; agents that had pushed lost nothing,
    agents that had not lost hours of work. This is the single highest-value habit
    in this prompt.
-6. Run ONLY the tests relevant to your changes — NEVER the full test suite:
-   `~/.claude/bin/project-test.sh <worktree>/tests/unit/test_<relevant>/ -v`
-   The full suite and project validation run after all sub-issues are done — not here.
-   If the project runs tests through a long-lived container, check what it
-   bind-mounts first: a container mounting the MAIN worktree tests the wrong
-   source when you are in a linked one, and can write files back into a tree
-   nobody is working in.
+6. Run ONLY the tests relevant to your changes — NEVER the full test suite.
+   - **Runner:** use the project's documented test entry point and its path
+     convention (project CLAUDE.md, test docs). A runner that executes inside a
+     container usually wants paths relative to its workdir (e.g. `backend/`), and
+     an absolute worktree path there fails with `file or directory not found`.
+     Only when the project names no entry point, fall back to
+     `~/.claude/bin/project-test.sh` with absolute paths under `<worktree>`:
+     `~/.claude/bin/project-test.sh <worktree>/tests/unit/test_foo.py <worktree>/tests/unit/test_bar.py -v`
+   - **Scope:** name specific test files, never a directory. A directory such as
+     `tests/unit/test_api/` can hold 100+ integration-style tests. Aim for a run
+     well under a minute; ten or more files usually means the scope is too broad.
+   - **Run management:** set `timeout: 300000` (5 minutes) on the test Bash call.
+     A timeout means the scope is too broad, not that tests fail: it does not
+     count as one of the 3 attempts in step 7. The timed-out run may still be
+     going, so never start a new run with the same scope: narrow the scope once,
+     or report FAILED.
+   - After all sub-issues are merged, Phase Final runs scoped regression tests
+     plus a collection check on the feature branch. That is not the full suite,
+     so your run here is the only one that exercises your tests in depth.
+   - If the project runs tests through a long-lived container, check what it
+     bind-mounts first: a container mounting the MAIN worktree tests the wrong
+     source when you are in a linked one, and can write files back into a tree
+     nobody is working in.
 7. If tests fail: fix and retry (up to 3 attempts total)
 8. If tests pass:
    - Commit any remaining uncommitted work: `~/.claude/bin/git-commit.sh --repo <worktree> "concise descriptive message"`
@@ -918,7 +934,10 @@ git -C <worktree> diff develop..<feature_branch> --name-only -- '*.py' '*.ts' '*
    - `backend/app/api/foo.py` → `backend/tests/**/test_foo*`
    - `frontend/src/pages/FooPage.tsx` → `frontend/src/**/__tests__/Foo*`
 
-3. Run ONLY those test files with a generous timeout (tests may take minutes per file), as absolute paths under `<worktree>`:
+3. Run ONLY those test files with a generous timeout (tests may take minutes per file),
+   through the project's documented test entry point and its path convention
+   (project CLAUDE.md, test docs). Only when the project names none, fall back
+   to `project-test.sh` with absolute paths under `<worktree>`:
 ```bash
 ~/.claude/bin/project-test.sh <worktree>/<test-file-1> <worktree>/<test-file-2> ... -v
 ```
@@ -930,7 +949,8 @@ Use `timeout: 600000` (10 minutes) on the Bash call.
    - If tests fail: check if failures are pre-existing (run same test on develop). Only fix regressions introduced by this epic.
 
 5. Verify the whole test tree still **loads**, which is cheap (seconds) and
-   independent of how many test files step 2 scoped:
+   independent of how many test files step 2 scoped. Pass `--collect-only -q`
+   to the project's documented test entry point; only when it names none:
 ```bash
 ~/.claude/bin/project-test.sh --collect-only -q
 ```
@@ -1102,6 +1122,9 @@ For each new status/role found:
 
 ### Step 3: Run tests
 
+Run only the test files you wrote, through the project's documented test entry
+point and its path convention (project CLAUDE.md, test docs). Only when the
+project names none, fall back to absolute paths under `<worktree>`:
 ```bash
 ~/.claude/bin/project-test.sh <worktree>/<test-file> -v
 ```
