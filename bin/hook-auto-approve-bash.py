@@ -347,8 +347,38 @@ def _repeat_cmd_inner(args):
     return args[1:]
 
 
+CMD_SAVE_STDERR_MODES = frozenset({"separate", "merge"})
+
+
+def _cmd_save_inner(args):
+    """`cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <out> <cmd>
+    [args...]`, parsed exactly like the script's own option loop: the first
+    argument that is not an option is the output file, and `--` ends the
+    options so an output file may start with a dash."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--stderr":
+            if index + 1 >= len(args) or args[index + 1] not in CMD_SAVE_STDERR_MODES:
+                return None
+            index += 2
+        elif arg == "--strip-ansi":
+            index += 1
+        elif arg == "--":
+            index += 1
+            break
+        elif arg.startswith("-"):
+            return None
+        else:
+            break
+
+    inner = args[index + 1:]
+    return inner or None
+
+
 COMMAND_RUNNING_WRAPPERS = {
     "repeat-cmd.sh": _repeat_cmd_inner,
+    "cmd-save.sh": _cmd_save_inner,
 }
 
 
