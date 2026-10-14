@@ -1,5 +1,5 @@
 ---
-paths: "**/*test*, **/tests/**, **/conftest.py, **/*.spec.*"
+paths: "**/*test*, **/tests/**, **/conftest.py, **/*.spec.*, **/*fake*, **/fakes/**, **/*mock*, **/__mocks__/**"
 ---
 
 # Test Quality Policy
@@ -8,6 +8,9 @@ paths: "**/*test*, **/tests/**, **/conftest.py, **/*.spec.*"
 - Mocks are ONLY acceptable for external services (third-party APIs, email, payment providers)
 - If you mock a database query or internal service, justify WHY in a code comment
 - NEVER mock the thing you are testing
+- A fake for an external API must reject what the real API rejects (unknown fields, wrong shapes), with the same error shape (status code and body). A fake that accepts everything confirms your bug instead of finding it. Make its allowed-field list a generous superset of what the code sends, never a copy of it: a copy is the payload builder inverted and can never disagree with it.
+  - Give the fake its own test: a payload the real API rejects must fail against the fake too
+  - For an API that returns a different shape than it accepts, test a full round: write, read back, and require that a second run reports "unchanged"
 - Prefer integration-style tests over heavily mocked unit tests
 - Fixtures must reflect realistic data, not minimal placeholders
 - Include edge cases in fixture data (empty strings, unicode, boundary values)
