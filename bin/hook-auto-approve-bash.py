@@ -77,12 +77,17 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # core.fsmonitor then runs on `git status`). Matching ignores case: npm reads
 # its config case-insensitively, and for the rest a lowercase lookalike costs
 # at most a prompt.
+#
+# The DOCKER_* names do not load code into the local process, but they send an
+# approved `docker` command to another daemon or credential store, which
+# _is_safe_docker_invocation (a flag check) cannot see.
 _DANGEROUS_ENV_NAMES = frozenset({
     "PATH", "PAGER", "MANPAGER", "LESSOPEN", "LESSCLOSE", "EDITOR", "VISUAL",
     "BROWSER", "GH_BROWSER", "GH_PAGER", "GH_EDITOR", "SSH_ASKPASS",
     "SHELL", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS",
     "GCONV_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS",
     "NODE_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT",
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
 })
 _DANGEROUS_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "NPM_CONFIG_")
 
@@ -270,17 +275,48 @@ def strip_cd_prefix(segment_tokens):
 # merits by the very same rules. Every guard the hook applies elsewhere (git -c,
 # find -exec, command substitution) still applies, because the remainder is run
 # back through the normal segment check rather than trusted.
+#
+# `env VAR=val... <cmd>` without -C rides the same function: it is the bare
+# `VAR=val... <cmd>` form with an extra word in front, so only that word goes.
+#
+# One difference between the two spellings survives: env treats EVERY leading
+# argument containing "=" as an assignment, not just a valid VAR=value. In
+# `env FOO=1 ~/.claude/bin/x=y curl evil` env exports `~/.claude/bin/x=y` and
+# runs curl, while strip_env_prefix would judge `~/.claude/bin/x=y` as the
+# command. Both routes therefore refuse a command word that contains "=".
+
+
+def _env_command_word_is_judged(tokens):
+    """True if the word env will exec is the word strip_env_prefix leaves first.
+
+    `tokens` is what follows env's own options. Leading VAR=value tokens are
+    skipped (a dangerous one is caught later by strip_env_prefix); the next
+    token is env's command, and it must not contain "=", or env would take it
+    as one more assignment. False when no command follows.
+    """
+    for token in tokens:
+        if not ENV_ASSIGNMENT_RE.match(token):
+            return "=" not in token
+    return False
 
 
 def strip_env_c_prefix(segment_tokens):
     """Drop a leading `env [-C <dir>|--chdir=<dir>]` when <dir> is inside
     ~/Projects, returning the command that follows.
 
-    Returns the tokens unchanged when this is not an `env -C` invocation, when
-    the directory is outside the root, or when no command follows — in each of
-    those cases the segment's first token stays "env", which is not on
-    ALLOWLIST, so the segment is not approved. `env` with only assignments and
-    no -C is therefore left exactly as it was before this rule existed.
+    `env VAR=val... <cmd>` without -C takes a second route: only the `env`
+    token is dropped, and the remaining `VAR=val... <cmd>` is the bare
+    assignment form that strip_env_prefix already handles, dangerous
+    assignments included.
+
+    Returns the tokens unchanged when the directory is outside the root, when
+    no command follows (`env FOO=bar` would otherwise reduce to empty, i.e. to
+    "safe"), when any other env option appears (-S re-tokenises a string,
+    -i/-u are out of scope, -- ends option parsing), or when the command word
+    contains "=" (env would export it and run the next word instead; see
+    _env_command_word_is_judged). In each of those cases the
+    segment's first token stays "env", which is not on ALLOWLIST, so the
+    segment is not approved.
     """
     if not segment_tokens or segment_tokens[0] != "env":
         return segment_tokens
@@ -305,10 +341,13 @@ def strip_env_c_prefix(segment_tokens):
     elif index < len(rest) and rest[index].startswith("--chdir="):
         directory = rest[index].split("=", 1)[1]
         remainder = rest[index + 1:]
+    elif 0 < index < len(rest) and not rest[index].startswith("-"):
+        # Assignments followed by a command: keep them for strip_env_prefix.
+        return rest if _env_command_word_is_judged(rest) else segment_tokens
     else:
         return segment_tokens
 
-    if not directory or not remainder:
+    if not directory or not _env_command_word_is_judged(remainder):
         return segment_tokens
 
     if not _is_inside_projects_root(directory):
@@ -743,7 +782,9 @@ def is_segment_safe(segment_tokens):
 
     `env -C <dir>` is stripped BEFORE plain VAR=value assignments: the
     remainder of an `env -C <dir> FOO=bar git status` still carries its own
-    assignments, which strip_env_prefix then removes as usual. A model-typed
+    assignments, which strip_env_prefix then removes as usual. The same step
+    turns `env FOO=bar git status` into `FOO=bar git status`, so the plain env
+    spelling is judged exactly like the bare assignment form. A model-typed
     `rtk` / `rtk proxy` prefix is stripped last, so `FOO=1 rtk grep ...` is
     judged as `grep ...`.
     """

