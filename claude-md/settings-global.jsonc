@@ -175,6 +175,19 @@
             "command": "~/.claude/bin/hook-post-commit-trailer.sh"
           }
         ]
+      },
+      {
+        // Removes the [branch "<name>"] section a sandboxed `git branch -d`
+        // leaves behind: the sandbox keeps .git/config read-only (a writable
+        // config is a sandbox escape), hooks run outside it. Only sections
+        // whose refs/heads/<name> no longer exists are removed.
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-post-prune-branch-config.sh"
+          }
+        ]
       }
     ]
   }
