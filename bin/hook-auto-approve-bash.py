@@ -18,9 +18,11 @@ import os
 import re
 import shlex
 import sys
+from collections import namedtuple
 
 PROJECTS_ROOT = os.path.expanduser("~/Projects")
-CLAUDE_BIN = os.path.expanduser("~/.claude/bin")
+CLAUDE_HOME = os.path.expanduser("~/.claude")
+CLAUDE_BIN = os.path.join(CLAUDE_HOME, "bin")
 
 # Commands already unconditionally allowed standalone in settings.json,
 # plus echo/sleep/test/true for harmless chain glue.
@@ -317,6 +319,128 @@ def strip_env_c_prefix(segment_tokens):
     return remainder
 
 
+# --- settings Bash(...) rules ---------------------------------------------------
+# The user's own permission rules, as Claude Code reads them from the settings
+# files. The hook consults them only for the inner command of a command-running
+# wrapper (below): a bare command a settings rule allows runs prompt-free, and
+# the hook's "ask" would otherwise override that rule behind a wrapper.
+
+SETTINGS_FILENAMES = ("settings.json", "settings.local.json")
+# Claude Code reads the user settings from here instead of ~/.claude when set.
+CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+PROJECT_SETTINGS_DIR = ".claude"
+BASH_RULE_PREFIX = "Bash("
+BASH_RULE_SUFFIX = ")"
+WILDCARD = "*"
+
+BashRules = namedtuple("BashRules", ("allow", "deny", "ask"))
+NO_BASH_RULES = BashRules((), (), ())
+
+
+def _read_json_object(path):
+    """The JSON object at `path`, or None when it is missing, unreadable or
+    not an object. A broken settings file only loses that scope's rules."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def load_bash_rules(project_dir, claude_home=CLAUDE_HOME):
+    """Union the `permissions.allow/deny/ask` lists of the user settings
+    (settings.json and settings.local.json in `claude_home`) and the project
+    settings in `<project_dir>/.claude/`. Scopes that do not exist, and entries
+    that are not strings, are skipped."""
+    paths = [os.path.join(claude_home, name) for name in SETTINGS_FILENAMES]
+    if project_dir:
+        paths += [
+            os.path.join(project_dir, PROJECT_SETTINGS_DIR, name)
+            for name in SETTINGS_FILENAMES
+        ]
+
+    collected = {field: [] for field in BashRules._fields}
+    for path in paths:
+        data = _read_json_object(path)
+        permissions = data.get("permissions") if data else None
+        if not isinstance(permissions, dict):
+            continue
+        for field, rules in collected.items():
+            entries = permissions.get(field)
+            if isinstance(entries, list):
+                rules.extend(entry for entry in entries if isinstance(entry, str))
+
+    return BashRules(*(tuple(collected[field]) for field in BashRules._fields))
+
+
+def _bash_pattern_body(rule):
+    """The inner pattern of a Bash(...) rule, or None for any other rule."""
+    if rule == "Bash":
+        return WILDCARD
+    if rule.startswith(BASH_RULE_PREFIX) and rule.endswith(BASH_RULE_SUFFIX):
+        return rule[len(BASH_RULE_PREFIX):-len(BASH_RULE_SUFFIX)]
+    return None
+
+
+def matches_bash_rule(command, rule):
+    """True if the full command string `command` is covered by `rule`.
+
+    Grammar (docs.claude.com/en/permissions):
+      Bash / Bash(*)      -> everything
+      Bash(cmd:*)         -> same as Bash(cmd *)
+      Bash(cmd *)         -> `cmd`, alone or followed by arguments
+      Bash(cmd*)          -> literal prefix, no word boundary
+      Bash(exact string)  -> exactly that command
+    Only `*` is a wildcard; it may appear anywhere and matches any text,
+    including `/`. A leading `~` in the pattern is expanded, as it is in a
+    command's first word.
+    """
+    pattern = _bash_pattern_body(rule)
+    if pattern is None:
+        return False
+    if pattern.endswith(":" + WILDCARD):
+        pattern = pattern[:-2] + " " + WILDCARD
+
+    pattern = os.path.expanduser(pattern)
+    regex = ".*".join(re.escape(part) for part in pattern.split(WILDCARD))
+    if pattern.endswith(" " + WILDCARD):
+        # `cmd *` also matches `cmd` with no arguments.
+        regex = regex[: -len(re.escape(" ") + ".*")] + "(?: .*)?"
+    return re.fullmatch(regex, os.path.expanduser(command), re.DOTALL) is not None
+
+
+def matches_any_bash_rule(command, rules):
+    return any(matches_bash_rule(command, rule) for rule in rules)
+
+
+def _settings_command(tokens):
+    """The command string a settings rule is matched against."""
+    return " ".join(tokens)
+
+
+def is_blocked_by_settings(tokens, rules):
+    """True if a deny or ask rule matches the command `tokens`."""
+    command = _settings_command(tokens)
+    return matches_any_bash_rule(command, rules.deny) or matches_any_bash_rule(
+        command, rules.ask
+    )
+
+
+def is_allowed_by_settings(tokens, rules):
+    """True if an allow rule, and no deny or ask rule, matches `tokens`.
+
+    Never for a command that names a command-running wrapper anywhere: those
+    are judged by their own inner command, and `Bash(~/.claude/bin/*)` would
+    otherwise approve whatever the nested wrapper runs.
+    """
+    if any(command_running_wrapper(token) for token in tokens):
+        return False
+    if is_blocked_by_settings(tokens, rules):
+        return False
+    return matches_any_bash_rule(_settings_command(tokens), rules.allow)
+
+
 # --- command-running wrappers ---------------------------------------------------
 # Most ~/.claude/bin/ scripts do one fixed thing, but a few run whatever command
 # they are handed. Unlike env -C they ARE matched by an allow rule on their own,
@@ -409,9 +533,10 @@ def command_running_wrapper(token):
     return name if name in COMMAND_RUNNING_WRAPPERS else None
 
 
-def unapprovable_wrapper(command):
+def unapprovable_wrapper(command, rules=NO_BASH_RULES):
     """The name of the first command-running wrapper mentioned in a segment of
-    `command` that the hook will not approve, or None.
+    `command` that the hook will not approve under the settings `rules`, or
+    None.
 
     Per segment, not per command: permission rules are matched per segment of a
     chain, so `git status && repeat-cmd.sh 1 curl x` would otherwise be approved
@@ -433,7 +558,7 @@ def unapprovable_wrapper(command):
         mentioned = next(
             (name for name in map(command_running_wrapper, tokens) if name), None
         )
-        if mentioned and not is_segment_safe(tokens):
+        if mentioned and not is_segment_safe(tokens, rules):
             return mentioned
 
     return None
@@ -791,11 +916,15 @@ def command_has_cd_prefix_chain(command):
     return False
 
 
-def is_segment_safe(segment_tokens):
+def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
     """A segment is safe if, after stripping cd/env prefixes, its first
     token is on ALLOWLIST or a ~/.claude/bin/ script — with no command
     substitution anywhere in it (git commit is the sole carve-out, since
     git-commit.sh already handles quoting/heredoc bodies safely).
+
+    A command-running wrapper is safe when its inner command is: safe by these
+    same rules, or allowed by the settings `rules`. A settings deny or ask rule
+    on the inner command blocks it either way.
 
     `env -C <dir>` is stripped BEFORE plain VAR=value assignments: the
     remainder of an `env -C <dir> FOO=bar git status` still carries its own
@@ -834,7 +963,9 @@ def is_segment_safe(segment_tokens):
     wrapper = command_running_wrapper(first)
     if wrapper:
         inner = COMMAND_RUNNING_WRAPPERS[wrapper](stripped[1:])
-        return inner is not None and is_segment_safe(inner)
+        if inner is None or is_blocked_by_settings(inner, rules):
+            return False
+        return is_segment_safe(inner, rules) or is_allowed_by_settings(inner, rules)
 
     if (
         first not in ALLOWLIST
@@ -867,15 +998,16 @@ def command_has_sed_file_read(command):
     )
 
 
-def is_command_safe(command):
-    """True if every segment of `command` is safe. False (never raises)
-    on unparseable input — the caller falls through to the normal prompt."""
+def is_command_safe(command, rules=NO_BASH_RULES):
+    """True if every segment of `command` is safe under the settings `rules`.
+    False (never raises) on unparseable input — the caller falls through to
+    the normal prompt."""
     try:
         segments = split_segments(command)
     except ValueError:
         return False
 
-    return all(is_segment_safe(segment) for segment in segments)
+    return all(is_segment_safe(segment, rules) for segment in segments)
 
 
 def main():
@@ -962,9 +1094,15 @@ def main():
         print(json.dumps(output))
         return 0
 
+    # The project settings are those of the directory the command runs in.
+    rules = load_bash_rules(
+        payload.get("cwd") or os.getcwd(),
+        claude_home=os.environ.get(CONFIG_DIR_ENV) or CLAUDE_HOME,
+    )
+
     # "ask", not silence: Bash(~/.claude/bin/*) would approve the wrapper
     # without a prompt, whatever command it was handed.
-    wrapper = unapprovable_wrapper(command)
+    wrapper = unapprovable_wrapper(command, rules)
     if wrapper:
         output = {
             "hookSpecificOutput": {
@@ -981,7 +1119,7 @@ def main():
         print(json.dumps(output))
         return 0
 
-    if is_command_safe(command):
+    if is_command_safe(command, rules):
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",

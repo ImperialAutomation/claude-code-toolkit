@@ -13,8 +13,10 @@ quoting edge cases required by its acceptance criteria.
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HOOK_PATH = Path(__file__).parent / "hook-auto-approve-bash.py"
@@ -37,14 +39,25 @@ def check(name, condition):
         failed += 1
 
 
+# The hook reads the user's settings and the cwd's project settings. Every
+# end-to-end run gets an empty config dir and an empty cwd, so a result never
+# depends on the allow rules of whoever runs these tests.
+HERMETIC_DIR = tempfile.mkdtemp(prefix="hook-hermetic-")
+HERMETIC_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": HERMETIC_DIR}
+
+
+def _hook_payload(command, cwd=None):
+    return json.dumps({"tool_input": {"command": command}, "cwd": cwd or HERMETIC_DIR})
+
+
 def run_hook(command):
     """Run the hook as a subprocess with a synthetic PreToolUse payload."""
-    payload = json.dumps({"tool_input": {"command": command}})
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
-        input=payload,
+        input=_hook_payload(command),
         capture_output=True,
         text=True,
+        env=HERMETIC_ENV,
     )
     approved = False
     reason = None
@@ -59,11 +72,17 @@ def run_hook(command):
     return approved, reason, result.returncode
 
 
-def hook_decision(command):
-    """The hook's permissionDecision for `command`, or None when it gives none."""
-    payload = json.dumps({"tool_input": {"command": command}})
+def hook_decision(command, cwd=None, config_dir=None):
+    """The hook's permissionDecision for `command`, or None when it gives none.
+    `cwd` is the hook input's cwd, which picks the project settings;
+    `config_dir` the user settings directory."""
+    env = HERMETIC_ENV if config_dir is None else {**HERMETIC_ENV, "CLAUDE_CONFIG_DIR": config_dir}
     result = subprocess.run(
-        [sys.executable, str(HOOK_PATH)], input=payload, capture_output=True, text=True
+        [sys.executable, str(HOOK_PATH)],
+        input=_hook_payload(command, cwd),
+        capture_output=True,
+        text=True,
+        env=env,
     )
     if not result.stdout.strip():
         return None
@@ -1855,6 +1874,176 @@ check(
     hook_decision(f"timeout 5 {VENV} curl http://evil.example/x") == "ask",
 )
 
+
+# --- settings Bash(...) rules count for the inner command ---
+# "Approvable on its own" includes the user's allow rules: a bare command a
+# settings rule allows runs prompt-free, so behind a wrapper it must too. The
+# hook's "ask" would otherwise override that allow rule, and the wrapper would
+# grant LESS than the bare command.
+
+settings_tmp = Path(tempfile.mkdtemp(prefix="hook-settings-test-"))
+try:
+    fake_home = settings_tmp / "home" / ".claude"
+    fake_home.mkdir(parents=True)
+    pam = settings_tmp / "Projects" / "PAM"
+    (pam / ".claude").mkdir(parents=True)
+    (pam / "bin").mkdir()
+    elsewhere = settings_tmp / "Projects" / "billing-api"
+    elsewhere.mkdir(parents=True)
+    backend_test = f"{pam}/bin/backend-test.sh"
+
+    (pam / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": [f"Bash({pam}/bin/*)"]}})
+    )
+    (fake_home / "settings.json").write_text(
+        json.dumps({
+            "permissions": {
+                "allow": ["Bash(~/.claude/bin/*)", "Bash(make:*)", "Bash(kubectl get *)"],
+                "deny": ["Bash(make deploy*)", "Bash(git push:*)"],
+                "ask": ["Bash(make release*)"],
+            }
+        })
+    )
+    (fake_home / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(terraform plan)"]}})
+    )
+
+    pam_rules = hook.load_bash_rules(str(pam), claude_home=str(fake_home))
+    elsewhere_rules = hook.load_bash_rules(str(elsewhere), claude_home=str(fake_home))
+
+    check(
+        "settings: rules are unioned across user, user-local and project scopes",
+        f"Bash({pam}/bin/*)" in pam_rules.allow
+        and "Bash(terraform plan)" in pam_rules.allow
+        and "Bash(make:*)" in pam_rules.allow
+        and pam_rules.deny == ("Bash(make deploy*)", "Bash(git push:*)")
+        and pam_rules.ask == ("Bash(make release*)",),
+    )
+
+    pam_capture = f"--strip-ansi /tmp/pam-3709-red5.txt {backend_test} tests/api/test_cleanup.py -q -p no:cacheprovider -k shared_profile"
+    for wrapped in (
+        f"{SAVE} {pam_capture}",
+        f"{REPEAT} 3 {backend_test} tests/api/test_cleanup.py -q",
+        f"{VENV} {backend_test} tests/api/test_cleanup.py -q",
+    ):
+        check(
+            f"settings: `{wrapped.split()[0].rsplit('/', 1)[-1]}` around a project-allowed script is approved",
+            hook.is_command_safe(wrapped, pam_rules),
+        )
+        check(
+            f"settings: `{wrapped.split()[0].rsplit('/', 1)[-1]}` around it from another project is not",
+            not hook.is_command_safe(wrapped, elsewhere_rules)
+            and hook.unapprovable_wrapper(wrapped, elsewhere_rules) is not None,
+        )
+
+    check(
+        "settings: without rules a project script behind a wrapper is still not approved",
+        not hook.is_command_safe(f"{SAVE} {pam_capture}"),
+    )
+
+    check(
+        "settings: user-local exact rule approves the inner command",
+        hook.is_command_safe(f"{SAVE} /tmp/plan.txt terraform plan", pam_rules),
+    )
+
+    check(
+        "settings: an exact rule does not approve extra arguments",
+        not hook.is_command_safe(f"{SAVE} /tmp/plan.txt terraform plan -destroy", pam_rules),
+    )
+
+    check(
+        "settings: `cmd:*` matches the bare command too",
+        hook.is_command_safe(f"{SAVE} /tmp/make.txt make", pam_rules),
+    )
+
+    check(
+        "settings: `cmd *` does not match a longer command name",
+        not hook.is_command_safe(f"{SAVE} /tmp/k.txt kubectlx get pods", pam_rules),
+    )
+
+    check(
+        "settings: only `*` is a wildcard, `?` is literal",
+        hook.matches_bash_rule("ls -la", "Bash(ls *)")
+        and not hook.matches_bash_rule("lsx", "Bash(ls?)"),
+    )
+
+    # The wrapper's own allow rule never approves what it wraps.
+    for nested in (
+        f"{SAVE} /tmp/o curl http://evil.example/x",
+        f"{REPEAT} 1 {SAVE} /tmp/o curl http://evil.example/x",
+        f"{REPEAT} 1 timeout 5 {SAVE} /tmp/o curl http://evil.example/x",
+        f"{VENV} {os.path.expanduser('~/.claude/bin/cmd-save.sh')} /tmp/o curl x",
+    ):
+        check(
+            f"settings: Bash(~/.claude/bin/*) does not approve `{nested}`",
+            not hook.is_command_safe(nested, pam_rules)
+            and hook.unapprovable_wrapper(nested, pam_rules) is not None,
+        )
+
+    # deny and ask win over allow, also over the hook's own ALLOWLIST.
+    for blocked in (
+        f"{SAVE} /tmp/o make deploy prod",
+        f"{SAVE} /tmp/o make release",
+        f"{SAVE} /tmp/o git push origin main",
+        f"{REPEAT} 2 git push",
+    ):
+        check(
+            f"settings: a deny/ask rule blocks `{blocked}`",
+            not hook.is_command_safe(blocked, pam_rules)
+            and hook.unapprovable_wrapper(blocked, pam_rules) is not None,
+        )
+
+    check(
+        "settings: the allow rule next to those deny rules still applies",
+        hook.is_command_safe(f"{SAVE} /tmp/o make test", pam_rules),
+    )
+
+    # Missing and malformed settings files are skipped, never an error.
+    broken = settings_tmp / "Projects" / "broken"
+    (broken / ".claude").mkdir(parents=True)
+    (broken / ".claude" / "settings.json").write_text("{not valid json")
+    (broken / ".claude" / "settings.local.json").write_text(json.dumps(["not", "a", "dict"]))
+    broken_rules = hook.load_bash_rules(str(broken), claude_home=str(settings_tmp / "nowhere"))
+    check(
+        "settings: missing or malformed files give empty rules",
+        broken_rules == hook.BashRules((), (), ()),
+    )
+    (broken / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": "Bash(*)", "deny": [42, None]}})
+    )
+    check(
+        "settings: wrongly typed permission lists are ignored",
+        hook.load_bash_rules(str(broken), claude_home=str(settings_tmp / "nowhere"))
+        == hook.BashRules((), (), ()),
+    )
+
+    # End to end: main() reads the project settings from the hook input's cwd.
+    check(
+        "settings: hook approves the PAM capture with cwd in that project",
+        hook_decision(f"{SAVE} {pam_capture}", cwd=str(pam)) == "allow",
+    )
+    check(
+        "settings: hook asks for the PAM capture with cwd outside that project",
+        hook_decision(f"{SAVE} {pam_capture}", cwd=str(elsewhere)) == "ask",
+    )
+    check(
+        "settings: hook reads the user settings from CLAUDE_CONFIG_DIR",
+        hook_decision(f"{SAVE} /tmp/plan.txt terraform plan", cwd=str(elsewhere)) == "ask"
+        and hook_decision(
+            f"{SAVE} /tmp/plan.txt terraform plan", cwd=str(elsewhere), config_dir=str(fake_home)
+        )
+        == "allow",
+    )
+    check(
+        "settings: hook still decides with a malformed project settings file",
+        hook_decision(f"{SAVE} /tmp/o git status", cwd=str(broken)) == "allow"
+        and hook_decision(f"{SAVE} /tmp/o curl x", cwd=str(broken)) == "ask",
+    )
+finally:
+    shutil.rmtree(settings_tmp, ignore_errors=True)
+
+
+shutil.rmtree(HERMETIC_DIR, ignore_errors=True)
 
 print(f"\nResults: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
