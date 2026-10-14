@@ -85,7 +85,7 @@ ran against.
 - Use Write/Edit for file creation and modification — not Bash (echo, cat, sed, awk)
 - Bash is for: git, gh, npm, npx, docker, python, ruff, uv, and `~/.claude/bin/` scripts only
 - For tests, use the project's documented test entry point and its path convention (project CLAUDE.md, test docs); only when the project names none, fall back to `~/.claude/bin/project-test.sh` with absolute paths under `<worktree>`
-- For other venv binaries (python, alembic, pip), use `~/.claude/bin/venv-run.sh <cmd>`
+- For other venv binaries (python, alembic, ruff), use `~/.claude/bin/venv-run.sh <cmd>`
 - Never use `python3 -c` for file operations — use Read/Edit/Grep instead
 
 ## Phase 1: Discovery & Planning

@@ -38,12 +38,16 @@ Twee regels die ALTIJD gelden:
 VERPLICHT `~/.claude/bin/` wrapper scripts gebruiken voor venv binaries:
 
     ~/.claude/bin/project-test.sh [pytest-args...]    # pytest
-    ~/.claude/bin/venv-run.sh python -c "..."          # python, pip, alembic, etc.
+    ~/.claude/bin/venv-run.sh python -c "..."          # python, alembic, ruff, etc.
 
 Deze scripts:
 - Matchen `Bash(~/.claude/bin/*)` (altijd allowed, geen permissieprompt)
 - Detecteren automatisch de project venv (.venv, backend/.venv, etc.)
 - Valideren dat je binnen ~/Projects/ draait
+
+`venv-run.sh` is een wrapper die een commando uitvoert (zie hieronder): `python`,
+`pytest`, `alembic`, `ruff`, `mypy` en `uv` gaan zonder prompt, `pip` of
+`python3` prompten net als hun kale vorm.
 
 **Meerdere worktrees: zeg welke boom je bedoelt.** De venv wordt gezocht vanaf de
 projectroot, en welke root dat is hangt af van wat je meegeeft:
@@ -128,6 +132,30 @@ commando wordt er niet door witgewassen (`env -C <projectdir> ./start.sh` prompt
 gewoon), en een `env -C /etc cat passwd` evenmin. `bash -c "cd x && ..."` lost
 niets op; dat is net zo ongematcht als de kale `cd`.
 
+`env -u NAME` (een variabele weghalen, bv. `env -u VIRTUAL_ENV uv run ...`) en
+`env FOO=1 <cmd>` gaan op dezelfde manier door, los of gecombineerd met `-C`.
+Andere `env`-opties (`-i`, `-S`, `--`) en een `-u` ná een `FOO=1` prompten gewoon.
+
+### Wrappers die een commando uitvoeren
+
+Drie scripts voeren het commando uit dat je ze geeft: `repeat-cmd.sh`,
+`cmd-save.sh` en `venv-run.sh` (dat zonder venv terugvalt op PATH). Ze matchen
+`Bash(~/.claude/bin/*)`, dus die regel alleen zou elk commando erachter stil
+goedkeuren. **Enforced, not advisory: een wrapper geeft niets wat het kale
+commando niet heeft.** `hook-auto-approve-bash.py` beoordeelt het commando na de
+opties van de wrapper met dezelfde regels als een los commando, en antwoordt
+`ask` als het niet goedgekeurd zou worden of als de aanroep niet de
+gedocumenteerde vorm heeft. Dat werkt recursief: `repeat-cmd.sh 1
+~/.claude/bin/cmd-save.sh /tmp/o curl x` prompt, `... git status` niet.
+
+Omgekeerd geeft een wrapper ook niet *minder*: een commando dat kaal mag via een
+eigen `Bash(...)`-allowregel (in `~/.claude/settings*.json` of in de
+`.claude/settings*.json` van het project waar het draait) mag ook achter de
+wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/PAM/bin/backend-test.sh ...`
+door in PAM, omdat `Bash(/home/jan/Projects/PAM/bin/*)` daar staat. Een deny- of
+ask-regel op het commando wint. De allowregel van de wrapper zelf
+(`Bash(~/.claude/bin/*)`) telt nooit voor wat hij uitvoert.
+
 ## Code Quality
 
 - If ANY verification fails, STOP and reassess
@@ -142,7 +170,7 @@ niets op; dat is net zo ongematcht als de kale `cd`.
 ## Available Utilities
 
 - **Running tests** (`~/.claude/bin/project-test.sh`): see "Bash Permissies" section above
-- **Venv commands** (`~/.claude/bin/venv-run.sh <cmd> [args]`): run any venv binary (python, pip, alembic, etc.)
+- **Venv commands** (`~/.claude/bin/venv-run.sh <cmd> [args]`): run any venv binary (python, alembic, ruff, etc.)
 - **Project audits** (`/audit`): run one or all project audits from `~/.claude/bin/`:
   - `i18n-audit.py` — missing/unused/inconsistent translation keys (auto-detects framework)
   - `env-audit.sh` — .env vs .env.example sync, empty values, secrets tracked by git
@@ -166,7 +194,7 @@ niets op; dat is net zo ongematcht als de kale `cd`.
   - Use Write to create new files (auto-creates parent directories) — not `mkdir` + Bash
   - Use `git rm` to delete files — not `rm`
 - Bash tool: always save API responses to a file first, then read the file. Use `~/.claude/bin/gh-save.sh /tmp/<project>-<purpose>-<nr>.json <gh-args>` to save `gh` output (shell redirects like `>` trigger permission prompts).
-- **Output van een ander commando naar een bestand: `~/.claude/bin/cmd-save.sh <outfile> <commando> [args...]`.** Een redirect verslaat permissiematching: de regel matcht op het eerste woord, dus `docker exec ... > /tmp/out` valt niet meer onder `Bash(docker *)` en prompt élke keer. De wrapper is één commando en matcht `Bash(~/.claude/bin/*)`. Hij geeft de exit-status van het commando zélf door (een mislukt commando schrijft anders een bestand en lijkt geslaagd, waarna je een foutmelding als data leest) en print het aantal bytes (een capture van 0 bytes is onzichtbaar tot iets verderop vreemd doet). stderr gaat standaard níet mee in het bestand, want een waarschuwing midden in een JSON-capture maakt die onparseerbaar; gebruik `--stderr merge` als de capture juist bedoeld is om een fout te diagnosticeren. Typisch voor database-, container- en cluster-CLI's: `cmd-save.sh /tmp/<project>-pods-<nr>.json kubectl get pods -o json`.
+- **Output van een ander commando naar een bestand: `~/.claude/bin/cmd-save.sh <outfile> <commando> [args...]`.** Een redirect verslaat permissiematching: de regel matcht op het eerste woord, dus `docker exec ... > /tmp/out` valt niet meer onder `Bash(docker *)` en prompt élke keer. De wrapper is één commando en matcht `Bash(~/.claude/bin/*)`. Hij geeft de exit-status van het commando zélf door (een mislukt commando schrijft anders een bestand en lijkt geslaagd, waarna je een foutmelding als data leest) en print het aantal bytes (een capture van 0 bytes is onzichtbaar tot iets verderop vreemd doet). stderr gaat standaard níet mee in het bestand, want een waarschuwing midden in een JSON-capture maakt die onparseerbaar; gebruik `--stderr merge` als de capture juist bedoeld is om een fout te diagnosticeren. Typisch voor database-, container- en cluster-CLI's: `cmd-save.sh /tmp/<project>-pods-<nr>.json kubectl get pods -o json`. Goedgekeurd alleen als `<commando>` dat op zichzelf ook is (zie "Wrappers die een commando uitvoeren").
 - **Kleurcodes in opgeslagen output: `~/.claude/bin/strip-ansi.sh <file> [<outfile>]`, nooit `| sed 's/\x1b\[[0-9;]*m//g'`.** Test-runner-output (vitest, pytest met kleur) zit vol ANSI-escapes, en een `grep ... | sed ... | head`-keten prompt élke keer op het `sed`-segment. Het script schrijft een schone kopie naar `<outfile>` (standaard `<file>.clean`) en laat de input ongemoeid; lees die kopie daarna met Read of Grep, dan verdwijnt de keten. Het verwijdert ook de cursorcodes en hyperlinks van vitest die die sed-regex laat staan. Maak je de capture zelf, gebruik dan meteen `cmd-save.sh --strip-ansi <outfile> <commando>`, dan is het bestand vanaf het begin schoon.
 - Never use command substitution with pipes for API data
 - Never write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc). These don't match permission patterns like `Bash(git *)`. Instead: use the Write tool to write to `/tmp/` with a project+nr-specific name (see "Tmp-bestandsnamen"), then reference the file in Bash (e.g., `git commit -F /tmp/acme-webshop-commit-msg-42.txt`, `gh issue create --body-file /tmp/acme-webshop-issue-body-42.md`).
@@ -179,7 +207,7 @@ niets op; dat is net zo ongematcht als de kale `cd`.
 - Never wait for a file with `until <conditie>; do sleep N; done`. Dat is een compound command, dus permissiematching faalt op het tweede segment en het prompt elke keer. Gebruik `~/.claude/bin/wait-for-pattern.sh [--newer-than <epoch>] <file> <extended-regex> [timeout-seconds] [poll-seconds]`: die matcht `Bash(~/.claude/bin/*)` en draait promptloos; het bestand hoeft nog niet te bestaan. Voor containers is `~/.claude/bin/wait-for-healthy.sh <container>` het equivalent.
 
   **Wacht je op een bestand met een vaste naam, dan `--newer-than` meegeven.** Een voortgangsbestand per taak wordt door élke run van die taak hergebruikt, en niets leegt het tussendoor: de tweede run matcht binnen een seconde de `DONE` van de eerste, en je rapporteert het resultaat van de vorige run als dat van de nieuwe. Een volledig, plausibel, verkeerd antwoord, en niets in het bestand zegt welke run het schreef; exit 0 ook niet, de mtime wel. Leg `SPAWNED_AT=$(date +%s)` vast vóór je het proces start en geef die mee: alleen een write ná dat moment kan het patroon dan vervullen. **Enforced, not advisory:** `hook-auto-approve-bash.py` denyt de bestandsvormen (`[ -f FILE ]`, `test -f FILE`, `grep PATTERN FILE`) met een hint. Lussen die op iets anders wachten (HTTP-status, containertoestand, exit-status) worden niet geraakt en vallen door naar een normale prompt.
-- **Een commando N keer herhalen (warm/koud-metingen): `~/.claude/bin/repeat-cmd.sh <count> <commando> [args...]`, nooit `for i in 1 2 3; do <cmd>; done`.** Het `for`-segment matcht geen enkele allow-regel, dus elke meting prompt. De wrapper draait het commando `<count>` keer, gooit de output weg, stopt bij de eerste exit ≠ 0 (met het nummer van die run, zijn exit-status en zijn stderr) en print één regel met aantal runs, totale tijd en tijd per run. De reset en de stats-query blijven losse, enkele commando's: `repeat-cmd.sh 10 docker exec <db> psql ... -c "<query>"`. **Enforced, not advisory:** omdat `Bash(~/.claude/bin/*)` de wrapper zelf al toestaat, keurt `hook-auto-approve-bash.py` hem alleen goed als `<commando>` op zichzelf goedgekeurd zou worden (dezelfde regel als `env -C`), en antwoordt anders met `ask`, zodat hij geen witwasroute wordt.
+- **Een commando N keer herhalen (warm/koud-metingen): `~/.claude/bin/repeat-cmd.sh <count> <commando> [args...]`, nooit `for i in 1 2 3; do <cmd>; done`.** Het `for`-segment matcht geen enkele allow-regel, dus elke meting prompt. De wrapper draait het commando `<count>` keer, gooit de output weg, stopt bij de eerste exit ≠ 0 (met het nummer van die run, zijn exit-status en zijn stderr) en print één regel met aantal runs, totale tijd en tijd per run. De reset en de stats-query blijven losse, enkele commando's: `repeat-cmd.sh 10 docker exec <db> psql ... -c "<query>"`. Goedgekeurd alleen als `<commando>` dat op zichzelf ook is (zie "Wrappers die een commando uitvoeren").
 - Voor HTTP-smoketests: `~/.claude/bin/http-status.sh [--body] [--max-time SECS] <url> [url...]`. De directe vorm (`curl -s -o /dev/null -w "%{http_code}\n" <url>`) wil je zelden maar één keer, en twee ervan op een regel is een compound command: alles na de `;` of `&&` blijft ongematcht en prompt élke keer, ook met een brede `Bash(curl *)`-regel. De wrapper is één commando en matcht `Bash(~/.claude/bin/*)`. Eén URL geeft alleen de status (past in een `if`), meerdere geven `<status>  <url>` per regel. Een 4xx/5xx is een geldig antwoord (exit 0); alleen transportfouten (DNS, connection refused, timeout) geven `ERR` en exit 1. Voor auth-headers, retries of JSON-parsing roep je `curl` gewoon direct aan; wachten tot een service omhoog is doe je met `wait-for-pattern.sh` of `wait-for-healthy.sh`.
 - For batch operations on multiple issues, always use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`). Never use `for` loops or chained `&&` commands to repeat `gh` calls.
 

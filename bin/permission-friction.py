@@ -46,7 +46,6 @@ prefix.
 """
 
 import argparse
-import fnmatch
 import importlib.util
 import json
 import os
@@ -65,82 +64,24 @@ PROJECTS_TRANSCRIPTS_DIR = CLAUDE_HOME / "projects"
 REJECTION_MARKER = "The user doesn't want to proceed with this tool use"
 
 
-def _read_json_file(path):
-    """Return the parsed JSON object at `path`, or None if missing/invalid.
-
-    Missing or malformed settings files are not a hard error — the merge
-    just proceeds without that scope's rules.
-    """
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-
-
 def load_allow_rules(project_dir):
     """Merge `permissions.allow`/`permissions.deny` across every settings
-    scope that actually exists: user global, project shared, project local.
+    scope that actually exists: user global and local, project shared and
+    local. The hook reads the very same files, so both agree on what a rule
+    covers.
 
     Returns (allow_patterns, deny_patterns) — flat lists of raw rule
     strings (e.g. "Bash(git *)"), unioned across scopes. Precedence between
     scopes does not matter here: we only need "is this command covered by
     ANY allow rule," and deny rules always win regardless of origin.
     """
-    candidate_files = [
-        CLAUDE_HOME / "settings.json",
-        Path(project_dir) / ".claude" / "settings.json",
-        Path(project_dir) / ".claude" / "settings.local.json",
-    ]
-
-    allow = []
-    deny = []
-    for path in candidate_files:
-        data = _read_json_file(path)
-        if not data:
-            continue
-        permissions = data.get("permissions", {})
-        allow.extend(permissions.get("allow", []))
-        deny.extend(permissions.get("deny", []))
-
-    return allow, deny
+    rules = _hook.load_bash_rules(project_dir, claude_home=str(CLAUDE_HOME))
+    return list(rules.allow), list(rules.deny)
 
 
-def _bash_pattern_body(rule):
-    """Return the inner pattern of a Bash(...) rule, or None if `rule` is
-    not a Bash rule at all (e.g. "Write", "Read(~/.claude/**)")."""
-    if rule == "Bash":
-        return "*"
-    if rule.startswith("Bash(") and rule.endswith(")"):
-        return rule[len("Bash("):-1]
-    return None
-
-
-def matches_bash_rule(command, rule):
-    """True if `command` (a full command string) is covered by a single
-    Bash permission `rule`.
-
-    Grammar (see docs.claude.com/en/permissions):
-      Bash / Bash(*)      -> matches everything
-      Bash(cmd *)         -> first token "cmd", "*" matches rest incl. none
-      Bash(cmd:*)         -> equivalent to "Bash(cmd *)" (colon shorthand)
-      Bash(cmd*)          -> literal prefix match, no word boundary
-      Bash(exact string)  -> exact full-command match, no wildcard
-    Wildcards may also appear mid-pattern (e.g. "Bash(git * main)"); these
-    are handled generically via fnmatch after the colon-shorthand rewrite.
-    """
-    pattern = _bash_pattern_body(rule)
-    if pattern is None:
-        return False
-
-    if pattern.endswith(":*"):
-        pattern = pattern[:-2] + " *"
-
-    return fnmatch.fnmatchcase(command, pattern)
-
-
-def command_matches_any_rule(command, rules):
-    return any(matches_bash_rule(command, rule) for rule in rules)
+# Rule matching is the hook's, so a report never disagrees with a decision.
+matches_bash_rule = _hook.matches_bash_rule
+command_matches_any_rule = _hook.matches_any_bash_rule
 
 
 # Friction reasons, most specific first — used both to explain a verdict
