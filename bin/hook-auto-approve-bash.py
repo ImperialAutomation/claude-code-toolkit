@@ -272,8 +272,6 @@ def strip_cd_prefix(segment_tokens):
 # merits by the very same rules. Every guard the hook applies elsewhere (git -c,
 # find -exec, command substitution) still applies, because the remainder is run
 # back through the normal segment check rather than trusted.
-
-
 #
 # `env -u NAME` (unset a variable) is seen through the same way: removing a
 # variable cannot load code, so it is no riskier than the VAR=value the hook
@@ -975,9 +973,8 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
 
     An `env -C <dir>` / `env -u NAME` invocation is stripped BEFORE plain
     VAR=value assignments, so `FOO=bar` after it is removed by either step. A
-    model-typed
-    `rtk` / `rtk proxy` prefix is stripped last, so `FOO=1 rtk grep ...` is
-    judged as `grep ...`.
+    model-typed `rtk` / `rtk proxy` prefix is stripped last, so
+    `FOO=1 rtk grep ...` is judged as `grep ...`.
     """
     if not segment_tokens:
         return True
