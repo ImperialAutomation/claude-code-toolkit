@@ -92,10 +92,11 @@ Main session (orchestrator):
 │   │   until #A has fully finished (merged/failed/skipped), even though both
 │   │   are in the same wave and `run_in_background: true` makes it *possible*
 │   │   to fire both at once
-│   ├── Poll progress every 30-45s via /tmp/<project>-epic-progress-<N>.txt
-│   │   └── Report phase + test results to user in real-time
-│   ├── On completion: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
-│   │   — if neither a result NOR a progress-file update arrives for an
+│   ├── Wait for the next milestone(s) in /tmp/<project>-epic-progress-<N>.txt
+│   │   (wait-for-pattern.sh) and report phase + test results to the user;
+│   │   after the last milestone, end the turn and wait for the hand-back
+│   ├── On hand-back: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
+│   │   — if neither a hand-back NOR a progress-file update arrives for an
 │   │   extended period, treat this as a possible silent death: see
 │   │   "Sub-agent Liveness & Recovery" below BEFORE re-spawning
 │   ├── Handle results: update tracking PR
@@ -113,6 +114,8 @@ The main session NEVER implements code itself. It only:
 - Parses the epic and determines execution order
 - Spawns background Task agents for each sub-issue
 - **Monitors progress via `/tmp/<project>-epic-progress-<N>.txt` and reports to user**
+- Receives each sub-agent's hand-back (its final report, followed by a
+  task-completion notification) — nothing is polled to learn that an agent finished
 - Handles results (success/failure/skip)
 - Updates the tracking PR
 - Creates bug issues on failure
@@ -620,8 +623,10 @@ re-spawn after a recovery, the first Phase Final and the Phase Final that runs
 again after a late sub-issue is merged.
 
 Nothing clears them. A second run therefore starts by reading the previous run's
-file, which already says `PHASE: DONE` — so monitoring ends immediately, and the
-previous run's `DETAIL` is reported as the new agent's result. That is not a
+file, which already shows that run's last milestone (`MERGING_PR`,
+`POSTING_REPORT`, or `DONE` for a verification agent) — so monitoring ends
+immediately, and the previous run's `DETAIL` is reported as the new agent's
+result. That is not a
 delayed or partial answer; it is a complete, plausible, wrong one, and nothing in
 the file says which run wrote it. The observed case relayed a WARN that an
 earlier round had already found and fixed, and the new agent then overwrote the
@@ -645,23 +650,39 @@ This applies to all of them, with no exceptions:
 | Phase Final — Validation & Tests | `/tmp/<project>-epic-verify-validation-<epic>.txt` |
 | Phase Final — Runtime & Smoke Test | `/tmp/<project>-epic-verify-runtime-<epic>.txt` |
 
-Write it, then spawn, then start monitoring — in that order. Resetting after the
-spawn races the agent's own first write and can erase it.
+Write it, capture the spawn epoch (below), then spawn, then start monitoring — in
+that order. Resetting after the spawn races the agent's own first write and can
+erase it.
 
 A re-spawn is the case most easily missed, because by then the file is the one
 you have been reading all along and looks like live state. It is the dead
 agent's last words.
 
-**Where the wait is a `wait-for-pattern.sh` call rather than a polling loop**,
-pass the spawn time as well — the reset and the flag guard the same mistake from
-two directions, and the flag is the half that still holds if a reset is ever
-skipped:
+**Every `wait-for-pattern.sh` call on a progress file also passes the spawn
+time** — the reset and the flag guard the same mistake from two directions, and
+the flag is the half that still holds if a reset is ever skipped.
+
+Capture the epoch with its own Bash call, right after the reset and before the
+spawn:
 
 ```bash
-SPAWNED_AT=$(date +%s)   # capture BEFORE spawning
-~/.claude/bin/wait-for-pattern.sh --newer-than "$SPAWNED_AT" \
-    /tmp/<project>-epic-verify-runtime-<epic>.txt 'DONE|FAILED' 1800
+date +%s
 ```
+
+Note the printed number and pass it **as a literal** to every wait for this
+spawn. Never `SPAWNED_AT=$(date +%s)`: shell state does not survive between Bash
+calls, so from the second wait on the variable is empty and the guard is gone.
+
+```bash
+~/.claude/bin/wait-for-pattern.sh --newer-than 1791990000 \
+    /tmp/<project>-epic-progress-<N>.txt \
+    'PHASE: (READING_CODEBASE|WRITING_TESTS|RUNNING_TESTS_RED|IMPLEMENTING|RUNNING_TESTS_GREEN|COMMITTING|CREATING_PR|MERGING_PR)' 580 20
+```
+
+That is the first wait after a spawn: any milestone means the agent is alive.
+Step 3C below says how the pattern narrows from there. Never wait for `DONE` or
+`FAILED` in a sub-agent's progress file: no sub-agent writes either, so such a
+wait can only time out.
 
 #### Step 3C: Monitor sub-agent progress
 
