@@ -317,47 +317,53 @@ def strip_env_c_prefix(segment_tokens):
     return remainder
 
 
-# --- repeat-cmd.sh <count> <cmd> ----------------------------------------------
-# The sanctioned replacement for `for i in 1 2 3; do <cmd>; done` in timing
-# measurements. Unlike env -C it IS matched by an allow rule on its own,
-# Bash(~/.claude/bin/*), which is exactly the problem: it runs whatever it is
-# handed, so that rule alone would approve `repeat-cmd.sh 1 <anything>`.
+# --- command-running wrappers ---------------------------------------------------
+# Most ~/.claude/bin/ scripts do one fixed thing, but a few run whatever command
+# they are handed. Unlike env -C they ARE matched by an allow rule on their own,
+# Bash(~/.claude/bin/*), which is exactly the problem: that rule alone would
+# approve `repeat-cmd.sh 1 <anything>`.
 #
-# The hook therefore judges the command after the count by the same rules as a
-# bare segment, and main() answers "ask" when it fails — not merely "no
-# decision", which would leave the allow rule to approve it anyway.
+# The rule: a wrapper grants nothing the bare command does not have. The hook
+# judges the inner command by the same rules as a bare segment, and main()
+# answers "ask" when it fails — not merely "no decision", which would leave the
+# allow rule to approve it anyway. Because the check recurses, an inner
+# wrapper is judged by ITS inner command in turn.
+#
+# Each parser receives the arguments after the script and returns the inner
+# argv, or None when the shape is one the script itself rejects. A malformed
+# shape returns None rather than a best guess: approving a guess would mean
+# judging a command the wrapper never runs while the real argument vector goes
+# unchecked.
 
-REPEAT_CMD_SCRIPT = "repeat-cmd.sh"
 # fullmatch, not match with ^...$: Python's $ also matches before a trailing
 # newline, which the wrapper's bash =~ does not.
 REPEAT_COUNT_RE = re.compile(r"[1-9][0-9]*")
 
 
-def is_repeat_cmd_invocation(tokens):
-    """True if `tokens` invokes ~/.claude/bin/repeat-cmd.sh, any spelling."""
-    return (
-        bool(tokens)
-        and _is_allowed_bin_token(tokens[0])
-        and os.path.basename(tokens[0]) == REPEAT_CMD_SCRIPT
-    )
-
-
-def repeat_cmd_inner(tokens):
-    """The command a repeat-cmd.sh invocation runs, or None when the shape is
-    not `repeat-cmd.sh <positive-integer> <cmd> [args...]`.
-
-    A malformed shape returns None rather than a best guess: the wrapper itself
-    rejects it, and approving a guess would mean judging a command it never runs
-    while the real argument vector goes unchecked.
-    """
-    if len(tokens) < 3 or not REPEAT_COUNT_RE.fullmatch(tokens[1]):
+def _repeat_cmd_inner(args):
+    """`repeat-cmd.sh <positive-integer> <cmd> [args...]`."""
+    if len(args) < 2 or not REPEAT_COUNT_RE.fullmatch(args[0]):
         return None
-    return tokens[2:]
+    return args[1:]
 
 
-def command_has_unapprovable_repeat_cmd(command):
-    """True if any segment of `command` mentions repeat-cmd.sh and is not one
-    the hook will approve.
+COMMAND_RUNNING_WRAPPERS = {
+    "repeat-cmd.sh": _repeat_cmd_inner,
+}
+
+
+def command_running_wrapper(token):
+    """The script name if `token` invokes a ~/.claude/bin/ wrapper from
+    COMMAND_RUNNING_WRAPPERS, any spelling; otherwise None."""
+    if not _is_allowed_bin_token(token):
+        return None
+    name = os.path.basename(os.path.normpath(token))
+    return name if name in COMMAND_RUNNING_WRAPPERS else None
+
+
+def unapprovable_wrapper(command):
+    """The name of the first command-running wrapper mentioned in a segment of
+    `command` that the hook will not approve, or None.
 
     Per segment, not per command: permission rules are matched per segment of a
     chain, so `git status && repeat-cmd.sh 1 curl x` would otherwise be approved
@@ -366,21 +372,23 @@ def command_has_unapprovable_repeat_cmd(command):
     Any token, not just the first after the known prefixes: Claude Code strips
     wrappers like `timeout 5`, `time` and `nohup` before matching, so behind one
     of them the allow rule still matches the script. Recognising every flag of
-    every such wrapper is a losing game; a segment that names the script and is
+    every such prefix is a losing game; a segment that names a wrapper and is
     not approvable asks, whatever stands in front. Never raises — on
     unparseable input the caller falls through.
     """
     try:
         segments = split_segments(command)
     except ValueError:
-        return False
+        return None
 
     for tokens in segments:
-        mentions = any(is_repeat_cmd_invocation([token]) for token in tokens)
-        if mentions and not is_segment_safe(tokens):
-            return True
+        mentioned = next(
+            (name for name in map(command_running_wrapper, tokens) if name), None
+        )
+        if mentioned and not is_segment_safe(tokens):
+            return mentioned
 
-    return False
+    return None
 
 
 # --- model-typed rtk prefix -----------------------------------------------------
@@ -775,8 +783,9 @@ def is_segment_safe(segment_tokens):
     if is_git_commit:
         return not _has_denied_git_config_flag(stripped)
 
-    if is_repeat_cmd_invocation(stripped):
-        inner = repeat_cmd_inner(stripped)
+    wrapper = command_running_wrapper(first)
+    if wrapper:
+        inner = COMMAND_RUNNING_WRAPPERS[wrapper](stripped[1:])
         return inner is not None and is_segment_safe(inner)
 
     if (
@@ -907,16 +916,17 @@ def main():
 
     # "ask", not silence: Bash(~/.claude/bin/*) would approve the wrapper
     # without a prompt, whatever command it was handed.
-    if command_has_unapprovable_repeat_cmd(command):
+    wrapper = unapprovable_wrapper(command)
+    if wrapper:
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "ask",
                 "permissionDecisionReason": (
-                    "Hook: repeat-cmd.sh runs the command it is given, so it is "
-                    "approved only when `repeat-cmd.sh <count> <cmd>` has a "
-                    "positive integer count and <cmd> would be approved on its "
-                    "own. This one is not, so it needs your confirmation."
+                    f"Hook: {wrapper} runs the command it is given, so it is "
+                    "approved only when it is called in its documented shape "
+                    "and that command would be approved on its own. This one "
+                    "is not, so it needs your confirmation."
                 ),
             }
         }
