@@ -376,9 +376,27 @@ def _cmd_save_inner(args):
     return inner or None
 
 
+VENV_RUN_REPO_FLAG = "--repo"
+
+
+def _venv_run_inner(args):
+    """`venv-run.sh [--repo <dir> | --repo=<dir>] <cmd> [args...]`.
+
+    The script falls back to <cmd> from PATH when no venv provides it, so <cmd>
+    is judged as a bare command: the venv tools pass because they are on
+    ALLOWLIST, not because of a trust list of their own.
+    """
+    if args[:1] == [VENV_RUN_REPO_FLAG]:
+        args = args[2:]
+    elif args and args[0].startswith(VENV_RUN_REPO_FLAG + "="):
+        args = args[1:]
+    return args or None
+
+
 COMMAND_RUNNING_WRAPPERS = {
     "repeat-cmd.sh": _repeat_cmd_inner,
     "cmd-save.sh": _cmd_save_inner,
+    "venv-run.sh": _venv_run_inner,
 }
 
 
