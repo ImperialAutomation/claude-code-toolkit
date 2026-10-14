@@ -802,7 +802,10 @@ A sub-agent can die mid-task without ever sending a hand-back or writing a final
    - If the second failure signature (confused non-response) was the trigger, add an explicit instruction to actually perform the implementation and not just describe or delegate it (see the hardened Response Format instruction below).
 6. After a sub-agent DOES complete successfully following a recovery, verify no stale duplicate files are left on the shared working tree from the dead attempt (`git -C <worktree> status --short`) — diff any untracked leftovers against the new committed version; if byte-identical, they are safe to `git clean` away; if they differ, investigate before removing.
 
-3. **Phase display mapping** (use these human-readable labels):
+#### Step 3C (continued): Phase display mapping and result line
+
+**Phase display mapping** (use these human-readable labels in the status
+updates of Step 3C):
 
    | Progress file value | Display to user |
    |---|---|
@@ -823,7 +826,7 @@ A sub-agent can die mid-task without ever sending a hand-back or writing a final
    | POSTING_REPORT | Posting report |
    | DONE | Complete |
 
-4. **On the hand-back**, report the final result to the user before proceeding
+**On the hand-back**, report the final result to the user before proceeding
    — for an implement issue only after the merge check in Step 4:
    - For implement: `✅ #<N> — <summary> | PR #<pr> | <files> files | <tests_passed>/<tests_total> tests`
    - For audit: `🔍 #<N> — <summary> | <findings> findings, <critical> critical | <recommendation>`
@@ -844,8 +847,8 @@ Parse the sub-agent's response:
 **On success** (response contains `SUCCESS`):
 - Extract PR number, summary, files changed, tests written, and tests passed
 - **Verify the merge before reporting anything.** Neither the progress file nor
-  the hand-back is proof that the PR landed: `MERGING_PR` is written *before*
-  the merge, and the CI gate can leave the PR open after it. Check it:
+  the hand-back is proof that the PR landed: `MERGING_PR` may be written before
+  the merge completes, and the CI gate can leave the PR open after it. Check it:
   ```bash
   ~/.claude/bin/gh-save.sh /tmp/<project>-sub-pr-<N>.json pr view <PR_NUMBER> --json state,mergedAt
   ```
