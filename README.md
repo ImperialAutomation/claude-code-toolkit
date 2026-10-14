@@ -119,7 +119,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
 | `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
-| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Reports the command's own exit status and the byte count written |
+| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Reports the command's own exit status and the byte count written. The auto-approve hook approves it only when `<command>` is approvable on its own, and answers `ask` otherwise |
 | `strip-ansi.sh` | `strip-ansi.sh <file> [<outfile>]` | Write a copy of a file without ANSI colour/cursor codes (default `<file>.clean`), so captured test output can be grepped without a `sed` chain |
 
 `cmd-save.sh` is the general case; `gh-save.sh` is the `gh`-shaped shorthand and delegates to it. Reach for it whenever output belongs on disk: to `diff` two captures, to feed one command's output into another, or because the output is too long to be worth putting through the model's context.
@@ -311,7 +311,7 @@ not.
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/). The venv follows the test path's project root, so a path in another worktree uses that worktree's interpreter |
-| `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, pip, alembic) with auto-detection. `--repo` picks the project root when it is not the current directory |
+| `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, alembic, ruff) with auto-detection, falling back to PATH. `--repo` picks the project root when it is not the current directory. The auto-approve hook approves it only when `<cmd>` is approvable on its own, and answers `ask` otherwise, so `pip` prompts just as it does bare |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
@@ -365,7 +365,7 @@ claude-code-toolkit/
 │   ├── smoke-test.sh              ← API endpoint smoke testing with auto-discovery
 │   ├── http-status.sh             ← HTTP status for one or more URLs (single command)
 │   ├── project-test.sh            ← run pytest with automatic venv detection
-│   ├── venv-run.sh                ← run any venv binary (python, pip, alembic)
+│   ├── venv-run.sh                ← run any venv binary (python, alembic, ruff)
 │   ├── secret-scan.sh             ← scan for hardcoded secrets and API keys
 │   ├── security-headers-check.sh  ← check HTTP security headers
 │   ├── owasp-zap-scan.sh          ← OWASP ZAP baseline security scan
