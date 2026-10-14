@@ -1377,6 +1377,68 @@ check(
 )
 
 
+# --- env -u NAME: seen through like env -C ---
+# Unsetting a variable cannot load code, so it is no riskier than the VAR=value
+# the hook already strips. Typical: `env -u VIRTUAL_ENV uv run ...`, which stops
+# uv from warning about (or using) the caller's activated venv.
+
+RUFF_CHECK = "uv run ruff format --check ."
+BACKEND_DIR = f"{PROJECT_DIR}/backend"
+
+for unset in (
+    "-u VIRTUAL_ENV",
+    "-uVIRTUAL_ENV",
+    "--unset VIRTUAL_ENV",
+    "--unset=VIRTUAL_ENV",
+    "-u VIRTUAL_ENV -u CONDA_PREFIX",
+    f"-u VIRTUAL_ENV -C {BACKEND_DIR}",
+    f"-C {BACKEND_DIR} --unset=VIRTUAL_ENV CI=1",
+):
+    check(
+        f"env-u: `env {unset} {RUFF_CHECK}` is approved",
+        hook.is_command_safe(f"env {unset} {RUFF_CHECK}"),
+    )
+
+check(
+    "env-u: nested `env -C <dir> env -u NAME <cmd>` is approved",
+    hook.is_command_safe(f"env -C {BACKEND_DIR} env -u VIRTUAL_ENV {RUFF_CHECK}"),
+)
+
+check(
+    "env-u: the PAM capture line is approved end to end",
+    hook_decision(
+        f"~/.claude/bin/cmd-save.sh --strip-ansi --stderr merge /tmp/pam-3709-verify-v-ruff-fmt.txt "
+        f"env -C {BACKEND_DIR} env -u VIRTUAL_ENV {RUFF_CHECK}"
+    )
+    == "allow",
+)
+
+for not_approved in (
+    "env -u VIRTUAL_ENV curl http://evil.example/x",
+    f"env -C {BACKEND_DIR} env -u VIRTUAL_ENV ./start.sh",
+    "env -u VIRTUAL_ENV",
+    "env -u",
+    "env --unset",
+    "env --unset= uv run x",
+    "env -u VIRTUAL_ENV=x uv run x",
+    "env -i uv run x",
+    "env -u VIRTUAL_ENV -i uv run x",
+    "env -S 'uv run x'",
+    "env --split-string='uv run x'",
+    "env -0 uv run x",
+    "env -u VIRTUAL_ENV LD_PRELOAD=/tmp/x.so uv run x",
+    f"env -C {BACKEND_DIR} env -i uv run x",
+    "env FOO=1 git status",
+):
+    check(f"env-u: `{not_approved}` is not approved", not hook.is_command_safe(not_approved))
+
+check(
+    "env-u: a cd chain behind env -u is still denied",
+    run_hook("env -u VIRTUAL_ENV cd /tmp && npm test")[1] is not None
+    and not run_hook("env -u VIRTUAL_ENV cd /tmp && npm test")[0],
+)
+
+
 # --- model-typed `rtk <cmd>`: judged exactly as `<cmd>` alone (issue #102) ---
 # The RTK hook rewrites commands itself, but the model sometimes types the
 # prefix anyway (`rtk grep ...`, `rtk proxy git log`). The first word is then

@@ -261,7 +261,7 @@ def strip_cd_prefix(segment_tokens):
     return segment_tokens
 
 
-# --- env -C <dir> <cmd> -------------------------------------------------------
+# --- env -C <dir> / env -u NAME <cmd> -------------------------------------------
 # The sanctioned replacement for `cd <dir> && <cmd>` where the command genuinely
 # needs its working directory (a script reading ./.env, npx resolving config
 # from cwd). It is one command, so permission matching works on it normally.
@@ -274,49 +274,96 @@ def strip_cd_prefix(segment_tokens):
 # back through the normal segment check rather than trusted.
 
 
-def strip_env_c_prefix(segment_tokens):
-    """Drop a leading `env [-C <dir>|--chdir=<dir>]` when <dir> is inside
-    ~/Projects, returning the command that follows.
+#
+# `env -u NAME` (unset a variable) is seen through the same way: removing a
+# variable cannot load code, so it is no riskier than the VAR=value the hook
+# already strips. Every other env option (-i, -S/--split-string, -0, ...) is
+# not, and leaves `env` in place.
 
-    Returns the tokens unchanged when this is not an `env -C` invocation, when
-    the directory is outside the root, or when no command follows — in each of
-    those cases the segment's first token stays "env", which is not on
-    ALLOWLIST, so the segment is not approved. `env` with only assignments and
-    no -C is therefore left exactly as it was before this rule existed.
+ENV_COMMAND = "env"
+ENV_CHDIR_OPTION = ("-C", "--chdir")
+ENV_UNSET_OPTION = ("-u", "--unset")
+ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_option_value(args, index, option):
+    """If args[index] is `option` (a (short, long) pair) in any of its
+    spellings — `-X v`, `-Xv`, `--long v`, `--long=v` — return (value,
+    tokens consumed); otherwise None. A missing value comes back as ""."""
+    short, long = option
+    arg = args[index]
+    if arg in option:
+        return (args[index + 1], 2) if index + 1 < len(args) else ("", 1)
+    if arg.startswith(long + "="):
+        return arg[len(long) + 1:], 1
+    if arg.startswith(short) and not arg.startswith("--"):
+        return arg[len(short):], 1
+    return None
+
+
+def _parse_env_arguments(args):
+    """Walk the arguments of an `env` invocation up to its command.
+
+    Returns (index of the command in `args`, whether a -C or -u was seen), or
+    None when an argument is not one the hook trusts: an unknown option, a
+    dangerous assignment, an unset without a valid name, or a -C directory
+    outside ~/Projects.
     """
-    if not segment_tokens or segment_tokens[0] != "env":
-        return segment_tokens
-
-    rest = segment_tokens[1:]
-    directory = None
-
-    # Accept `-C <dir>`, `--chdir <dir>` and `--chdir=<dir>`. Assignments may
-    # precede the flag (`env FOO=bar -C <dir> cmd`), so skip over them. A
-    # dangerous one leaves the segment as it was: its first token stays "env".
     index = 0
-    while index < len(rest) and ENV_ASSIGNMENT_RE.match(rest[index]):
-        if is_dangerous_env_assignment(rest[index]):
-            return segment_tokens
-        index += 1
+    scoped = False
+    while index < len(args):
+        arg = args[index]
+        if ENV_ASSIGNMENT_RE.match(arg):
+            if is_dangerous_env_assignment(arg):
+                return None
+            index += 1
+            continue
 
-    if index < len(rest) and rest[index] in ("-C", "--chdir"):
-        if index + 1 >= len(rest):
-            return segment_tokens
-        directory = rest[index + 1]
-        remainder = rest[index + 2:]
-    elif index < len(rest) and rest[index].startswith("--chdir="):
-        directory = rest[index].split("=", 1)[1]
-        remainder = rest[index + 1:]
-    else:
+        unset = _env_option_value(args, index, ENV_UNSET_OPTION)
+        chdir = _env_option_value(args, index, ENV_CHDIR_OPTION)
+        if unset is not None:
+            name, consumed = unset
+            if not ENV_VAR_NAME_RE.fullmatch(name):
+                return None
+        elif chdir is not None:
+            directory, consumed = chdir
+            if not directory or not _is_inside_projects_root(directory):
+                return None
+        elif arg.startswith("-"):
+            return None
+        else:
+            break
+
+        scoped = True
+        index += consumed
+
+    return index, scoped
+
+
+def strip_env_invocation(segment_tokens):
+    """Drop a leading `env` whose arguments are only safe VAR=value
+    assignments, `-u NAME` unsets and `-C <dir>` (inside ~/Projects), with at
+    least one -C or -u, returning the command that follows. A nested
+    `env -C <dir> env -u NAME <cmd>` is stripped down to <cmd>.
+
+    Returns the tokens unchanged otherwise, including when no command follows —
+    the segment's first token then stays "env", which is not on ALLOWLIST, so
+    the segment is not approved. `env` with only assignments is therefore left
+    exactly as it was before this rule existed.
+    """
+    if not segment_tokens or segment_tokens[0] != ENV_COMMAND:
         return segment_tokens
 
-    if not directory or not remainder:
+    parsed = _parse_env_arguments(segment_tokens[1:])
+    if parsed is None:
         return segment_tokens
 
-    if not _is_inside_projects_root(directory):
+    index, scoped = parsed
+    remainder = segment_tokens[1 + index:]
+    if not scoped or not remainder:
         return segment_tokens
 
-    return remainder
+    return strip_env_invocation(remainder)
 
 
 # --- settings Bash(...) rules ---------------------------------------------------
@@ -904,10 +951,10 @@ def command_has_cd_prefix_chain(command):
         return False
 
     for index, tokens in enumerate(segments):
-        # strip_env_c_prefix too: `env -C <dir> cd /tmp && ...` is the same
+        # strip_env_invocation too: `env -C <dir> cd /tmp && ...` is the same
         # mistake wearing the approved prefix, and must not launder past it.
         # Likewise a model-typed `rtk cd ...`.
-        if strip_rtk_prefix(strip_env_prefix(strip_env_c_prefix(tokens)))[:1] != ["cd"]:
+        if strip_rtk_prefix(strip_env_prefix(strip_env_invocation(tokens)))[:1] != ["cd"]:
             continue
         # Only a cd with a command after it defeats a permission match.
         if index + 1 < len(segments):
@@ -926,9 +973,9 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
     same rules, or allowed by the settings `rules`. A settings deny or ask rule
     on the inner command blocks it either way.
 
-    `env -C <dir>` is stripped BEFORE plain VAR=value assignments: the
-    remainder of an `env -C <dir> FOO=bar git status` still carries its own
-    assignments, which strip_env_prefix then removes as usual. A model-typed
+    An `env -C <dir>` / `env -u NAME` invocation is stripped BEFORE plain
+    VAR=value assignments, so `FOO=bar` after it is removed by either step. A
+    model-typed
     `rtk` / `rtk proxy` prefix is stripped last, so `FOO=1 rtk grep ...` is
     judged as `grep ...`.
     """
@@ -936,7 +983,7 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
         return True
 
     env_stripped = strip_env_prefix(
-        strip_env_c_prefix(strip_cd_prefix(segment_tokens))
+        strip_env_invocation(strip_cd_prefix(segment_tokens))
     )
     if not is_trusted_rtk_wrap(env_stripped):
         return False
