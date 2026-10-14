@@ -84,7 +84,8 @@ ran against.
 - Use Glob/Grep/Read instead of Bash equivalents (find, grep, cat, head, tail)
 - Use Write/Edit for file creation and modification — not Bash (echo, cat, sed, awk)
 - Bash is for: git, gh, npm, npx, docker, python, ruff, uv, and `~/.claude/bin/` scripts only
-- For venv binaries (python, pytest, alembic, pip), use `~/.claude/bin/venv-run.sh <cmd>` or `~/.claude/bin/project-test.sh`
+- For tests, use the project's documented test entry point and its path convention (project CLAUDE.md, test docs); only when the project names none, fall back to `~/.claude/bin/project-test.sh` with absolute paths under `<worktree>`
+- For other venv binaries (python, alembic, pip), use `~/.claude/bin/venv-run.sh <cmd>`
 - Never use `python3 -c` for file operations — use Read/Edit/Grep instead
 
 ## Phase 1: Discovery & Planning
@@ -288,17 +289,23 @@ Project policies — read these BEFORE verifying:
 - Use Glob/Grep/Read instead of Bash equivalents (find, grep, cat, head, tail)
 - Use Write/Edit for file creation and modification — not Bash (echo, cat, sed, awk)
 - Bash is for: git, gh, npm, npx, docker, python, ruff, uv, and `~/.claude/bin/` scripts only
-- For venv binaries, use `~/.claude/bin/venv-run.sh <cmd>` or `~/.claude/bin/project-test.sh`
+- For tests, use the project's documented test entry point and its path convention (project CLAUDE.md, test docs); only when the project names none, fall back to `~/.claude/bin/project-test.sh` with absolute paths under `<worktree>`
+- For other venv binaries, use `~/.claude/bin/venv-run.sh <cmd>`
 
 ## Verification Steps
 
 ### Step A: Targeted tests
-Run ONLY tests relevant to the modified files — never the full suite:
+Run ONLY the test files relevant to the modified files — never the full suite,
+and never a whole test directory. Use the project's documented test entry point
+and its path convention (project CLAUDE.md, test docs): a runner that executes
+inside a container usually wants paths relative to its workdir, not absolute
+worktree paths. Only when the project names none, fall back to:
 `~/.claude/bin/project-test.sh <worktree>/tests/path/to/your_test.py -v`
 If any test fails, fix at root cause and re-run.
 
 Then verify the whole test tree still **loads**, which is a different and far
-cheaper question than whether it passes:
+cheaper question than whether it passes. Pass `--collect-only -q` to the same
+entry point; the fallback form is:
 `~/.claude/bin/project-test.sh --collect-only -q`
 
 A test that imports a symbol you removed or renamed is by definition a file you
@@ -318,7 +325,7 @@ is "can the test tree still be loaded", not pytest:
 
 | Ecosystem | Collection-only check |
 |---|---|
-| pytest | `~/.claude/bin/project-test.sh --collect-only -q` |
+| pytest | `<project test entry point> --collect-only -q` (fallback: `~/.claude/bin/project-test.sh --collect-only -q`) |
 | vitest / jest | `npx vitest run --reporter=dot --passWithNoTests` |
 | TypeScript | `npx tsc --noEmit` |
 | Go | `go vet ./...` |
