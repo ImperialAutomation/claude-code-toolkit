@@ -92,10 +92,11 @@ Main session (orchestrator):
 │   │   until #A has fully finished (merged/failed/skipped), even though both
 │   │   are in the same wave and `run_in_background: true` makes it *possible*
 │   │   to fire both at once
-│   ├── Poll progress every 30-45s via /tmp/<project>-epic-progress-<N>.txt
-│   │   └── Report phase + test results to user in real-time
-│   ├── On completion: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
-│   │   — if neither a result NOR a progress-file update arrives for an
+│   ├── Wait for the next milestone(s) in /tmp/<project>-epic-progress-<N>.txt
+│   │   (wait-for-pattern.sh) and report phase + test results to the user;
+│   │   after the last milestone, end the turn and wait for the hand-back
+│   ├── On hand-back: parse result (SUCCESS/AUDIT_COMPLETE/FAILED)
+│   │   — if neither a hand-back NOR a progress-file update arrives for an
 │   │   extended period, treat this as a possible silent death: see
 │   │   "Sub-agent Liveness & Recovery" below BEFORE re-spawning
 │   ├── Handle results: update tracking PR
@@ -113,6 +114,8 @@ The main session NEVER implements code itself. It only:
 - Parses the epic and determines execution order
 - Spawns background Task agents for each sub-issue
 - **Monitors progress via `/tmp/<project>-epic-progress-<N>.txt` and reports to user**
+- Receives each sub-agent's hand-back (its final report, followed by a
+  task-completion notification) — nothing is polled to learn that an agent finished
 - Handles results (success/failure/skip)
 - Updates the tracking PR
 - Creates bug issues on failure
@@ -620,8 +623,10 @@ re-spawn after a recovery, the first Phase Final and the Phase Final that runs
 again after a late sub-issue is merged.
 
 Nothing clears them. A second run therefore starts by reading the previous run's
-file, which already says `PHASE: DONE` — so monitoring ends immediately, and the
-previous run's `DETAIL` is reported as the new agent's result. That is not a
+file, which already shows that run's last milestone (`MERGING_PR`,
+`POSTING_REPORT`, or `DONE` for a verification agent) — so monitoring ends
+immediately, and the previous run's `DETAIL` is reported as the new agent's
+result. That is not a
 delayed or partial answer; it is a complete, plausible, wrong one, and nothing in
 the file says which run wrote it. The observed case relayed a WARN that an
 earlier round had already found and fixed, and the new agent then overwrote the
@@ -645,82 +650,137 @@ This applies to all of them, with no exceptions:
 | Phase Final — Validation & Tests | `/tmp/<project>-epic-verify-validation-<epic>.txt` |
 | Phase Final — Runtime & Smoke Test | `/tmp/<project>-epic-verify-runtime-<epic>.txt` |
 
-Write it, then spawn, then start monitoring — in that order. Resetting after the
-spawn races the agent's own first write and can erase it.
+Write it, capture the spawn epoch (below), then spawn, then start monitoring — in
+that order. Resetting after the spawn races the agent's own first write and can
+erase it.
 
 A re-spawn is the case most easily missed, because by then the file is the one
 you have been reading all along and looks like live state. It is the dead
 agent's last words.
 
-**Where the wait is a `wait-for-pattern.sh` call rather than a polling loop**,
-pass the spawn time as well — the reset and the flag guard the same mistake from
-two directions, and the flag is the half that still holds if a reset is ever
-skipped:
+**Every `wait-for-pattern.sh` call on a progress file also passes the spawn
+time** — the reset and the flag guard the same mistake from two directions, and
+the flag is the half that still holds if a reset is ever skipped.
+
+Capture the epoch with its own Bash call, right after the reset and before the
+spawn:
 
 ```bash
-SPAWNED_AT=$(date +%s)   # capture BEFORE spawning
-~/.claude/bin/wait-for-pattern.sh --newer-than "$SPAWNED_AT" \
-    /tmp/<project>-epic-verify-runtime-<epic>.txt 'DONE|FAILED' 1800
+date +%s
 ```
+
+Note the printed number and pass it **as a literal** to every wait for this
+spawn. Never `SPAWNED_AT=$(date +%s)`: shell state does not survive between Bash
+calls, so from the second wait on the variable is empty and the guard is gone.
+
+```bash
+~/.claude/bin/wait-for-pattern.sh --newer-than 1791990000 \
+    /tmp/<project>-epic-progress-<N>.txt \
+    'PHASE: (READING_CODEBASE|WRITING_TESTS|RUNNING_TESTS_RED|IMPLEMENTING|RUNNING_TESTS_GREEN|COMMITTING|CREATING_PR|MERGING_PR)' 580 20
+```
+
+That is the first wait after a spawn: any milestone means the agent is alive.
+Step 3C below says how the pattern narrows from there (the list shown is the
+`implement` one; an `audit` agent's runs from `SCANNING_CODEBASE` to
+`POSTING_REPORT`). Never wait for `DONE` or
+`FAILED` in a sub-agent's progress file: no sub-agent writes either, so such a
+wait can only time out.
 
 #### Step 3C: Monitor sub-agent progress
 
-**⚠️ TOOL RULE: Use the Read tool to read progress files and TaskOutput to check agent status. NEVER use Bash commands like `tail`, `cat`, `grep`, or `head` for monitoring — these will be blocked by permissions and stall the epic.**
+**⚠️ TOOL RULE: Wait on progress files with `~/.claude/bin/wait-for-pattern.sh` and read them with the Read tool. NEVER use Bash commands like `tail`, `cat`, `grep`, `head` or `sleep` loops for monitoring — these will be blocked by permissions and stall the epic.**
 
-After spawning the background sub-agent:
+Two signals tell you what a background sub-agent is doing, and nothing has to be
+polled for either:
 
-1. Store the `task_id` from the Task tool response
-2. **Poll every 30-45 seconds** until the agent completes:
-   a. Use the **Read tool** on `/tmp/<project>-epic-progress-<N>.txt` (ignore if file doesn't exist yet — agent is still starting)
-   b. Parse the `PHASE:`, `DETAIL:`, and `TESTS:` fields. **If the first read
-      already shows a terminal phase (`DONE`/`FAILED`), do not report it** —
-      check it against the current run first, per "A terminal phase on the first
-      poll" below
-   c. **Report to the user** with a human-readable status message:
-      ```
-      ⏳ #<N> (<title>): <human-readable phase>
-      ```
-      - If TESTS line is present, append: `— X/Y passed, Z failed`
-      - If DETAIL line is present, append in parentheses: `(modifying auth_service.py)`
-   d. Call `TaskOutput` with `block: false, timeout: 1000` to check if the agent is done
-   e. If not completed → continue polling (next iteration ~30-45s later)
-   f. If completed → extract the result text and proceed to Step 4
-   g. **If the progress file hasn't advanced across 2-3 consecutive polls AND `TaskOutput` returns "No task found with ID"** → the sub-agent has died silently (a process-level failure, not a task-level FAILED response). Do not treat this the same as an active FAILED result. Follow "Sub-agent Liveness & Recovery" below before re-spawning anything.
+- **The hand-back** — the agent's final report (SUCCESS / AUDIT_COMPLETE /
+  FAILED), followed by a task-completion notification. This is the only
+  authority on whether the agent finished, and what it reports.
+- **The progress file** — the only live signal between milestones. It says how
+  far the agent got, never that it is done.
 
-**A terminal phase on the first poll is a result you have not earned.** An agent
-that genuinely finished passed through `READING_CODEBASE`, `IMPLEMENTING` and the
-rest first; a `DONE` that is there within seconds of the spawn almost always
-belongs to the previous run (see "Reset the progress file before every spawn").
-Resetting the file is what prevents this, so a fast `DONE` is also the signal
-that the reset was skipped. Before reporting any suspiciously fast match:
+After spawning the background sub-agent, loop:
+
+1. **Wait for the next milestone(s)**, never the current one — a pattern that
+   matches the phase already in the file returns at once and loops without
+   waiting. List *every* later milestone, since an agent may skip one:
+   ```bash
+   # file currently shows IMPLEMENTING:
+   ~/.claude/bin/wait-for-pattern.sh --newer-than <spawn-epoch> \
+       /tmp/<project>-epic-progress-<N>.txt \
+       'PHASE: (RUNNING_TESTS_GREEN|COMMITTING|CREATING_PR|MERGING_PR)' 580 20
+   ```
+   with `timeout: 600000` on the Bash call. `<spawn-epoch>` is the literal number
+   captured before the spawn (see "Reset the progress file before every spawn")
+   — the same number for every wait of this spawn. Milestone order is the list in
+   the sub-agent's prompt: Step 3A for `implement`, Step 3B for `audit`.
+2. **Keep the script timeout at least ~20 s below the Bash tool timeout** (580 s
+   against 600 000 ms). The script needs time to print and exit; at 590 s the
+   harness has moved the call to the background instead of returning it.
+3. **On a match (exit 0):** Read the file for the `PHASE:`, `DETAIL:` and
+   `TESTS:` fields and report to the user:
+   ```
+   ⏳ #<N> (<title>): <human-readable phase>
+   ```
+   - If TESTS line is present, append: `— X/Y passed, Z failed`
+   - If DETAIL line is present, append in parentheses: `(modifying auth_service.py)`
+
+   Then wait again, with the pattern narrowed to the milestones after this one.
+4. **On a timeout (exit 1):** not a failure. The script prints the file's
+   current contents; that is the status update to relay ("still at
+   IMPLEMENTING"). Then wait again with the same pattern.
+5. **Once the file shows the last milestone** (`MERGING_PR` for implement,
+   `POSTING_REPORT` for audit): stop waiting on the file and end the turn. The
+   hand-back arrives as the next message; proceed to Step 4 with it.
+6. **If the hand-back arrives first** — an agent that stops with FAILED before
+   its last milestone — it is the result. Because a foreground wait cannot be
+   interrupted, a hand-back can sit for up to one wait timeout before you see it;
+   that is the accepted cost of a blocking wait.
+7. **If there is no hand-back and no progress-file change for an extended
+   period**, the agent may have died silently: follow "Sub-agent Liveness &
+   Recovery" below before re-spawning anything.
+
+**A last milestone right after the spawn is a result you have not earned.** An
+agent that genuinely got there passed through `READING_CODEBASE`, `IMPLEMENTING`
+and the rest first; a `MERGING_PR` that is there within seconds of the spawn
+almost always belongs to the previous run (see "Reset the progress file before
+every spawn"). The reset and `--newer-than` together prevent this, so a fast last
+milestone is also the signal that both were skipped. Before reporting it:
 
 - Check the file still carries the `SPAWNED_AT` line the reset wrote, and that
-  the phases above it are ones *this* run could have reached. A `DONE` with no
-  `SPAWNED_AT` above it was never reset.
+  the phases above it are ones *this* run could have reached. A last milestone
+  with no `SPAWNED_AT` above it was never reset.
 - Check the `DETAIL` against work this run has actually done. A detail naming a
   file, a finding or a fix you already saw resolved in an earlier round is the
   earlier round talking.
-- Confirm with `TaskOutput`. A real completion has a task result; a stale file
-  has none. The task result, not the file, is the authority on whether the agent
-  finished.
+- Wait for the hand-back. A real completion sends one; a stale file does not.
+  The hand-back, not the file, is the authority on whether the agent finished.
 
 Report it as a result only once all three agree. If they do not, reset the file
 and treat the agent as still starting.
 
 **Two further false-alarm sources to avoid when judging liveness:**
 
-- **Never use repo file mtimes as a liveness signal** (e.g. `find backend/ frontend/ -newermt '...'`). Under the sandbox this returns nothing while the agent is demonstrably editing files — it will report a healthy agent as dead. The progress file is the signal; `TaskOutput` is the proof.
-- **A silent progress file is not by itself proof of death.** An agent making a large edit or thinking through one spot can go a long time without hitting a milestone — the progress file only advances at milestones, not continuously. This is why the `TaskOutput` check in (g) is required, not optional: without that confirmation, treat silence under ~25 minutes as "still working". If you ever monitor on silence alone, use ~40 minutes as the threshold, and run the clock from when you *started watching*, not from the mtime left behind by a previous (dead) agent — otherwise the timer fires the instant you restart.
+- **Never use repo file mtimes as a liveness signal** (e.g. `find backend/ frontend/ -newermt '...'`). Under the sandbox this returns nothing while the agent is demonstrably editing files — it will report a healthy agent as dead. The progress file is the signal; the hand-back (or its absence, per "Sub-agent Liveness & Recovery") is the proof.
+- **A silent progress file is not by itself proof of death.** An agent making a large edit or thinking through one spot can go a long time without hitting a milestone — the progress file only advances at milestones, not continuously. Treat silence under ~40 minutes as "still working", and run the clock from when you *started watching*, not from the mtime left behind by a previous (dead) agent — otherwise the timer fires the instant you restart.
 
 ### Sub-agent Liveness & Recovery
 
-A sub-agent can die mid-task without ever sending a completion notification or writing a final progress line — the task ID simply stops resolving via `TaskOutput`. This is distinct from a `FAILED` response (which is an active, intentional report) and distinct from "still working, hasn't hit a milestone yet" (a fresh agent may take several minutes before its first progress-file write). Do not assume either of the other two cases — verify.
+A sub-agent can die mid-task without ever sending a hand-back or writing a final progress line. This is distinct from a `FAILED` response (which is an active, intentional report) and distinct from "still working, hasn't hit a milestone yet" (a fresh agent may take several minutes before its first progress-file write). Do not assume either of the other two cases — verify.
 
 **Also watch for a second, different failure signature:** a sub-agent that terminates after only 1-2 tool calls with a vague, self-referential, non-implementing response (e.g. "the agent is running in the background, I'll wait for it to complete") instead of actually doing the work or returning SUCCESS/FAILED. This is not a silent death — it sent a normal completion notification — but it is equally a non-result: no branch, no commits, no PR. Detect it the same way as a silent death (the `git -C <worktree> log`/`status` checks in step 2 below) since the response text alone is not trustworthy signal that real work happened.
 
 **When either signature is suspected, before concluding anything is lost:**
 
-1. Call `TaskOutput` with `block: false` on the task ID. If it errors with "No task found", the process is confirmed gone (not just slow).
+1. Establish whether the agent is confirmed dead, not just slow. It is when either holds:
+   - a task-completion notification arrived without a usable hand-back (no
+     SUCCESS / AUDIT_COMPLETE / FAILED block), or
+   - no notification and no progress-file change for ~40 minutes, with the clock
+     started when you began watching this spawn.
+
+   Where the harness provides `TaskOutput`, it is an optional stronger check:
+   `block: false` on the task ID erroring with "No task found" confirms the
+   process is gone without waiting out the 40 minutes.
 2. Check the expected sub-branch for real work, in this order. **Every command
    here needs `-C <worktree>`** — this section stashes and deletes, so aiming it
    at the wrong tree destroys work instead of rescuing it:
@@ -742,7 +802,10 @@ A sub-agent can die mid-task without ever sending a completion notification or w
    - If the second failure signature (confused non-response) was the trigger, add an explicit instruction to actually perform the implementation and not just describe or delegate it (see the hardened Response Format instruction below).
 6. After a sub-agent DOES complete successfully following a recovery, verify no stale duplicate files are left on the shared working tree from the dead attempt (`git -C <worktree> status --short`) — diff any untracked leftovers against the new committed version; if byte-identical, they are safe to `git clean` away; if they differ, investigate before removing.
 
-3. **Phase display mapping** (use these human-readable labels):
+#### Step 3C (continued): Phase display mapping and result line
+
+**Phase display mapping** (use these human-readable labels in the status
+updates of Step 3C):
 
    | Progress file value | Display to user |
    |---|---|
@@ -763,7 +826,8 @@ A sub-agent can die mid-task without ever sending a completion notification or w
    | POSTING_REPORT | Posting report |
    | DONE | Complete |
 
-4. **On completion**, report the final result to the user before proceeding:
+**On the hand-back**, report the final result to the user before proceeding
+   — for an implement issue only after the merge check in Step 4:
    - For implement: `✅ #<N> — <summary> | PR #<pr> | <files> files | <tests_passed>/<tests_total> tests`
    - For audit: `🔍 #<N> — <summary> | <findings> findings, <critical> critical | <recommendation>`
    - For failure: `❌ #<N> — Failed: <error summary>`
@@ -782,6 +846,15 @@ Parse the sub-agent's response:
 
 **On success** (response contains `SUCCESS`):
 - Extract PR number, summary, files changed, tests written, and tests passed
+- **Verify the merge before reporting anything.** Neither the progress file nor
+  the hand-back is proof that the PR landed: `MERGING_PR` may be written before
+  the merge completes, and the CI gate can leave the PR open after it. Check it:
+  ```bash
+  ~/.claude/bin/gh-save.sh /tmp/<project>-sub-pr-<N>.json pr view <PR_NUMBER> --json state,mergedAt
+  ```
+  Read the file. Only `"state": "MERGED"` with a `mergedAt` timestamp counts as
+  complete. An open PR is not a success: report it with its PR number and
+  handle it as a failure (below), so its dependents are skipped.
 - Record: issue #N → ✅ Complete, PR #X
 
 **On failure** (response contains `FAILED`):
@@ -840,14 +913,15 @@ gh pr edit <tracking_pr> --body-file /tmp/<project>-tracking-pr-update-$ARGUMENT
 
 **CRITICAL: NEVER merge PRs into `develop` or `main`. NEVER close the parent issue. NEVER push to `main` or `develop` directly. The tracking PR stays as a draft for the user to review and merge manually.**
 
-**CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after polling waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
+**CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after monitoring waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
 
 **If this is not the epic's first Phase Final** — a late sub-issue was merged
 after the first round, so verification runs again — then both verification
 progress files already hold a completed run. Reset each one before its spawn
-(Steps 1 and 2 below say where), and apply "A terminal phase on the first poll"
-when reading them: a `DONE` arriving within seconds is the first round
-answering, and its warnings are findings you have already dispositioned.
+(Steps 1 and 2 below say where). If you read them for status, a `DONE` there
+within seconds is the first round answering, and its warnings are findings you
+have already dispositioned: the result is the agent's hand-back (Step 5), never
+the file.
 
 **Every prompt below opens with this block**, with `<worktree>` filled in. A
 fresh context window inherits none of the Worktree section above, and these
@@ -1204,7 +1278,11 @@ ERROR: <description>
 
 ### Step 5: Collect results and show summary
 
-Wait for all verification sub-agents to complete (use `TaskOutput` with `block: true`). Parse each result.
+Wait for each verification agent's hand-back: end the turn after spawning them,
+and each final report arrives as a message followed by its task-completion
+notification. Parse each result from its hand-back, not from its progress file.
+A verification agent that never hands back is handled as in "Sub-agent Liveness
+& Recovery".
 
 **Sync Closes statements:** Ensure all completed sub-issue numbers are in the tracking PR body as `Closes #<N>` statements. Failed and skipped issues should NOT have Closes statements.
 
