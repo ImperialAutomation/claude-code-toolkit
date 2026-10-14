@@ -144,6 +144,14 @@ opties van de wrapper met dezelfde regels als een los commando, en antwoordt
 gedocumenteerde vorm heeft. Dat werkt recursief: `repeat-cmd.sh 1
 ~/.claude/bin/cmd-save.sh /tmp/o curl x` prompt, `... git status` niet.
 
+Omgekeerd geeft een wrapper ook niet *minder*: een commando dat kaal mag via een
+eigen `Bash(...)`-allowregel (in `~/.claude/settings*.json` of in de
+`.claude/settings*.json` van het project waar het draait) mag ook achter de
+wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/PAM/bin/backend-test.sh ...`
+door in PAM, omdat `Bash(/home/jan/Projects/PAM/bin/*)` daar staat. Een deny- of
+ask-regel op het commando wint. De allowregel van de wrapper zelf
+(`Bash(~/.claude/bin/*)`) telt nooit voor wat hij uitvoert.
+
 ## Code Quality
 
 - If ANY verification fails, STOP and reassess
