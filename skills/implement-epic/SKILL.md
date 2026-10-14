@@ -910,14 +910,15 @@ gh pr edit <tracking_pr> --body-file /tmp/<project>-tracking-pr-update-$ARGUMENT
 
 **CRITICAL: NEVER merge PRs into `develop` or `main`. NEVER close the parent issue. NEVER push to `main` or `develop` directly. The tracking PR stays as a draft for the user to review and merge manually.**
 
-**CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after polling waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
+**CRITICAL: Phase Final runs ALL verification steps as sub-agents.** The orchestrator's context is depleted after monitoring waves of sub-issues. Each verification step gets a fresh context window to do its job properly. The orchestrator only collects results and builds the summary.
 
 **If this is not the epic's first Phase Final** — a late sub-issue was merged
 after the first round, so verification runs again — then both verification
 progress files already hold a completed run. Reset each one before its spawn
-(Steps 1 and 2 below say where), and apply "A terminal phase on the first poll"
-when reading them: a `DONE` arriving within seconds is the first round
-answering, and its warnings are findings you have already dispositioned.
+(Steps 1 and 2 below say where). If you read them for status, a `DONE` there
+within seconds is the first round answering, and its warnings are findings you
+have already dispositioned: the result is the agent's hand-back (Step 5), never
+the file.
 
 **Every prompt below opens with this block**, with `<worktree>` filled in. A
 fresh context window inherits none of the Worktree section above, and these
@@ -1274,7 +1275,11 @@ ERROR: <description>
 
 ### Step 5: Collect results and show summary
 
-Wait for all verification sub-agents to complete (use `TaskOutput` with `block: true`). Parse each result.
+Wait for each verification agent's hand-back: end the turn after spawning them,
+and each final report arrives as a message followed by its task-completion
+notification. Parse each result from its hand-back, not from its progress file.
+A verification agent that never hands back is handled as in "Sub-agent Liveness
+& Recovery".
 
 **Sync Closes statements:** Ensure all completed sub-issue numbers are in the tracking PR body as `Closes #<N>` statements. Failed and skipped issues should NOT have Closes statements.
 
