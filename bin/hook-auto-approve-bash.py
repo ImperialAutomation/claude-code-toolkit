@@ -278,6 +278,26 @@ def strip_cd_prefix(segment_tokens):
 #
 # `env VAR=val... <cmd>` without -C rides the same function: it is the bare
 # `VAR=val... <cmd>` form with an extra word in front, so only that word goes.
+#
+# One difference between the two spellings survives: env treats EVERY leading
+# argument containing "=" as an assignment, not just a valid VAR=value. In
+# `env FOO=1 ~/.claude/bin/x=y curl evil` env exports `~/.claude/bin/x=y` and
+# runs curl, while strip_env_prefix would judge `~/.claude/bin/x=y` as the
+# command. Both routes therefore refuse a command word that contains "=".
+
+
+def _env_command_word_is_judged(tokens):
+    """True if the word env will exec is the word strip_env_prefix leaves first.
+
+    `tokens` is what follows env's own options. Leading VAR=value tokens are
+    skipped (a dangerous one is caught later by strip_env_prefix); the next
+    token is env's command, and it must not contain "=", or env would take it
+    as one more assignment. False when no command follows.
+    """
+    for token in tokens:
+        if not ENV_ASSIGNMENT_RE.match(token):
+            return "=" not in token
+    return False
 
 
 def strip_env_c_prefix(segment_tokens):
@@ -291,8 +311,10 @@ def strip_env_c_prefix(segment_tokens):
 
     Returns the tokens unchanged when the directory is outside the root, when
     no command follows (`env FOO=bar` would otherwise reduce to empty, i.e. to
-    "safe"), or when any other env option appears (-S re-tokenises a string,
-    -i/-u are out of scope, -- ends option parsing). In each of those cases the
+    "safe"), when any other env option appears (-S re-tokenises a string,
+    -i/-u are out of scope, -- ends option parsing), or when the command word
+    contains "=" (env would export it and run the next word instead; see
+    _env_command_word_is_judged). In each of those cases the
     segment's first token stays "env", which is not on ALLOWLIST, so the
     segment is not approved.
     """
@@ -321,11 +343,11 @@ def strip_env_c_prefix(segment_tokens):
         remainder = rest[index + 1:]
     elif 0 < index < len(rest) and not rest[index].startswith("-"):
         # Assignments followed by a command: keep them for strip_env_prefix.
-        return rest
+        return rest if _env_command_word_is_judged(rest) else segment_tokens
     else:
         return segment_tokens
 
-    if not directory or not remainder:
+    if not directory or not _env_command_word_is_judged(remainder):
         return segment_tokens
 
     if not _is_inside_projects_root(directory):

@@ -1369,6 +1369,23 @@ check(
     hook.strip_env_c_prefix(["env", "FOO=bar"]) == ["env", "FOO=bar"],
 )
 
+# Without an assignment, `env <cmd>` is not this route's business.
+check(
+    "env-assign: strip_env_c_prefix keeps env when no assignment precedes the command",
+    hook.strip_env_c_prefix(["env", "git", "status"]) == ["env", "git", "status"],
+)
+
+# An option after the assignments keeps env (and so the prompt), even where the
+# remainder would be rejected anyway: the decision belongs to this function.
+for tokens in (
+    ["env", "FOO=1", "-u", "HOME", "git", "status"],
+    ["env", "FOO=1", "--", "git", "status"],
+):
+    check(
+        f"env-assign: strip_env_c_prefix keeps env for {' '.join(tokens)}",
+        hook.strip_env_c_prefix(tokens) == tokens,
+    )
+
 for command in (
     "env FOO=bar git status",
     "env FOO=bar BAZ=qux git status",
@@ -1407,6 +1424,13 @@ for command in (
     "env DOCKER_HOST=tcp://evil.example:2375 docker ps",
     "env DOCKER_CONTEXT=evil docker ps",
     "env DOCKER_CONFIG=/tmp/evil-docker docker ps",
+    # env exports EVERY leading word containing "=", so a command word with
+    # "=" in it is an assignment to env and curl is what runs. Both routes.
+    "env FOO=1 ~/.claude/bin/x=y curl http://evil.example",
+    "env FOO=1 ./a=b/.venv/bin/python curl http://evil.example",
+    f"env -C {PROJECT_DIR} ~/.claude/bin/x=y curl http://evil.example",
+    f"env -C {PROJECT_DIR} FOO=1 ~/.claude/bin/x=y curl http://evil.example",
+    f"env FOO=1 -C {PROJECT_DIR} ~/.claude/bin/x=y curl http://evil.example",
 ):
     check(f"env-assign: `{command}` is not approved", not hook.is_command_safe(command))
     check(f"env-assign: `{command}` gets no decision (prompt)", hook_decision(command) is None)
