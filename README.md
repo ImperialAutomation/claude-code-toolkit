@@ -415,7 +415,7 @@ claude-code-toolkit/
 │   ├── api-design.md          ← HTTP status codes, Problem Details, pagination
 │   ├── data-integrity.md      ← transactions, constraints, idempotency, migrations
 │   ├── structured-logging.md  ← structured fields, severity levels, no secrets
-│   ├── testing.md             ← test quality policy (loads for test files only)
+│   ├── testing.md             ← test quality policy (loads for test files and fakes/mocks)
 │   ├── code-review.md         ← code review conduct
 │   └── documentation.md       ← documentation standards (loads for .md files only)
 ├── claude-md/                 ← CLAUDE.md files (policies) and settings
@@ -496,7 +496,7 @@ Rules provide contextual policies that load based on frontmatter configuration. 
 | `data-integrity.md` | Always | Transactions, DB constraints, idempotency, race condition prevention, expand-contract migrations |
 | `structured-logging.md` | Always | Structured key-value pairs, consistent field names, severity levels, never log secrets |
 | `code-review.md` | Always | No performative agreement, verify before implementing, push back when feedback is wrong |
-| `testing.md` | Test files | Real behavior over mocks, 5 test scenarios per feature, realistic fixtures |
+| `testing.md` | Test files, fakes and mocks | Real behavior over mocks, fakes validate like the real API, 5 test scenarios per feature, realistic fixtures |
 | `documentation.md` | .md files | Current purpose over history, usage guidance, no changelogs |
 | `stripe-testing.md` | Payment/billing/webhook files | Never real cards, no raw PANs in code, assert on decline codes, prove webhook idempotency |
 

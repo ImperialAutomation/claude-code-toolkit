@@ -132,9 +132,9 @@ commando wordt er niet door witgewassen (`env -C <projectdir> ./start.sh` prompt
 gewoon), en een `env -C /etc cat passwd` evenmin. `bash -c "cd x && ..."` lost
 niets op; dat is net zo ongematcht als de kale `cd`.
 
-`env -u NAME` (een variabele weghalen, bv. `env -u VIRTUAL_ENV uv run ...`) gaat
-op dezelfde manier door, los of gecombineerd met `-C`. Andere `env`-opties
-(`-i`, `-S`) en een kale `env FOO=1 <cmd>` prompten gewoon.
+`env -u NAME` (een variabele weghalen, bv. `env -u VIRTUAL_ENV uv run ...`) en
+`env FOO=1 <cmd>` gaan op dezelfde manier door, los of gecombineerd met `-C`.
+Andere `env`-opties (`-i`, `-S`, `--`) en een `-u` ná een `FOO=1` prompten gewoon.
 
 ### Wrappers die een commando uitvoeren
 

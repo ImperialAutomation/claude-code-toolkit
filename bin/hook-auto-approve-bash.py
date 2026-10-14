@@ -79,12 +79,17 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # core.fsmonitor then runs on `git status`). Matching ignores case: npm reads
 # its config case-insensitively, and for the rest a lowercase lookalike costs
 # at most a prompt.
+#
+# The DOCKER_* names do not load code into the local process, but they send an
+# approved `docker` command to another daemon or credential store, which
+# _is_safe_docker_invocation (a flag check) cannot see.
 _DANGEROUS_ENV_NAMES = frozenset({
     "PATH", "PAGER", "MANPAGER", "LESSOPEN", "LESSCLOSE", "EDITOR", "VISUAL",
     "BROWSER", "GH_BROWSER", "GH_PAGER", "GH_EDITOR", "SSH_ASKPASS",
     "SHELL", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS",
     "GCONV_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "NODE_OPTIONS",
     "NODE_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT",
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
 })
 _DANGEROUS_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_", "NPM_CONFIG_")
 
@@ -275,8 +280,20 @@ def strip_cd_prefix(segment_tokens):
 #
 # `env -u NAME` (unset a variable) is seen through the same way: removing a
 # variable cannot load code, so it is no riskier than the VAR=value the hook
-# already strips. Every other env option (-i, -S/--split-string, -0, ...) is
-# not, and leaves `env` in place.
+# already strips. Every other env option (-i, -S/--split-string, -0, --, ...)
+# is not, and leaves `env` in place.
+#
+# `env VAR=val... <cmd>` without -C or -u rides the same function: it is the
+# bare `VAR=val... <cmd>` form with an extra word in front.
+#
+# Two quirks of env's own parsing matter. Option parsing stops at the first
+# assignment, so in `env FOO=1 -u X cmd` env tries to exec `-u`; an unset after
+# an assignment is refused rather than judged as something that never runs
+# (`env FOO=1 -C <dir> cmd` stays accepted, as it always was). And env treats
+# EVERY leading argument containing "=" as an assignment, not just a valid
+# VAR=value: in `env FOO=1 ~/.claude/bin/x=y curl evil` it exports
+# `~/.claude/bin/x=y` and runs curl. A command word containing "=" is
+# therefore refused.
 
 ENV_COMMAND = "env"
 ENV_CHDIR_OPTION = ("-C", "--chdir")
@@ -302,18 +319,19 @@ def _env_option_value(args, index, option):
 def _parse_env_arguments(args):
     """Walk the arguments of an `env` invocation up to its command.
 
-    Returns (index of the command in `args`, whether a -C or -u was seen), or
-    None when an argument is not one the hook trusts: an unknown option, a
-    dangerous assignment, an unset without a valid name, or a -C directory
-    outside ~/Projects.
+    Returns the index of the command in `args`, or None when an argument is
+    not one the hook trusts: an unknown option, a dangerous assignment, an
+    unset without a valid name or after an assignment, a -C directory outside
+    ~/Projects, or a command word containing "=".
     """
     index = 0
-    scoped = False
+    seen_assignment = False
     while index < len(args):
         arg = args[index]
         if ENV_ASSIGNMENT_RE.match(arg):
             if is_dangerous_env_assignment(arg):
                 return None
+            seen_assignment = True
             index += 1
             continue
 
@@ -321,44 +339,43 @@ def _parse_env_arguments(args):
         chdir = _env_option_value(args, index, ENV_CHDIR_OPTION)
         if unset is not None:
             name, consumed = unset
-            if not ENV_VAR_NAME_RE.fullmatch(name):
+            if seen_assignment or not ENV_VAR_NAME_RE.fullmatch(name):
                 return None
         elif chdir is not None:
             directory, consumed = chdir
             if not directory or not _is_inside_projects_root(directory):
                 return None
-        elif arg.startswith("-"):
+        elif arg.startswith("-") or "=" in arg:
             return None
         else:
             break
 
-        scoped = True
         index += consumed
 
-    return index, scoped
+    return index
 
 
 def strip_env_invocation(segment_tokens):
     """Drop a leading `env` whose arguments are only safe VAR=value
-    assignments, `-u NAME` unsets and `-C <dir>` (inside ~/Projects), with at
-    least one -C or -u, returning the command that follows. A nested
-    `env -C <dir> env -u NAME <cmd>` is stripped down to <cmd>.
+    assignments, `-u NAME` unsets and `-C <dir>` (inside ~/Projects),
+    returning the command that follows. A nested `env -C <dir> env -u NAME
+    <cmd>` is stripped down to <cmd>.
 
-    Returns the tokens unchanged otherwise, including when no command follows —
-    the segment's first token then stays "env", which is not on ALLOWLIST, so
-    the segment is not approved. `env` with only assignments is therefore left
-    exactly as it was before this rule existed.
+    Returns the tokens unchanged otherwise: when env has no such arguments,
+    when no command follows (`env FOO=bar` would otherwise reduce to empty,
+    i.e. to "safe"), or when _parse_env_arguments refuses an argument. The
+    segment's first token then stays "env", which is not on ALLOWLIST, so the
+    segment is not approved.
     """
     if not segment_tokens or segment_tokens[0] != ENV_COMMAND:
         return segment_tokens
 
-    parsed = _parse_env_arguments(segment_tokens[1:])
-    if parsed is None:
+    index = _parse_env_arguments(segment_tokens[1:])
+    if not index:
         return segment_tokens
 
-    index, scoped = parsed
     remainder = segment_tokens[1 + index:]
-    if not scoped or not remainder:
+    if not remainder:
         return segment_tokens
 
     return strip_env_invocation(remainder)
@@ -971,10 +988,10 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
     same rules, or allowed by the settings `rules`. A settings deny or ask rule
     on the inner command blocks it either way.
 
-    An `env -C <dir>` / `env -u NAME` invocation is stripped BEFORE plain
-    VAR=value assignments, so `FOO=bar` after it is removed by either step. A
-    model-typed `rtk` / `rtk proxy` prefix is stripped last, so
-    `FOO=1 rtk grep ...` is judged as `grep ...`.
+    An `env` invocation (strip_env_invocation) is stripped BEFORE plain
+    VAR=value assignments, so `env FOO=bar git status` is judged exactly like
+    the bare `FOO=bar git status`. A model-typed `rtk` / `rtk proxy` prefix is
+    stripped last, so `FOO=1 rtk grep ...` is judged as `grep ...`.
     """
     if not segment_tokens:
         return True
