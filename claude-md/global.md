@@ -155,9 +155,9 @@ noemt de hint die vorm. Dat werkt recursief: `repeat-cmd.sh 1
 Omgekeerd geeft een wrapper ook niet *minder*: een commando dat kaal mag via een
 eigen `Bash(...)`-allowregel (in `~/.claude/settings*.json` of in de
 `.claude/settings*.json` van het project waar het draait) mag ook achter de
-wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/PAM/bin/backend-test.sh ...`
-door in PAM, omdat `Bash(/home/jan/Projects/PAM/bin/*)` daar staat. De regel
-matcht ook na de prefixen waar de hook doorheen kijkt (`cd`, `env -C`/`env -u`,
+wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/acme/bin/backend-test.sh ...`
+door in een project `acme` waarvan de settings
+`Bash(/home/jan/Projects/acme/bin/*)` bevatten. De regel matcht ook na de prefixen waar de hook doorheen kijkt (`cd`, `env -C`/`env -u`,
 `VAR=`, `rtk`): `cmd-save.sh /tmp/o env -C <dir> python3 x.py` valt onder
 `Bash(python3 *)`. Een deny- of ask-regel op het commando wint, met of zonder
 die prefixen. De allowregel van de wrapper zelf (`Bash(~/.claude/bin/*)`) telt

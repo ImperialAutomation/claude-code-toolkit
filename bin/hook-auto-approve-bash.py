@@ -72,7 +72,7 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # token and falls through to the prompt.
 #
 # A denylist, not an allowlist: over ~21k real transcript Bash calls, the
-# env prefixes agents set are nearly all project-specific (PAM_*, POSTGRES_*,
+# env prefixes agents set are nearly all project-specific (ACME_*, POSTGRES_*,
 # TOKEN), so an allowlist would prompt on almost all legitimate use. Whole
 # families are matched by prefix because single names keep lagging behind
 # (GIT_DIR and GIT_CONFIG_GLOBAL point git at an attacker's config, whose

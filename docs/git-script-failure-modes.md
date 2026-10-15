@@ -52,8 +52,8 @@ It commits in the shell cwd, not wherever `git add -C <path>` pointed.
 The script creates the pull request itself. Any `PreToolUse` hook registered
 against `gh pr create` therefore never fires.
 
-This matters when a project gates PR bodies. PAM has
-`hook-check-agent-review.sh`, which requires a literal marker block from
+This matters when a project gates PR bodies. One project has a
+`hook-check-agent-review.sh` that requires a literal marker block from
 `.github/PULL_REQUEST_TEMPLATE.md` in the body of every agent-authored PR. Going
 through the wrapper skips that gate entirely: the PR is created, no hook
 complains, and the missing checklist is only noticed if someone reads the body.

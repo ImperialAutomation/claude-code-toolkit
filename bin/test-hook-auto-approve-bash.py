@@ -175,7 +175,7 @@ for token in (
     "LD_PRELOAD=/tmp/x.so",
     "PATH=/tmp/sandsim/fakebin:$PATH",
     "PAGER=sh -c id",
-    "PYTHONPATH=/home/jan/Projects/PAM-dev1/backend/app",
+    "PYTHONPATH=/home/jan/Projects/acme-dev1/backend/app",
     "BASH_ENV=/tmp/rc",
     "LESSOPEN=|/tmp/x %s",
     # gh's own spellings of BROWSER/PAGER/EDITOR, and the program ssh runs
@@ -216,7 +216,7 @@ for token in (
     "NO_COLOR=1",
     "TMPDIR=/tmp/cct-e2e",
     "POSTGRES_HOST=localhost",
-    "PAM_REPO_ROOT=/home/jan/Projects/PAM",
+    "ACME_REPO_ROOT=/home/jan/Projects/acme",
     "SCRIPT_UNDER_TEST=bin/git-verify.sh",
     "UV_TOOL_DIR=/tmp/uvtools",
     # gh's non-executing variables stay harmless: no GH_ family match.
@@ -1493,9 +1493,9 @@ check(
 )
 
 check(
-    "env-u: the PAM capture line is approved end to end",
+    "env-u: a real-world capture line is approved end to end",
     hook_decision(
-        f"~/.claude/bin/cmd-save.sh --strip-ansi --stderr merge /tmp/pam-3709-verify-v-ruff-fmt.txt "
+        f"~/.claude/bin/cmd-save.sh --strip-ansi --stderr merge /tmp/acme-verify-ruff-fmt.txt "
         f"env -C {BACKEND_DIR} env -u VIRTUAL_ENV {RUFF_CHECK}"
     )
     == "allow",
@@ -2079,15 +2079,15 @@ settings_tmp = Path(tempfile.mkdtemp(prefix="hook-settings-test-"))
 try:
     fake_home = settings_tmp / "home" / ".claude"
     fake_home.mkdir(parents=True)
-    pam = settings_tmp / "Projects" / "PAM"
-    (pam / ".claude").mkdir(parents=True)
-    (pam / "bin").mkdir()
+    acme = settings_tmp / "Projects" / "acme"
+    (acme / ".claude").mkdir(parents=True)
+    (acme / "bin").mkdir()
     elsewhere = settings_tmp / "Projects" / "billing-api"
     elsewhere.mkdir(parents=True)
-    backend_test = f"{pam}/bin/backend-test.sh"
+    backend_test = f"{acme}/bin/backend-test.sh"
 
-    (pam / ".claude" / "settings.json").write_text(
-        json.dumps({"permissions": {"allow": [f"Bash({pam}/bin/*)"]}})
+    (acme / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": [f"Bash({acme}/bin/*)"]}})
     )
     (fake_home / "settings.json").write_text(
         json.dumps({
@@ -2102,27 +2102,27 @@ try:
         json.dumps({"permissions": {"allow": ["Bash(terraform plan)"]}})
     )
 
-    pam_rules = hook.load_bash_rules(str(pam), claude_home=str(fake_home))
+    acme_rules = hook.load_bash_rules(str(acme), claude_home=str(fake_home))
     elsewhere_rules = hook.load_bash_rules(str(elsewhere), claude_home=str(fake_home))
 
     check(
         "settings: rules are unioned across user, user-local and project scopes",
-        f"Bash({pam}/bin/*)" in pam_rules.allow
-        and "Bash(terraform plan)" in pam_rules.allow
-        and "Bash(make:*)" in pam_rules.allow
-        and pam_rules.deny == ("Bash(make deploy*)", "Bash(git push:*)")
-        and pam_rules.ask == ("Bash(make release*)",),
+        f"Bash({acme}/bin/*)" in acme_rules.allow
+        and "Bash(terraform plan)" in acme_rules.allow
+        and "Bash(make:*)" in acme_rules.allow
+        and acme_rules.deny == ("Bash(make deploy*)", "Bash(git push:*)")
+        and acme_rules.ask == ("Bash(make release*)",),
     )
 
-    pam_capture = f"--strip-ansi /tmp/pam-3709-red5.txt {backend_test} tests/api/test_cleanup.py -q -p no:cacheprovider -k shared_profile"
+    acme_capture = f"--strip-ansi /tmp/acme-capture.txt {backend_test} tests/test_example.py -q -p no:cacheprovider -k example"
     for wrapped in (
-        f"{SAVE} {pam_capture}",
-        f"{REPEAT} 3 {backend_test} tests/api/test_cleanup.py -q",
-        f"{VENV} {backend_test} tests/api/test_cleanup.py -q",
+        f"{SAVE} {acme_capture}",
+        f"{REPEAT} 3 {backend_test} tests/test_example.py -q",
+        f"{VENV} {backend_test} tests/test_example.py -q",
     ):
         check(
             f"settings: `{wrapped.split()[0].rsplit('/', 1)[-1]}` around a project-allowed script is approved",
-            hook.is_command_safe(wrapped, pam_rules),
+            hook.is_command_safe(wrapped, acme_rules),
         )
         check(
             f"settings: `{wrapped.split()[0].rsplit('/', 1)[-1]}` around it from another project is not",
@@ -2132,27 +2132,27 @@ try:
 
     check(
         "settings: without rules a project script behind a wrapper is still not approved",
-        not hook.is_command_safe(f"{SAVE} {pam_capture}"),
+        not hook.is_command_safe(f"{SAVE} {acme_capture}"),
     )
 
     check(
         "settings: user-local exact rule approves the inner command",
-        hook.is_command_safe(f"{SAVE} /tmp/plan.txt terraform plan", pam_rules),
+        hook.is_command_safe(f"{SAVE} /tmp/plan.txt terraform plan", acme_rules),
     )
 
     check(
         "settings: an exact rule does not approve extra arguments",
-        not hook.is_command_safe(f"{SAVE} /tmp/plan.txt terraform plan -destroy", pam_rules),
+        not hook.is_command_safe(f"{SAVE} /tmp/plan.txt terraform plan -destroy", acme_rules),
     )
 
     check(
         "settings: `cmd:*` matches the bare command too",
-        hook.is_command_safe(f"{SAVE} /tmp/make.txt make", pam_rules),
+        hook.is_command_safe(f"{SAVE} /tmp/make.txt make", acme_rules),
     )
 
     check(
         "settings: `cmd *` does not match a longer command name",
-        not hook.is_command_safe(f"{SAVE} /tmp/k.txt kubectlx get pods", pam_rules),
+        not hook.is_command_safe(f"{SAVE} /tmp/k.txt kubectlx get pods", acme_rules),
     )
 
     check(
@@ -2170,8 +2170,8 @@ try:
     ):
         check(
             f"settings: Bash(~/.claude/bin/*) does not approve `{nested}`",
-            not hook.is_command_safe(nested, pam_rules)
-            and hook.unapprovable_wrapper(nested, pam_rules) is not None,
+            not hook.is_command_safe(nested, acme_rules)
+            and hook.unapprovable_wrapper(nested, acme_rules) is not None,
         )
 
     # deny and ask win over allow, also over the hook's own ALLOWLIST.
@@ -2183,13 +2183,13 @@ try:
     ):
         check(
             f"settings: a deny/ask rule blocks `{blocked}`",
-            not hook.is_command_safe(blocked, pam_rules)
-            and hook.unapprovable_wrapper(blocked, pam_rules) is not None,
+            not hook.is_command_safe(blocked, acme_rules)
+            and hook.unapprovable_wrapper(blocked, acme_rules) is not None,
         )
 
     check(
         "settings: the allow rule next to those deny rules still applies",
-        hook.is_command_safe(f"{SAVE} /tmp/o make test", pam_rules),
+        hook.is_command_safe(f"{SAVE} /tmp/o make test", acme_rules),
     )
 
     # Missing and malformed settings files are skipped, never an error.
@@ -2213,12 +2213,12 @@ try:
 
     # End to end: main() reads the project settings from the hook input's cwd.
     check(
-        "settings: hook approves the PAM capture with cwd in that project",
-        hook_decision(f"{SAVE} {pam_capture}", cwd=str(pam)) == "allow",
+        "settings: hook approves the project capture with cwd in that project",
+        hook_decision(f"{SAVE} {acme_capture}", cwd=str(acme)) == "allow",
     )
     check(
-        "settings: hook denies the PAM capture with cwd outside that project",
-        hook_decision(f"{SAVE} {pam_capture}", cwd=str(elsewhere)) == "deny",
+        "settings: hook denies the project capture with cwd outside that project",
+        hook_decision(f"{SAVE} {acme_capture}", cwd=str(elsewhere)) == "deny",
     )
     check(
         "settings: hook reads the user settings from CLAUDE_CONFIG_DIR",
@@ -2241,21 +2241,21 @@ finally:
 # The hook's own rules see through cd / env -C / env -u / VAR= / rtk before
 # judging a command; the settings rules must too, or `Bash(python3 *)` never
 # matches `env -C <dir> python3 ...` and the wrapper grants less than the bare
-# command. The three commands below are from a real PAM session.
+# command. The three commands below have the shape of real session commands.
 
-S = "/tmp/claude-1001/pam-session/scratchpad"
-PAM_REAL = "/home/jan/Projects/PAM"
-EXAMPLE_1_SAVE = f"{SAVE} {S}/i18n.txt env -C {PAM_REAL} bash scripts/validate-i18n.sh"
-EXAMPLE_1 = f"{EXAMPLE_1_SAVE}; rtk read {S}/i18n.txt --tail-lines 30"
+S = "/tmp/acme-session/scratchpad"
+ACME_DIR = "/home/jan/Projects/acme"
+EXAMPLE_1_SAVE = f"{SAVE} {S}/check.txt env -C {ACME_DIR} bash scripts/check.sh"
+EXAMPLE_1 = f"{EXAMPLE_1_SAVE}; rtk read {S}/check.txt --tail-lines 30"
 EXAMPLE_2 = (
-    f'grep -n -i "unused\\|missing" {S}/i18n.txt | head; '
-    f"{SAVE} {S}/i18n2.txt env -C {PAM_REAL} python3 ~/.claude/bin/i18n-audit.py; "
-    f'grep -n -i "invite" {S}/i18n2.txt | head -20'
+    f'grep -n -i "unused\\|missing" {S}/check.txt | head; '
+    f"{SAVE} {S}/audit.txt env -C {ACME_DIR} python3 ~/.claude/bin/i18n-audit.py; "
+    f'grep -n -i "invite" {S}/audit.txt | head -20'
 )
 EXAMPLE_3 = (
-    f"{SAVE} --stderr merge {S}/i18n2.txt env -C {PAM_REAL} python3 "
+    f"{SAVE} --stderr merge {S}/audit.txt env -C {ACME_DIR} python3 "
     "~/.claude/bin/i18n-audit.py --locale-dir frontend/src/i18n/locales; "
-    f'grep -n -i "total" {S}/i18n2.txt | head -30'
+    f'grep -n -i "total" {S}/audit.txt | head -30'
 )
 
 strip_tmp = Path(tempfile.mkdtemp(prefix="hook-strip-test-"))
@@ -2302,7 +2302,7 @@ try:
     )
 
     for prefixed in (
-        f"cd {PAM_REAL} python3 x.py",
+        f"cd {ACME_DIR} python3 x.py",
         f"env -u VIRTUAL_ENV python3 x.py",
         f"env FOO=1 python3 x.py",
         f"FOO=1 python3 x.py",
@@ -2327,8 +2327,8 @@ try:
 
     # deny and ask rules match the stripped inner command as well.
     for blocked in (
-        f"{SAVE} /tmp/o env -C {PAM_REAL} python3 x.py",
-        f"{SAVE} /tmp/o env -C {PAM_REAL} bash x.sh",
+        f"{SAVE} /tmp/o env -C {ACME_DIR} python3 x.py",
+        f"{SAVE} /tmp/o env -C {ACME_DIR} bash x.sh",
         f"{SAVE} /tmp/o FOO=1 python3 x.py",
         f"{SAVE} /tmp/o rtk proxy python3 x.py",
         EXAMPLE_2,
