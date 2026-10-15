@@ -72,7 +72,7 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # token and falls through to the prompt.
 #
 # A denylist, not an allowlist: over ~21k real transcript Bash calls, the
-# env prefixes agents set are nearly all project-specific (PAM_*, POSTGRES_*,
+# env prefixes agents set are nearly all project-specific (ACME_*, POSTGRES_*,
 # TOKEN), so an allowlist would prompt on almost all legitimate use. Whole
 # families are matched by prefix because single names keep lagging behind
 # (GIT_DIR and GIT_CONFIG_GLOBAL point git at an attacker's config, whose
@@ -385,7 +385,7 @@ def strip_env_invocation(segment_tokens):
 # The user's own permission rules, as Claude Code reads them from the settings
 # files. The hook consults them only for the inner command of a command-running
 # wrapper (below): a bare command a settings rule allows runs prompt-free, and
-# the hook's "ask" would otherwise override that rule behind a wrapper.
+# the hook's deny would otherwise override that rule behind a wrapper.
 
 SETTINGS_FILENAMES = ("settings.json", "settings.local.json")
 # Claude Code reads the user settings from here instead of ~/.claude when set.
@@ -482,15 +482,25 @@ def _settings_command(tokens):
 
 
 def is_blocked_by_settings(tokens, rules):
-    """True if a deny or ask rule matches the command `tokens`."""
-    command = _settings_command(tokens)
-    return matches_any_bash_rule(command, rules.deny) or matches_any_bash_rule(
-        command, rules.ask
+    """True if a deny or ask rule matches the command `tokens`, as written or
+    with any of its prefixes stripped (strip_command_prefixes). Each extra
+    form can only make a deny or ask rule match more, never less."""
+    before_rtk, command = strip_command_prefixes(tokens)
+    return any(
+        matches_any_bash_rule(_settings_command(form), rules.deny)
+        or matches_any_bash_rule(_settings_command(form), rules.ask)
+        for form in (tokens, before_rtk, command)
     )
 
 
 def is_allowed_by_settings(tokens, rules):
     """True if an allow rule, and no deny or ask rule, matches `tokens`.
+
+    The allow rule may match the command as written, or the command after the
+    prefixes the hook's own rules see through (strip_command_prefixes): a rule
+    `Bash(python3 *)` allows `env -C <dir> python3 x` just as it allows the
+    bare `python3 x`. An `rtk` prefix is seen through only where approval
+    trusts it (is_trusted_rtk_wrap).
 
     Never for a command that names a command-running wrapper anywhere: those
     are judged by their own inner command, and `Bash(~/.claude/bin/*)` would
@@ -500,7 +510,15 @@ def is_allowed_by_settings(tokens, rules):
         return False
     if is_blocked_by_settings(tokens, rules):
         return False
-    return matches_any_bash_rule(_settings_command(tokens), rules.allow)
+    if matches_any_bash_rule(_settings_command(tokens), rules.allow):
+        return True
+
+    before_rtk, command = strip_command_prefixes(tokens)
+    return (
+        bool(command)
+        and is_trusted_rtk_wrap(before_rtk)
+        and matches_any_bash_rule(_settings_command(command), rules.allow)
+    )
 
 
 # --- command-running wrappers ---------------------------------------------------
@@ -511,8 +529,10 @@ def is_allowed_by_settings(tokens, rules):
 #
 # The rule: a wrapper grants nothing the bare command does not have. The hook
 # judges the inner command by the same rules as a bare segment, and main()
-# answers "ask" when it fails — not merely "no decision", which would leave the
-# allow rule to approve it anyway. Because the check recurses, an inner
+# answers "deny" with a hint when it fails: not merely "no decision", which
+# would leave the allow rule to approve it anyway, and not "ask", which stalls
+# every unattended session. The hint sends the agent to the bare command, where
+# the normal permission flow decides. Because the check recurses, an inner
 # wrapper is judged by ITS inner command in turn.
 #
 # Each parser receives the arguments after the script and returns the inner
@@ -526,21 +546,33 @@ def is_allowed_by_settings(tokens, rules):
 REPEAT_COUNT_RE = re.compile(r"[1-9][0-9]*")
 
 
+def _runnable(inner):
+    """`inner` when it names a command to run, otherwise None. A command word
+    that starts with a dash is an option the wrapper did not parse (misplaced,
+    or unknown): the script would try to execute it and fail, so the call has
+    no command the hook could judge or the agent could run bare."""
+    if not inner or inner[0].startswith("-"):
+        return None
+    return inner
+
+
 def _repeat_cmd_inner(args):
     """`repeat-cmd.sh <positive-integer> <cmd> [args...]`."""
-    if len(args) < 2 or not REPEAT_COUNT_RE.fullmatch(args[0]):
+    if not args or not REPEAT_COUNT_RE.fullmatch(args[0]):
         return None
-    return args[1:]
+    return _runnable(args[1:])
 
 
 CMD_SAVE_STDERR_MODES = frozenset({"separate", "merge"})
+CMD_SAVE_OPTIONS = frozenset({"--stderr", "--strip-ansi", "--"})
 
 
-def _cmd_save_inner(args):
-    """`cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <out> <cmd>
-    [args...]`, parsed exactly like the script's own option loop: the first
-    argument that is not an option is the output file, and `--` ends the
-    options so an output file may start with a dash."""
+def _cmd_save_outfile_index(args):
+    """Index of the output file in `cmd-save.sh [--stderr separate|merge]
+    [--strip-ansi] [--] <out> ...`, parsed exactly like the script's own option
+    loop: the first argument that is not an option is the output file, and `--`
+    ends the options so an output file may start with a dash. None when the
+    options are malformed."""
     index = 0
     while index < len(args):
         arg = args[index]
@@ -557,9 +589,24 @@ def _cmd_save_inner(args):
             return None
         else:
             break
+    return index if index < len(args) else None
 
-    inner = args[index + 1:]
-    return inner or None
+
+def _cmd_save_inner(args):
+    """`cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <out> <cmd>
+    [args...]`."""
+    index = _cmd_save_outfile_index(args)
+    return None if index is None else _runnable(args[index + 1:])
+
+
+def _cmd_save_diagnose(args):
+    """Why a malformed cmd-save.sh call is malformed, when the cause is the
+    common one: an option after the output file, which the script would run
+    as the command."""
+    index = _cmd_save_outfile_index(args)
+    if index is not None and args[index + 1:index + 2] and args[index + 1] in CMD_SAVE_OPTIONS:
+        return f"Its options go before <outfile>; `{args[index + 1]}` came after it."
+    return None
 
 
 VENV_RUN_REPO_FLAG = "--repo"
@@ -576,13 +623,25 @@ def _venv_run_inner(args):
         args = args[2:]
     elif args and args[0].startswith(VENV_RUN_REPO_FLAG + "="):
         args = args[1:]
-    return args or None
+    return _runnable(args)
 
+
+# `diagnose(args)` explains a malformed call in one sentence when it can name
+# the cause, otherwise returns None and the documented shape speaks for itself.
+WrapperSpec = namedtuple("WrapperSpec", ("parse", "usage", "diagnose"), defaults=(None,))
 
 COMMAND_RUNNING_WRAPPERS = {
-    "repeat-cmd.sh": _repeat_cmd_inner,
-    "cmd-save.sh": _cmd_save_inner,
-    "venv-run.sh": _venv_run_inner,
+    "repeat-cmd.sh": WrapperSpec(
+        _repeat_cmd_inner, "repeat-cmd.sh <count> <cmd> [args...]"
+    ),
+    "cmd-save.sh": WrapperSpec(
+        _cmd_save_inner,
+        "cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <outfile> <cmd> [args...]",
+        _cmd_save_diagnose,
+    ),
+    "venv-run.sh": WrapperSpec(
+        _venv_run_inner, "venv-run.sh [--repo <dir>] <cmd> [args...]"
+    ),
 }
 
 
@@ -595,10 +654,38 @@ def command_running_wrapper(token):
     return name if name in COMMAND_RUNNING_WRAPPERS else None
 
 
+# What main() needs to tell the agent about a wrapper it will not approve: the
+# wrapper the hint is about, the command it runs (None when the call does not
+# have the wrapper's documented shape, so it runs nothing), and for a malformed
+# call the cause when the wrapper's diagnose can name it (otherwise None).
+UnapprovableWrapper = namedtuple("UnapprovableWrapper", ("name", "inner", "detail"))
+
+
+def _innermost_wrapper_call(tokens):
+    """Follow the wrapper chain of a segment from the first wrapper it names:
+    an UnapprovableWrapper for the last wrapper reached, where `inner` is the
+    command it runs, or None when its arguments are malformed. A wrapper whose
+    inner command (after the prefixes the hook sees through) is again a wrapper
+    is followed into, the way is_segment_safe recurses."""
+    index = next(i for i, token in enumerate(tokens) if command_running_wrapper(token))
+    name, args = command_running_wrapper(tokens[index]), tokens[index + 1:]
+    inner = COMMAND_RUNNING_WRAPPERS[name].parse(args)
+    while inner is not None:
+        _, command = strip_command_prefixes(inner)
+        nested = command_running_wrapper(command[0]) if command else None
+        if not nested:
+            break
+        name, args = nested, command[1:]
+        inner = COMMAND_RUNNING_WRAPPERS[name].parse(args)
+    diagnose = COMMAND_RUNNING_WRAPPERS[name].diagnose
+    detail = diagnose(args) if inner is None and diagnose else None
+    return UnapprovableWrapper(name, inner, detail)
+
+
 def unapprovable_wrapper(command, rules=NO_BASH_RULES):
-    """The name of the first command-running wrapper mentioned in a segment of
-    `command` that the hook will not approve under the settings `rules`, or
-    None.
+    """An UnapprovableWrapper for the first segment of `command` that mentions
+    a command-running wrapper and that the hook will not approve under the
+    settings `rules`, or None.
 
     Per segment, not per command: permission rules are matched per segment of a
     chain, so `git status && repeat-cmd.sh 1 curl x` would otherwise be approved
@@ -608,7 +695,7 @@ def unapprovable_wrapper(command, rules=NO_BASH_RULES):
     wrappers like `timeout 5`, `time` and `nohup` before matching, so behind one
     of them the allow rule still matches the script. Recognising every flag of
     every such prefix is a losing game; a segment that names a wrapper and is
-    not approvable asks, whatever stands in front. Never raises — on
+    not approvable is denied, whatever stands in front. Never raises: on
     unparseable input the caller falls through.
     """
     try:
@@ -617,13 +704,40 @@ def unapprovable_wrapper(command, rules=NO_BASH_RULES):
         return None
 
     for tokens in segments:
-        mentioned = next(
-            (name for name in map(command_running_wrapper, tokens) if name), None
-        )
-        if mentioned and not is_segment_safe(tokens, rules):
-            return mentioned
+        mentions_wrapper = any(command_running_wrapper(token) for token in tokens)
+        if mentions_wrapper and not is_segment_safe(tokens, rules):
+            return _innermost_wrapper_call(tokens)
 
     return None
+
+
+def _shell_join(tokens):
+    """Like shlex.join, but a leading `~/` stays unquoted so the command still
+    expands it when the agent runs it as given."""
+    def quote(token):
+        if token.startswith("~/") and token[2:]:
+            return "~/" + shlex.quote(token[2:])
+        return shlex.quote(token)
+    return " ".join(quote(token) for token in tokens)
+
+
+def unapprovable_wrapper_reason(found):
+    """The deny reason for an UnapprovableWrapper: run the inner command bare,
+    or, when the call is malformed, the shape the wrapper documents."""
+    if found.inner is None:
+        reason = (
+            f"Hook: this {found.name} call does not have the documented shape, "
+            "so it runs nothing the hook can judge. The shape is "
+            f"`~/.claude/bin/{COMMAND_RUNNING_WRAPPERS[found.name].usage}`."
+        )
+        return f"{reason} {found.detail}" if found.detail else reason
+    return (
+        f"Hook: {found.name} runs the command it is given, and is approved only "
+        "when that command would be approved on its own. This one is not "
+        "approvable by the hook or your allow rules. Run it bare, without the "
+        f"wrapper (`{_shell_join(found.inner)}`), so the normal permission flow "
+        "(settings rules, auto mode, or a prompt) decides it."
+    )
 
 
 # --- model-typed rtk prefix -----------------------------------------------------
@@ -676,6 +790,22 @@ def is_trusted_rtk_wrap(segment_tokens):
 
     subcommand = segment_tokens[1] if len(segment_tokens) > 1 else None
     return subcommand == RTK_PROXY_SUBCOMMAND or subcommand in RTK_NATIVE_PASSTHROUGH
+
+
+def strip_command_prefixes(segment_tokens):
+    """Strip the prefixes the hook sees through, in the order it applies them:
+    `cd <dir>` (inside ~/Projects), an `env` invocation, VAR=value assignments,
+    then a model-typed `rtk` / `rtk proxy`.
+
+    Returns (before_rtk, command): the segment with everything but the rtk
+    prefix stripped, and the command that is left after that too. Approval
+    needs both, since it trusts the rtk prefix only when is_trusted_rtk_wrap
+    holds for `before_rtk`.
+    """
+    before_rtk = strip_env_prefix(
+        strip_env_invocation(strip_cd_prefix(segment_tokens))
+    )
+    return before_rtk, strip_rtk_prefix(before_rtk)
 
 
 def _is_allowed_bin_token(token):
@@ -985,8 +1115,9 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
     git-commit.sh already handles quoting/heredoc bodies safely).
 
     A command-running wrapper is safe when its inner command is: safe by these
-    same rules, or allowed by the settings `rules`. A settings deny or ask rule
-    on the inner command blocks it either way.
+    same rules, or allowed by the settings `rules` (matched after the same
+    prefix stripping, see is_allowed_by_settings). A settings deny or ask rule
+    on the inner command, raw or stripped, blocks it either way.
 
     An `env` invocation (strip_env_invocation) is stripped BEFORE plain
     VAR=value assignments, so `env FOO=bar git status` is judged exactly like
@@ -996,12 +1127,9 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
     if not segment_tokens:
         return True
 
-    env_stripped = strip_env_prefix(
-        strip_env_invocation(strip_cd_prefix(segment_tokens))
-    )
+    env_stripped, stripped = strip_command_prefixes(segment_tokens)
     if not is_trusted_rtk_wrap(env_stripped):
         return False
-    stripped = strip_rtk_prefix(env_stripped)
     if not stripped:
         # A bare `rtk` / `rtk proxy` runs no wrapped command; never approve it.
         return not env_stripped
@@ -1023,7 +1151,7 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
 
     wrapper = command_running_wrapper(first)
     if wrapper:
-        inner = COMMAND_RUNNING_WRAPPERS[wrapper](stripped[1:])
+        inner = COMMAND_RUNNING_WRAPPERS[wrapper].parse(stripped[1:])
         if inner is None or is_blocked_by_settings(inner, rules):
             return False
         return is_segment_safe(inner, rules) or is_allowed_by_settings(inner, rules)
@@ -1161,20 +1289,18 @@ def main():
         claude_home=os.environ.get(CONFIG_DIR_ENV) or CLAUDE_HOME,
     )
 
-    # "ask", not silence: Bash(~/.claude/bin/*) would approve the wrapper
-    # without a prompt, whatever command it was handed.
+    # Not silence: Bash(~/.claude/bin/*) would approve the wrapper without a
+    # prompt, whatever command it was handed. Not "ask" either: a hook ask
+    # overrides the allow rules and the auto-mode classifier, so it stalls
+    # every session nobody is watching. A deny with a hint lets the agent run
+    # the inner command bare, where the normal permission flow decides.
     wrapper = unapprovable_wrapper(command, rules)
     if wrapper:
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "ask",
-                "permissionDecisionReason": (
-                    f"Hook: {wrapper} runs the command it is given, so it is "
-                    "approved only when it is called in its documented shape "
-                    "and that command would be approved on its own. This one "
-                    "is not, so it needs your confirmation."
-                ),
+                "permissionDecision": "deny",
+                "permissionDecisionReason": unapprovable_wrapper_reason(wrapper),
             }
         }
         print(json.dumps(output))

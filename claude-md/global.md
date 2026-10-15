@@ -144,17 +144,24 @@ Drie scripts voeren het commando uit dat je ze geeft: `repeat-cmd.sh`,
 goedkeuren. **Enforced, not advisory: een wrapper geeft niets wat het kale
 commando niet heeft.** `hook-auto-approve-bash.py` beoordeelt het commando na de
 opties van de wrapper met dezelfde regels als een los commando, en antwoordt
-`ask` als het niet goedgekeurd zou worden of als de aanroep niet de
-gedocumenteerde vorm heeft. Dat werkt recursief: `repeat-cmd.sh 1
-~/.claude/bin/cmd-save.sh /tmp/o curl x` prompt, `... git status` niet.
+`deny` met een hint als het niet goedgekeurd zou worden. Geen `ask`: een
+hook-ask gaat vóór de allowregels en de auto-mode-classifier, en laat dus elke
+sessie hangen waar niemand naar kijkt. De hint noemt het kale commando; **voer
+dat zonder de wrapper uit**, dan beslist de normale permissieflow (settings,
+auto mode of een prompt). Heeft de aanroep niet de gedocumenteerde vorm, dan
+noemt de hint die vorm. Dat werkt recursief: `repeat-cmd.sh 1
+~/.claude/bin/cmd-save.sh /tmp/o curl x` wordt geweigerd, `... git status` niet.
 
 Omgekeerd geeft een wrapper ook niet *minder*: een commando dat kaal mag via een
 eigen `Bash(...)`-allowregel (in `~/.claude/settings*.json` of in de
 `.claude/settings*.json` van het project waar het draait) mag ook achter de
-wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/PAM/bin/backend-test.sh ...`
-door in PAM, omdat `Bash(/home/jan/Projects/PAM/bin/*)` daar staat. Een deny- of
-ask-regel op het commando wint. De allowregel van de wrapper zelf
-(`Bash(~/.claude/bin/*)`) telt nooit voor wat hij uitvoert.
+wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/acme/bin/backend-test.sh ...`
+door in een project `acme` waarvan de settings
+`Bash(/home/jan/Projects/acme/bin/*)` bevatten. De regel matcht ook na de prefixen waar de hook doorheen kijkt (`cd`, `env -C`/`env -u`,
+`VAR=`, `rtk`): `cmd-save.sh /tmp/o env -C <dir> python3 x.py` valt onder
+`Bash(python3 *)`. Een deny- of ask-regel op het commando wint, met of zonder
+die prefixen. De allowregel van de wrapper zelf (`Bash(~/.claude/bin/*)`) telt
+nooit voor wat hij uitvoert.
 
 ## Code Quality
 
@@ -194,7 +201,7 @@ ask-regel op het commando wint. De allowregel van de wrapper zelf
   - Use Write to create new files (auto-creates parent directories) — not `mkdir` + Bash
   - Use `git rm` to delete files — not `rm`
 - Bash tool: always save API responses to a file first, then read the file. Use `~/.claude/bin/gh-save.sh /tmp/<project>-<purpose>-<nr>.json <gh-args>` to save `gh` output (shell redirects like `>` trigger permission prompts).
-- **Output van een ander commando naar een bestand: `~/.claude/bin/cmd-save.sh <outfile> <commando> [args...]`.** Een redirect verslaat permissiematching: de regel matcht op het eerste woord, dus `docker exec ... > /tmp/out` valt niet meer onder `Bash(docker *)` en prompt élke keer. De wrapper is één commando en matcht `Bash(~/.claude/bin/*)`. Hij geeft de exit-status van het commando zélf door (een mislukt commando schrijft anders een bestand en lijkt geslaagd, waarna je een foutmelding als data leest) en print het aantal bytes (een capture van 0 bytes is onzichtbaar tot iets verderop vreemd doet). stderr gaat standaard níet mee in het bestand, want een waarschuwing midden in een JSON-capture maakt die onparseerbaar; gebruik `--stderr merge` als de capture juist bedoeld is om een fout te diagnosticeren. Typisch voor database-, container- en cluster-CLI's: `cmd-save.sh /tmp/<project>-pods-<nr>.json kubectl get pods -o json`. Goedgekeurd alleen als `<commando>` dat op zichzelf ook is (zie "Wrappers die een commando uitvoeren").
+- **Output van een ander commando naar een bestand: `~/.claude/bin/cmd-save.sh <outfile> <commando> [args...]`.** Een redirect verslaat permissiematching: de regel matcht op het eerste woord, dus `docker exec ... > /tmp/out` valt niet meer onder `Bash(docker *)` en prompt élke keer. De wrapper is één commando en matcht `Bash(~/.claude/bin/*)`. Hij geeft de exit-status van het commando zélf door (een mislukt commando schrijft anders een bestand en lijkt geslaagd, waarna je een foutmelding als data leest) en print het aantal bytes (een capture van 0 bytes is onzichtbaar tot iets verderop vreemd doet). stderr gaat standaard níet mee in het bestand, want een waarschuwing midden in een JSON-capture maakt die onparseerbaar; gebruik `--stderr merge` als de capture juist bedoeld is om een fout te diagnosticeren. Opties staan altijd vóór `<outfile>`: alles erna is het commando, dus `cmd-save.sh /tmp/o --stderr merge git log` voert `--stderr` uit. Typisch voor database-, container- en cluster-CLI's: `cmd-save.sh /tmp/<project>-pods-<nr>.json kubectl get pods -o json`. Goedgekeurd alleen als `<commando>` dat op zichzelf ook is (zie "Wrappers die een commando uitvoeren").
 - **Kleurcodes in opgeslagen output: `~/.claude/bin/strip-ansi.sh <file> [<outfile>]`, nooit `| sed 's/\x1b\[[0-9;]*m//g'`.** Test-runner-output (vitest, pytest met kleur) zit vol ANSI-escapes, en een `grep ... | sed ... | head`-keten prompt élke keer op het `sed`-segment. Het script schrijft een schone kopie naar `<outfile>` (standaard `<file>.clean`) en laat de input ongemoeid; lees die kopie daarna met Read of Grep, dan verdwijnt de keten. Het verwijdert ook de cursorcodes en hyperlinks van vitest die die sed-regex laat staan. Maak je de capture zelf, gebruik dan meteen `cmd-save.sh --strip-ansi <outfile> <commando>`, dan is het bestand vanaf het begin schoon.
 - Never use command substitution with pipes for API data
 - Never write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc). These don't match permission patterns like `Bash(git *)`. Instead: use the Write tool to write to `/tmp/` with a project+nr-specific name (see "Tmp-bestandsnamen"), then reference the file in Bash (e.g., `git commit -F /tmp/acme-webshop-commit-msg-42.txt`, `gh issue create --body-file /tmp/acme-webshop-issue-body-42.md`).

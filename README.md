@@ -119,7 +119,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
 | `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
-| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Reports the command's own exit status and the byte count written. The auto-approve hook approves it only when `<command>` is approvable on its own, and answers `ask` otherwise |
+| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Options go before `<output-file>`; everything after it is the command. Reports the command's own exit status and the byte count written. The auto-approve hook approves it only when `<command>` is approvable on its own, and otherwise denies it with a hint to run `<command>` bare |
 | `strip-ansi.sh` | `strip-ansi.sh <file> [<outfile>]` | Write a copy of a file without ANSI colour/cursor codes (default `<file>.clean`), so captured test output can be grepped without a `sed` chain |
 
 `cmd-save.sh` is the general case; `gh-save.sh` is the `gh`-shaped shorthand and delegates to it. Reach for it whenever output belongs on disk: to `diff` two captures, to feed one command's output into another, or because the output is too long to be worth putting through the model's context.
@@ -280,7 +280,7 @@ misdescribe the argument.
 | `http-status.sh` | `http-status.sh [--body] [--max-time SECS] <url> [url...]` | HTTP status per URL as a single command. One URL prints the bare code; several print `<status>  <url>`. 4xx/5xx exit 0 (a valid answer); transport failures print `ERR` and exit 1 |
 | `wait-for-pattern.sh` | `wait-for-pattern.sh [--newer-than EPOCH] <file> <extended-regex> [timeout] [poll]` | Block until a regex appears in a file. Exit 0 prints the matching line(s); exit 1 dumps the file's current contents for diagnosis. A missing file is a normal starting state, not an error. `--newer-than` ignores the file until its mtime passes the given epoch |
 | `wait-for-healthy.sh` | `wait-for-healthy.sh <container> [--timeout SECS] [--interval SECS]` | Block until a Docker container reports healthy. Exit 1 on timeout |
-| `repeat-cmd.sh` | `repeat-cmd.sh <count> <command> [args...]` | Run a command N times for warm/cold timing, replacing `for i in ...; do <cmd>; done`. Output is discarded; stops at the first failing run and reports its number, exit status and stderr. Prints runs, total and per-run time. The auto-approve hook approves it only when `<command>` is approvable on its own, and answers `ask` otherwise |
+| `repeat-cmd.sh` | `repeat-cmd.sh <count> <command> [args...]` | Run a command N times for warm/cold timing, replacing `for i in ...; do <cmd>; done`. Output is discarded; stops at the first failing run and reports its number, exit status and stderr. Prints runs, total and per-run time. The auto-approve hook approves it only when `<command>` is approvable on its own, and otherwise denies it with a hint to run `<command>` bare |
 
 `docker-health-check.sh` has to decide which containers belong to the project, and the compose file alone does not always say. `docker compose -f <file> ps` derives the project name from that file's directory, so a stack started under its own name (`docker compose -p mystack -f a.yml -f b.yml up`) or from an `include:` set lives in a project this query never asks about. The query then succeeds and returns nothing, which is the worst available failure: a running, healthy stack reads exactly like a stopped one.
 
@@ -311,7 +311,7 @@ not.
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/). The venv follows the test path's project root, so a path in another worktree uses that worktree's interpreter |
-| `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, alembic, ruff) with auto-detection, falling back to PATH. `--repo` picks the project root when it is not the current directory. The auto-approve hook approves it only when `<cmd>` is approvable on its own, and answers `ask` otherwise, so `pip` prompts just as it does bare |
+| `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, alembic, ruff) with auto-detection, falling back to PATH. `--repo` picks the project root when it is not the current directory. The auto-approve hook approves it only when `<cmd>` is approvable on its own, and otherwise denies it with a hint to run `<cmd>` bare, so `pip` gets the same permission flow as it does bare |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
@@ -322,7 +322,7 @@ not.
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
-| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool |
+| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
