@@ -144,17 +144,24 @@ Drie scripts voeren het commando uit dat je ze geeft: `repeat-cmd.sh`,
 goedkeuren. **Enforced, not advisory: een wrapper geeft niets wat het kale
 commando niet heeft.** `hook-auto-approve-bash.py` beoordeelt het commando na de
 opties van de wrapper met dezelfde regels als een los commando, en antwoordt
-`ask` als het niet goedgekeurd zou worden of als de aanroep niet de
-gedocumenteerde vorm heeft. Dat werkt recursief: `repeat-cmd.sh 1
-~/.claude/bin/cmd-save.sh /tmp/o curl x` prompt, `... git status` niet.
+`deny` met een hint als het niet goedgekeurd zou worden. Geen `ask`: een
+hook-ask gaat vóór de allowregels en de auto-mode-classifier, en laat dus elke
+sessie hangen waar niemand naar kijkt. De hint noemt het kale commando; **voer
+dat zonder de wrapper uit**, dan beslist de normale permissieflow (settings,
+auto mode of een prompt). Heeft de aanroep niet de gedocumenteerde vorm, dan
+noemt de hint die vorm. Dat werkt recursief: `repeat-cmd.sh 1
+~/.claude/bin/cmd-save.sh /tmp/o curl x` wordt geweigerd, `... git status` niet.
 
 Omgekeerd geeft een wrapper ook niet *minder*: een commando dat kaal mag via een
 eigen `Bash(...)`-allowregel (in `~/.claude/settings*.json` of in de
 `.claude/settings*.json` van het project waar het draait) mag ook achter de
 wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/PAM/bin/backend-test.sh ...`
-door in PAM, omdat `Bash(/home/jan/Projects/PAM/bin/*)` daar staat. Een deny- of
-ask-regel op het commando wint. De allowregel van de wrapper zelf
-(`Bash(~/.claude/bin/*)`) telt nooit voor wat hij uitvoert.
+door in PAM, omdat `Bash(/home/jan/Projects/PAM/bin/*)` daar staat. De regel
+matcht ook na de prefixen waar de hook doorheen kijkt (`cd`, `env -C`/`env -u`,
+`VAR=`, `rtk`): `cmd-save.sh /tmp/o env -C <dir> python3 x.py` valt onder
+`Bash(python3 *)`. Een deny- of ask-regel op het commando wint, met of zonder
+die prefixen. De allowregel van de wrapper zelf (`Bash(~/.claude/bin/*)`) telt
+nooit voor wat hij uitvoert.
 
 ## Code Quality
 
