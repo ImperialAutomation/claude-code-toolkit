@@ -482,15 +482,25 @@ def _settings_command(tokens):
 
 
 def is_blocked_by_settings(tokens, rules):
-    """True if a deny or ask rule matches the command `tokens`."""
-    command = _settings_command(tokens)
-    return matches_any_bash_rule(command, rules.deny) or matches_any_bash_rule(
-        command, rules.ask
+    """True if a deny or ask rule matches the command `tokens`, as written or
+    with any of its prefixes stripped (strip_command_prefixes). Each extra
+    form can only make a deny or ask rule match more, never less."""
+    before_rtk, command = strip_command_prefixes(tokens)
+    return any(
+        matches_any_bash_rule(_settings_command(form), rules.deny)
+        or matches_any_bash_rule(_settings_command(form), rules.ask)
+        for form in (tokens, before_rtk, command)
     )
 
 
 def is_allowed_by_settings(tokens, rules):
     """True if an allow rule, and no deny or ask rule, matches `tokens`.
+
+    The allow rule may match the command as written, or the command after the
+    prefixes the hook's own rules see through (strip_command_prefixes): a rule
+    `Bash(python3 *)` allows `env -C <dir> python3 x` just as it allows the
+    bare `python3 x`. An `rtk` prefix is seen through only where approval
+    trusts it (is_trusted_rtk_wrap).
 
     Never for a command that names a command-running wrapper anywhere: those
     are judged by their own inner command, and `Bash(~/.claude/bin/*)` would
@@ -500,7 +510,15 @@ def is_allowed_by_settings(tokens, rules):
         return False
     if is_blocked_by_settings(tokens, rules):
         return False
-    return matches_any_bash_rule(_settings_command(tokens), rules.allow)
+    if matches_any_bash_rule(_settings_command(tokens), rules.allow):
+        return True
+
+    before_rtk, command = strip_command_prefixes(tokens)
+    return (
+        bool(command)
+        and is_trusted_rtk_wrap(before_rtk)
+        and matches_any_bash_rule(_settings_command(command), rules.allow)
+    )
 
 
 # --- command-running wrappers ---------------------------------------------------
@@ -676,6 +694,22 @@ def is_trusted_rtk_wrap(segment_tokens):
 
     subcommand = segment_tokens[1] if len(segment_tokens) > 1 else None
     return subcommand == RTK_PROXY_SUBCOMMAND or subcommand in RTK_NATIVE_PASSTHROUGH
+
+
+def strip_command_prefixes(segment_tokens):
+    """Strip the prefixes the hook sees through, in the order it applies them:
+    `cd <dir>` (inside ~/Projects), an `env` invocation, VAR=value assignments,
+    then a model-typed `rtk` / `rtk proxy`.
+
+    Returns (before_rtk, command): the segment with everything but the rtk
+    prefix stripped, and the command that is left after that too. Approval
+    needs both, since it trusts the rtk prefix only when is_trusted_rtk_wrap
+    holds for `before_rtk`.
+    """
+    before_rtk = strip_env_prefix(
+        strip_env_invocation(strip_cd_prefix(segment_tokens))
+    )
+    return before_rtk, strip_rtk_prefix(before_rtk)
 
 
 def _is_allowed_bin_token(token):
@@ -985,8 +1019,9 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
     git-commit.sh already handles quoting/heredoc bodies safely).
 
     A command-running wrapper is safe when its inner command is: safe by these
-    same rules, or allowed by the settings `rules`. A settings deny or ask rule
-    on the inner command blocks it either way.
+    same rules, or allowed by the settings `rules` (matched after the same
+    prefix stripping, see is_allowed_by_settings). A settings deny or ask rule
+    on the inner command, raw or stripped, blocks it either way.
 
     An `env` invocation (strip_env_invocation) is stripped BEFORE plain
     VAR=value assignments, so `env FOO=bar git status` is judged exactly like
@@ -996,12 +1031,9 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
     if not segment_tokens:
         return True
 
-    env_stripped = strip_env_prefix(
-        strip_env_invocation(strip_cd_prefix(segment_tokens))
-    )
+    env_stripped, stripped = strip_command_prefixes(segment_tokens)
     if not is_trusted_rtk_wrap(env_stripped):
         return False
-    stripped = strip_rtk_prefix(env_stripped)
     if not stripped:
         # A bare `rtk` / `rtk proxy` runs no wrapped command; never approve it.
         return not env_stripped

@@ -2199,6 +2199,112 @@ finally:
     shutil.rmtree(settings_tmp, ignore_errors=True)
 
 
+# --- settings rules match the inner command after prefix stripping (#161) ---
+# The hook's own rules see through cd / env -C / env -u / VAR= / rtk before
+# judging a command; the settings rules must too, or `Bash(python3 *)` never
+# matches `env -C <dir> python3 ...` and the wrapper grants less than the bare
+# command. The three commands below are from a real PAM session.
+
+S = "/tmp/claude-1001/pam-session/scratchpad"
+PAM_REAL = "/home/jan/Projects/PAM"
+EXAMPLE_1_SAVE = f"{SAVE} {S}/i18n.txt env -C {PAM_REAL} bash scripts/validate-i18n.sh"
+EXAMPLE_1 = f"{EXAMPLE_1_SAVE}; rtk read {S}/i18n.txt --tail-lines 30"
+EXAMPLE_2 = (
+    f'grep -n -i "unused\\|missing" {S}/i18n.txt | head; '
+    f"{SAVE} {S}/i18n2.txt env -C {PAM_REAL} python3 ~/.claude/bin/i18n-audit.py; "
+    f'grep -n -i "invite" {S}/i18n2.txt | head -20'
+)
+EXAMPLE_3 = (
+    f"{SAVE} --stderr merge {S}/i18n2.txt env -C {PAM_REAL} python3 "
+    "~/.claude/bin/i18n-audit.py --locale-dir frontend/src/i18n/locales; "
+    f'grep -n -i "total" {S}/i18n2.txt | head -30'
+)
+
+strip_tmp = Path(tempfile.mkdtemp(prefix="hook-strip-test-"))
+try:
+    strip_home = strip_tmp / "home"
+    strip_home.mkdir()
+    strip_project = strip_tmp / "project"
+    (strip_project / ".claude").mkdir(parents=True)
+    (strip_project / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(python3 *)", "Bash(bash *)"]}})
+    )
+    strip_ask_project = strip_tmp / "ask-project"
+    (strip_ask_project / ".claude").mkdir(parents=True)
+    (strip_ask_project / ".claude" / "settings.json").write_text(
+        json.dumps({
+            "permissions": {
+                "allow": ["Bash(python3 *)", "Bash(bash *)"],
+                "ask": ["Bash(python3 *)"],
+                "deny": ["Bash(bash *)"],
+            }
+        })
+    )
+    strip_rules = hook.load_bash_rules(str(strip_project), claude_home=str(strip_home))
+    strip_ask_rules = hook.load_bash_rules(str(strip_ask_project), claude_home=str(strip_home))
+
+    for name, example in (("example 2", EXAMPLE_2), ("example 3", EXAMPLE_3)):
+        check(
+            f"strip: {name} is approved under Bash(python3 *)",
+            hook.is_command_safe(example, strip_rules),
+        )
+        check(
+            f"strip: {name} is not approved without that rule",
+            not hook.is_command_safe(example),
+        )
+
+    check(
+        "strip: example 1's cmd-save segment is approved under Bash(bash *)",
+        hook.is_command_safe(EXAMPLE_1_SAVE, strip_rules),
+    )
+    check(
+        "strip: example 1 as a whole is not approved (rtk read is left to settings)",
+        not hook.is_command_safe(EXAMPLE_1, strip_rules)
+        and hook.unapprovable_wrapper(EXAMPLE_1, strip_rules) is None,
+    )
+
+    for prefixed in (
+        f"cd {PAM_REAL} python3 x.py",
+        f"env -u VIRTUAL_ENV python3 x.py",
+        f"env FOO=1 python3 x.py",
+        f"FOO=1 python3 x.py",
+        "rtk proxy python3 x.py",
+    ):
+        check(
+            f"strip: Bash(python3 *) allows `{prefixed}` behind a wrapper",
+            hook.is_command_safe(f"{SAVE} /tmp/o {prefixed}", strip_rules),
+        )
+
+    # Stripping never widens what an allow rule covers.
+    for unstrippable in (
+        "env -C /etc python3 x.py",
+        "env -i python3 x.py",
+        "PATH=/tmp/evil python3 x.py",
+        "rtk test python3 x.py",
+    ):
+        check(
+            f"strip: Bash(python3 *) does not allow `{unstrippable}`",
+            not hook.is_command_safe(f"{SAVE} /tmp/o {unstrippable}", strip_rules),
+        )
+
+    # deny and ask rules match the stripped inner command as well.
+    for blocked in (
+        f"{SAVE} /tmp/o env -C {PAM_REAL} python3 x.py",
+        f"{SAVE} /tmp/o env -C {PAM_REAL} bash x.sh",
+        f"{SAVE} /tmp/o FOO=1 python3 x.py",
+        f"{SAVE} /tmp/o rtk proxy python3 x.py",
+        EXAMPLE_2,
+        EXAMPLE_3,
+    ):
+        check(
+            f"strip: a stripped deny/ask rule blocks `{blocked}`",
+            not hook.is_command_safe(blocked, strip_ask_rules)
+            and hook.unapprovable_wrapper(blocked, strip_ask_rules) is not None,
+        )
+finally:
+    shutil.rmtree(strip_tmp, ignore_errors=True)
+
+
 shutil.rmtree(HERMETIC_DIR, ignore_errors=True)
 
 print(f"\nResults: {passed} passed, {failed} failed")
