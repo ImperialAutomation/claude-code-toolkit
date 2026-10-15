@@ -385,7 +385,7 @@ def strip_env_invocation(segment_tokens):
 # The user's own permission rules, as Claude Code reads them from the settings
 # files. The hook consults them only for the inner command of a command-running
 # wrapper (below): a bare command a settings rule allows runs prompt-free, and
-# the hook's "ask" would otherwise override that rule behind a wrapper.
+# the hook's deny would otherwise override that rule behind a wrapper.
 
 SETTINGS_FILENAMES = ("settings.json", "settings.local.json")
 # Claude Code reads the user settings from here instead of ~/.claude when set.
@@ -529,8 +529,10 @@ def is_allowed_by_settings(tokens, rules):
 #
 # The rule: a wrapper grants nothing the bare command does not have. The hook
 # judges the inner command by the same rules as a bare segment, and main()
-# answers "ask" when it fails — not merely "no decision", which would leave the
-# allow rule to approve it anyway. Because the check recurses, an inner
+# answers "deny" with a hint when it fails: not merely "no decision", which
+# would leave the allow rule to approve it anyway, and not "ask", which stalls
+# every unattended session. The hint sends the agent to the bare command, where
+# the normal permission flow decides. Because the check recurses, an inner
 # wrapper is judged by ITS inner command in turn.
 #
 # Each parser receives the arguments after the script and returns the inner
@@ -597,10 +599,19 @@ def _venv_run_inner(args):
     return args or None
 
 
+WrapperSpec = namedtuple("WrapperSpec", ("parse", "usage"))
+
 COMMAND_RUNNING_WRAPPERS = {
-    "repeat-cmd.sh": _repeat_cmd_inner,
-    "cmd-save.sh": _cmd_save_inner,
-    "venv-run.sh": _venv_run_inner,
+    "repeat-cmd.sh": WrapperSpec(
+        _repeat_cmd_inner, "repeat-cmd.sh <count> <cmd> [args...]"
+    ),
+    "cmd-save.sh": WrapperSpec(
+        _cmd_save_inner,
+        "cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <outfile> <cmd> [args...]",
+    ),
+    "venv-run.sh": WrapperSpec(
+        _venv_run_inner, "venv-run.sh [--repo <dir>] <cmd> [args...]"
+    ),
 }
 
 
@@ -613,10 +624,34 @@ def command_running_wrapper(token):
     return name if name in COMMAND_RUNNING_WRAPPERS else None
 
 
+# What main() needs to tell the agent about a wrapper it will not approve: the
+# wrapper the hint is about, and the command it runs (None when the call does
+# not have the wrapper's documented shape, so it runs nothing).
+UnapprovableWrapper = namedtuple("UnapprovableWrapper", ("name", "inner"))
+
+
+def _innermost_wrapper_call(tokens):
+    """Follow the wrapper chain of a segment from the first wrapper it names:
+    (name, inner) for the last wrapper reached, where `inner` is the command it
+    runs, or None when its arguments are malformed. A wrapper whose inner
+    command (after the prefixes the hook sees through) is again a wrapper is
+    followed into, the way is_segment_safe recurses."""
+    index = next(i for i, token in enumerate(tokens) if command_running_wrapper(token))
+    name = command_running_wrapper(tokens[index])
+    inner = COMMAND_RUNNING_WRAPPERS[name].parse(tokens[index + 1:])
+    while inner is not None:
+        _, command = strip_command_prefixes(inner)
+        nested = command_running_wrapper(command[0]) if command else None
+        if not nested:
+            break
+        name, inner = nested, COMMAND_RUNNING_WRAPPERS[nested].parse(command[1:])
+    return name, inner
+
+
 def unapprovable_wrapper(command, rules=NO_BASH_RULES):
-    """The name of the first command-running wrapper mentioned in a segment of
-    `command` that the hook will not approve under the settings `rules`, or
-    None.
+    """An UnapprovableWrapper for the first segment of `command` that mentions
+    a command-running wrapper and that the hook will not approve under the
+    settings `rules`, or None.
 
     Per segment, not per command: permission rules are matched per segment of a
     chain, so `git status && repeat-cmd.sh 1 curl x` would otherwise be approved
@@ -626,7 +661,7 @@ def unapprovable_wrapper(command, rules=NO_BASH_RULES):
     wrappers like `timeout 5`, `time` and `nohup` before matching, so behind one
     of them the allow rule still matches the script. Recognising every flag of
     every such prefix is a losing game; a segment that names a wrapper and is
-    not approvable asks, whatever stands in front. Never raises — on
+    not approvable is denied, whatever stands in front. Never raises: on
     unparseable input the caller falls through.
     """
     try:
@@ -635,13 +670,39 @@ def unapprovable_wrapper(command, rules=NO_BASH_RULES):
         return None
 
     for tokens in segments:
-        mentioned = next(
-            (name for name in map(command_running_wrapper, tokens) if name), None
-        )
-        if mentioned and not is_segment_safe(tokens, rules):
-            return mentioned
+        mentions_wrapper = any(command_running_wrapper(token) for token in tokens)
+        if mentions_wrapper and not is_segment_safe(tokens, rules):
+            return UnapprovableWrapper(*_innermost_wrapper_call(tokens))
 
     return None
+
+
+def _shell_join(tokens):
+    """Like shlex.join, but a leading `~/` stays unquoted so the command still
+    expands it when the agent runs it as given."""
+    def quote(token):
+        if token.startswith("~/") and token[2:]:
+            return "~/" + shlex.quote(token[2:])
+        return shlex.quote(token)
+    return " ".join(quote(token) for token in tokens)
+
+
+def unapprovable_wrapper_reason(found):
+    """The deny reason for an UnapprovableWrapper: run the inner command bare,
+    or, when the call is malformed, the shape the wrapper documents."""
+    if found.inner is None:
+        return (
+            f"Hook: this {found.name} call does not have the documented shape, "
+            "so it runs nothing the hook can judge. The shape is "
+            f"`~/.claude/bin/{COMMAND_RUNNING_WRAPPERS[found.name].usage}`."
+        )
+    return (
+        f"Hook: {found.name} runs the command it is given, and is approved only "
+        "when that command would be approved on its own. This one is not "
+        "approvable by the hook or your allow rules. Run it bare, without the "
+        f"wrapper (`{_shell_join(found.inner)}`), so the normal permission flow "
+        "(settings rules, auto mode, or a prompt) decides it."
+    )
 
 
 # --- model-typed rtk prefix -----------------------------------------------------
@@ -1055,7 +1116,7 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
 
     wrapper = command_running_wrapper(first)
     if wrapper:
-        inner = COMMAND_RUNNING_WRAPPERS[wrapper](stripped[1:])
+        inner = COMMAND_RUNNING_WRAPPERS[wrapper].parse(stripped[1:])
         if inner is None or is_blocked_by_settings(inner, rules):
             return False
         return is_segment_safe(inner, rules) or is_allowed_by_settings(inner, rules)
@@ -1193,20 +1254,18 @@ def main():
         claude_home=os.environ.get(CONFIG_DIR_ENV) or CLAUDE_HOME,
     )
 
-    # "ask", not silence: Bash(~/.claude/bin/*) would approve the wrapper
-    # without a prompt, whatever command it was handed.
+    # Not silence: Bash(~/.claude/bin/*) would approve the wrapper without a
+    # prompt, whatever command it was handed. Not "ask" either: a hook ask
+    # overrides the allow rules and the auto-mode classifier, so it stalls
+    # every session nobody is watching. A deny with a hint lets the agent run
+    # the inner command bare, where the normal permission flow decides.
     wrapper = unapprovable_wrapper(command, rules)
     if wrapper:
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "ask",
-                "permissionDecisionReason": (
-                    f"Hook: {wrapper} runs the command it is given, so it is "
-                    "approved only when it is called in its documented shape "
-                    "and that command would be approved on its own. This one "
-                    "is not, so it needs your confirmation."
-                ),
+                "permissionDecision": "deny",
+                "permissionDecisionReason": unapprovable_wrapper_reason(wrapper),
             }
         }
         print(json.dumps(output))
