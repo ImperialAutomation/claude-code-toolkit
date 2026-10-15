@@ -119,7 +119,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
 | `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
-| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Reports the command's own exit status and the byte count written. The auto-approve hook approves it only when `<command>` is approvable on its own, and otherwise denies it with a hint to run `<command>` bare |
+| `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Options go before `<output-file>`; everything after it is the command. Reports the command's own exit status and the byte count written. The auto-approve hook approves it only when `<command>` is approvable on its own, and otherwise denies it with a hint to run `<command>` bare |
 | `strip-ansi.sh` | `strip-ansi.sh <file> [<outfile>]` | Write a copy of a file without ANSI colour/cursor codes (default `<file>.clean`), so captured test output can be grepped without a `sed` chain |
 
 `cmd-save.sh` is the general case; `gh-save.sh` is the `gh`-shaped shorthand and delegates to it. Reach for it whenever output belongs on disk: to `diff` two captures, to feed one command's output into another, or because the output is too long to be worth putting through the model's context.

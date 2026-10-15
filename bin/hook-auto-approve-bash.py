@@ -546,21 +546,33 @@ def is_allowed_by_settings(tokens, rules):
 REPEAT_COUNT_RE = re.compile(r"[1-9][0-9]*")
 
 
+def _runnable(inner):
+    """`inner` when it names a command to run, otherwise None. A command word
+    that starts with a dash is an option the wrapper did not parse (misplaced,
+    or unknown): the script would try to execute it and fail, so the call has
+    no command the hook could judge or the agent could run bare."""
+    if not inner or inner[0].startswith("-"):
+        return None
+    return inner
+
+
 def _repeat_cmd_inner(args):
     """`repeat-cmd.sh <positive-integer> <cmd> [args...]`."""
-    if len(args) < 2 or not REPEAT_COUNT_RE.fullmatch(args[0]):
+    if not args or not REPEAT_COUNT_RE.fullmatch(args[0]):
         return None
-    return args[1:]
+    return _runnable(args[1:])
 
 
 CMD_SAVE_STDERR_MODES = frozenset({"separate", "merge"})
+CMD_SAVE_OPTIONS = frozenset({"--stderr", "--strip-ansi", "--"})
 
 
-def _cmd_save_inner(args):
-    """`cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <out> <cmd>
-    [args...]`, parsed exactly like the script's own option loop: the first
-    argument that is not an option is the output file, and `--` ends the
-    options so an output file may start with a dash."""
+def _cmd_save_outfile_index(args):
+    """Index of the output file in `cmd-save.sh [--stderr separate|merge]
+    [--strip-ansi] [--] <out> ...`, parsed exactly like the script's own option
+    loop: the first argument that is not an option is the output file, and `--`
+    ends the options so an output file may start with a dash. None when the
+    options are malformed."""
     index = 0
     while index < len(args):
         arg = args[index]
@@ -577,9 +589,24 @@ def _cmd_save_inner(args):
             return None
         else:
             break
+    return index if index < len(args) else None
 
-    inner = args[index + 1:]
-    return inner or None
+
+def _cmd_save_inner(args):
+    """`cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <out> <cmd>
+    [args...]`."""
+    index = _cmd_save_outfile_index(args)
+    return None if index is None else _runnable(args[index + 1:])
+
+
+def _cmd_save_diagnose(args):
+    """Why a malformed cmd-save.sh call is malformed, when the cause is the
+    common one: an option after the output file, which the script would run
+    as the command."""
+    index = _cmd_save_outfile_index(args)
+    if index is not None and args[index + 1:index + 2] and args[index + 1] in CMD_SAVE_OPTIONS:
+        return f"Its options go before <outfile>; `{args[index + 1]}` came after it."
+    return None
 
 
 VENV_RUN_REPO_FLAG = "--repo"
@@ -596,10 +623,12 @@ def _venv_run_inner(args):
         args = args[2:]
     elif args and args[0].startswith(VENV_RUN_REPO_FLAG + "="):
         args = args[1:]
-    return args or None
+    return _runnable(args)
 
 
-WrapperSpec = namedtuple("WrapperSpec", ("parse", "usage"))
+# `diagnose(args)` explains a malformed call in one sentence when it can name
+# the cause, otherwise returns None and the documented shape speaks for itself.
+WrapperSpec = namedtuple("WrapperSpec", ("parse", "usage", "diagnose"), defaults=(None,))
 
 COMMAND_RUNNING_WRAPPERS = {
     "repeat-cmd.sh": WrapperSpec(
@@ -608,6 +637,7 @@ COMMAND_RUNNING_WRAPPERS = {
     "cmd-save.sh": WrapperSpec(
         _cmd_save_inner,
         "cmd-save.sh [--stderr separate|merge] [--strip-ansi] [--] <outfile> <cmd> [args...]",
+        _cmd_save_diagnose,
     ),
     "venv-run.sh": WrapperSpec(
         _venv_run_inner, "venv-run.sh [--repo <dir>] <cmd> [args...]"
@@ -625,27 +655,31 @@ def command_running_wrapper(token):
 
 
 # What main() needs to tell the agent about a wrapper it will not approve: the
-# wrapper the hint is about, and the command it runs (None when the call does
-# not have the wrapper's documented shape, so it runs nothing).
-UnapprovableWrapper = namedtuple("UnapprovableWrapper", ("name", "inner"))
+# wrapper the hint is about, the command it runs (None when the call does not
+# have the wrapper's documented shape, so it runs nothing), and for a malformed
+# call the cause when the wrapper's diagnose can name it (otherwise None).
+UnapprovableWrapper = namedtuple("UnapprovableWrapper", ("name", "inner", "detail"))
 
 
 def _innermost_wrapper_call(tokens):
     """Follow the wrapper chain of a segment from the first wrapper it names:
-    (name, inner) for the last wrapper reached, where `inner` is the command it
-    runs, or None when its arguments are malformed. A wrapper whose inner
-    command (after the prefixes the hook sees through) is again a wrapper is
-    followed into, the way is_segment_safe recurses."""
+    an UnapprovableWrapper for the last wrapper reached, where `inner` is the
+    command it runs, or None when its arguments are malformed. A wrapper whose
+    inner command (after the prefixes the hook sees through) is again a wrapper
+    is followed into, the way is_segment_safe recurses."""
     index = next(i for i, token in enumerate(tokens) if command_running_wrapper(token))
-    name = command_running_wrapper(tokens[index])
-    inner = COMMAND_RUNNING_WRAPPERS[name].parse(tokens[index + 1:])
+    name, args = command_running_wrapper(tokens[index]), tokens[index + 1:]
+    inner = COMMAND_RUNNING_WRAPPERS[name].parse(args)
     while inner is not None:
         _, command = strip_command_prefixes(inner)
         nested = command_running_wrapper(command[0]) if command else None
         if not nested:
             break
-        name, inner = nested, COMMAND_RUNNING_WRAPPERS[nested].parse(command[1:])
-    return name, inner
+        name, args = nested, command[1:]
+        inner = COMMAND_RUNNING_WRAPPERS[name].parse(args)
+    diagnose = COMMAND_RUNNING_WRAPPERS[name].diagnose
+    detail = diagnose(args) if inner is None and diagnose else None
+    return UnapprovableWrapper(name, inner, detail)
 
 
 def unapprovable_wrapper(command, rules=NO_BASH_RULES):
@@ -672,7 +706,7 @@ def unapprovable_wrapper(command, rules=NO_BASH_RULES):
     for tokens in segments:
         mentions_wrapper = any(command_running_wrapper(token) for token in tokens)
         if mentions_wrapper and not is_segment_safe(tokens, rules):
-            return UnapprovableWrapper(*_innermost_wrapper_call(tokens))
+            return _innermost_wrapper_call(tokens)
 
     return None
 
@@ -691,11 +725,12 @@ def unapprovable_wrapper_reason(found):
     """The deny reason for an UnapprovableWrapper: run the inner command bare,
     or, when the call is malformed, the shape the wrapper documents."""
     if found.inner is None:
-        return (
+        reason = (
             f"Hook: this {found.name} call does not have the documented shape, "
             "so it runs nothing the hook can judge. The shape is "
             f"`~/.claude/bin/{COMMAND_RUNNING_WRAPPERS[found.name].usage}`."
         )
+        return f"{reason} {found.detail}" if found.detail else reason
     return (
         f"Hook: {found.name} runs the command it is given, and is approved only "
         "when that command would be approved on its own. This one is not "

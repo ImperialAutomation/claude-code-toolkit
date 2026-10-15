@@ -13,6 +13,7 @@ quoting edge cases required by its acceptance criteria.
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1983,6 +1984,62 @@ check(
     "save: a malformed nested wrapper is denied with its own documented shape",
     reason is not None and hook.COMMAND_RUNNING_WRAPPERS["cmd-save.sh"].usage in reason,
 )
+
+# An option after the output file is run by the script as the command
+# (`--stderr: command not found`). The hint must name the documented shape and
+# the cause, never send the agent to run `--stderr ...` bare.
+SAVE_USAGE = hook.COMMAND_RUNNING_WRAPPERS["cmd-save.sh"].usage
+GIT_COMMIT = '~/.claude/bin/git-commit.sh --repo /home/jan/Projects/acme "feat: example"'
+for misplaced, option in (
+    (f"{SAVE} /tmp/o --stderr merge {GIT_COMMIT}", "--stderr"),
+    (f"{SAVE} /tmp/o --strip-ansi git status", "--strip-ansi"),
+    (f"{SAVE} --strip-ansi /tmp/o --stderr merge git status", "--stderr"),
+):
+    check(
+        f"save: `{misplaced}` has no inner command",
+        hook._cmd_save_inner(shlex.split(misplaced)[1:]) is None,
+    )
+    approved, reason, _ = run_hook(misplaced)
+    check(
+        f"save: `{misplaced}` is denied with the shape and the cause",
+        hook_decision(misplaced) == "deny"
+        and reason is not None
+        and SAVE_USAGE in reason
+        and "options go before <outfile>" in reason
+        and f"`{option}`" in reason
+        and "bare" not in reason,
+    )
+
+check(
+    "save: the documented option order with git-commit.sh is approved",
+    hook_decision(f"{SAVE} --stderr merge /tmp/o {GIT_COMMIT}") == "allow",
+)
+
+check(
+    "save: after `--` a dash-led output file is approved (unit)",
+    hook._cmd_save_inner(["--", "-weird-out", "git", "status"]) == ["git", "status"],
+)
+
+check(
+    "save: after `--` a dash-led output file is approved (hook)",
+    hook_decision(f"{SAVE} -- -weird-out git status") == "allow",
+)
+
+# The same holds for the other wrappers: a command word starting with a dash
+# is an option the script did not parse and runs nothing.
+for malformed in (
+    f"{REPEAT} 3 --verbose git status",
+    "~/.claude/bin/venv-run.sh --foo pytest",
+    "~/.claude/bin/venv-run.sh --repo /tmp --repo /tmp pytest",
+):
+    approved, reason, _ = run_hook(malformed)
+    check(
+        f"wrappers: `{malformed}` is denied with the documented shape",
+        hook_decision(malformed) == "deny"
+        and reason is not None
+        and "documented shape" in reason
+        and "bare" not in reason,
+    )
 
 check(
     "save: a disallowed cmd-save inside a chain is still denied",
