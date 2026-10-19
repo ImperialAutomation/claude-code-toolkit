@@ -27,11 +27,28 @@
 #     }
 #   }
 #
-# Skips:
+# Target repo, taken from the commit segment of the command itself (never from
+# another segment of the chain), first match wins:
+#   1. git-commit.sh --repo <dir> / --repo=<dir>
+#   2. the -C <dir> of the `git ... commit` segment
+#   3. the session cwd
+# Parsing lives in lib/commit_target.py, which reuses the approve hook's
+# tokenizer so quotes and separators are read the same way.
+#
+# Skips silently:
 #   - Bash calls that did not commit
 #   - Commits that already carry the trailer
 #   - Repos with no commit yet, or a detached/unborn HEAD
 #   - Merge commits (the trailer belongs on the authored commit)
+#   - Commits older than 120 s
+#   - Pushed commits, when the command did not push them
+#
+# Skips with a stderr message, so a missing trailer does not go unnoticed:
+#   - An unresolvable target: a shell variable or backtick in it, a directory
+#     that does not exist, several commit segments with different targets, or a
+#     command that does not tokenize. Never falls back to the cwd: amending the
+#     wrong commit cannot be undone, a missing trailer can.
+#   - A commit pushed by a `git push` later in the same call (names the hash)
 
 set -uo pipefail
 

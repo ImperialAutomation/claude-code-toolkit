@@ -11,7 +11,12 @@
 # from rewriting the WRONG commit are the load-bearing part. Cases 3-6 and 9
 # exist for those guards specifically: case 9 (already pushed) is what keeps the
 # hook from rewriting published history, and it was added after a mutation run
-# showed the suite stayed green with that guard deleted.
+# showed the suite stayed green with that guard deleted. Cases 10-22 guard the
+# target resolution: the cwd repo there holds another session's fresh commit.
+
+# The commands fed to the hook are text, not shell: a literal `~` or `$WT` in
+# them is exactly what the hook has to cope with.
+# shellcheck disable=SC2088,SC2016
 
 set -uo pipefail
 
