@@ -22,15 +22,17 @@ Resolution, per commit segment, first match wins:
        itself applies them)
     2. the -C options of the `git ... commit` segment itself (cumulative, as
        git applies them)
-    3. the cwd
-Relative paths resolve against the cwd and a leading `~` against $HOME. Never
+    3. the segment's working directory
+The working directory is the cwd, moved by any `cd <dir>` segment before the
+commit and by an `env -C <dir>` prefix on the commit segment itself. Relative
+paths resolve against it and a leading `~` against $HOME. A target is never
 taken from another segment of the chain: `git -C <A> add && git-commit.sh
 --repo <B>` commits in B.
 
 Unresolvable: a target containing `$` or a backtick (no expansion of command
-text here), a directory that does not exist, a git segment using --git-dir or
---work-tree, several commit segments with different targets, or a command that
-does not tokenize.
+text here), a directory that does not exist, `cd -`, a commit segment using
+--git-dir or --work-tree, several commit segments with different targets, or a
+command that does not tokenize.
 """
 
 import importlib.util
@@ -66,31 +68,68 @@ GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--s
 GIT_REPO_OVERRIDES = {"--git-dir", "--work-tree"}
 UNEXPANDED_MARKERS = ("$", "`")
 
+CD = "cd"
+# `cd -` returns to a directory the command text does not show.
+CD_PREVIOUS = "-"
+HOME = "~"
+
 
 class Unresolvable(Exception):
     pass
 
 
 def _git_invocation(tokens):
-    """Return (subcommand, [-C values]) for a `git ...` segment, else None."""
+    """Return (subcommand, [-C values], repo override or None) for a `git ...`
+    segment, else None."""
     if not tokens or os.path.basename(tokens[0]) != GIT:
         return None
     dirs = []
+    override = None
     i = 1
     while i < len(tokens):
         token = tokens[i]
         if not token.startswith("-"):
-            return token, dirs
+            return token, dirs, override
         name = token.split("=", 1)[0]
         if name in GIT_REPO_OVERRIDES:
-            raise Unresolvable(f"git {name} sets the repository; not resolved from command text")
+            override = name
         if token in GIT_VALUE_OPTIONS:
             if token == "-C" and i + 1 < len(tokens):
                 dirs.append(tokens[i + 1])
             i += 2
         else:
             i += 1
-    return None, dirs
+    return None, dirs, override
+
+
+def _strip_env_chdir(tokens):
+    """Drop leading `env` invocations, returning ([-C/--chdir values], rest).
+
+    Done here rather than by the approve hook's strip_env_invocation, which
+    only sees through a -C inside ~/Projects: the commit lands in the -C
+    directory wherever it is. An env option this does not know stops the
+    stripping; the segment then does not read as a commit.
+    """
+    dirs = []
+    while tokens and tokens[0] == _hook.ENV_COMMAND:
+        i = 1
+        while i < len(tokens):
+            if _hook.ENV_ASSIGNMENT_RE.match(tokens[i]):
+                i += 1
+                continue
+            chdir = _hook._env_option_value(tokens, i, _hook.ENV_CHDIR_OPTION)
+            unset = _hook._env_option_value(tokens, i, _hook.ENV_UNSET_OPTION)
+            if chdir is not None:
+                dirs.append(chdir[0])
+                i += chdir[1]
+            elif unset is not None:
+                i += unset[1]
+            elif tokens[i].startswith("-"):
+                return dirs, tokens
+            else:
+                break
+        tokens = tokens[i:]
+    return dirs, tokens
 
 
 def _wrapper_repo(tokens):
@@ -127,24 +166,35 @@ def _resolve_dir(parts, cwd):
     return os.path.realpath(path)
 
 
-def _commit_target(tokens, cwd):
+def _commit_target(segment, cwd):
     """Target dir of a commit segment, or None if the segment does not commit."""
+    chdirs, tokens = _strip_env_chdir(segment)
+    _, tokens = _hook.strip_command_prefixes(tokens)
     if not tokens:
         return None
     if os.path.basename(tokens[0]) == COMMIT_WRAPPER:
         repo = _wrapper_repo(tokens)
-        return _resolve_dir([] if repo is None else [repo], cwd)
+        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd)
     git = _git_invocation(tokens)
     if git and git[0] == COMMIT_SUBCOMMAND:
-        return _resolve_dir(git[1], cwd)
+        if git[2]:
+            raise Unresolvable(f"git {git[2]} sets the repository; not resolved from command text")
+        return _resolve_dir(chdirs + git[1], cwd)
     return None
 
 
-def _is_push(tokens):
-    try:
-        git = _git_invocation(tokens)
-    except Unresolvable:
-        return False
+def _cd_target(tokens, cwd):
+    """The directory a `cd` segment moves to, or None if it is no `cd`."""
+    if not tokens or tokens[0] != CD:
+        return None
+    if len(tokens) > 1 and tokens[1] == CD_PREVIOUS:
+        raise Unresolvable(f"'{CD} {CD_PREVIOUS}' before the commit")
+    return _resolve_dir([tokens[1] if len(tokens) > 1 else HOME], cwd)
+
+
+def _is_push(segment):
+    _, tokens = _hook.strip_command_prefixes(_strip_env_chdir(segment)[1])
+    git = _git_invocation(tokens)
     return bool(git) and git[0] == PUSH_SUBCOMMAND
 
 
@@ -160,10 +210,21 @@ def resolve(command, cwd):
 
     targets = []
     last_commit = -1
+    # A `cd` that cannot be followed only matters if a commit comes after it.
+    cd_error = None
     for index, segment in enumerate(segments):
-        _, tokens = _hook.strip_command_prefixes(segment)
-        target = _commit_target(tokens, cwd)
+        try:
+            moved = _cd_target(segment, cwd)
+        except Unresolvable as exc:
+            cd_error = exc
+            continue
+        if moved is not None:
+            cwd = moved
+            continue
+        target = _commit_target(segment, cwd)
         if target is not None:
+            if cd_error is not None:
+                raise cd_error
             targets.append(target)
             last_commit = index
 
@@ -172,10 +233,7 @@ def resolve(command, cwd):
     if len(set(targets)) > 1:
         raise Unresolvable("several commit segments with different targets: " + ", ".join(sorted(set(targets))))
 
-    pushed_after = any(
-        _is_push(_hook.strip_command_prefixes(segment)[1])
-        for segment in segments[last_commit + 1:]
-    )
+    pushed_after = any(_is_push(segment) for segment in segments[last_commit + 1:])
     return targets[0], pushed_after
 
 

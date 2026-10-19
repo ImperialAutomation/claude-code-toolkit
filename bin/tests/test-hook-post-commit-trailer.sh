@@ -11,7 +11,7 @@
 # from rewriting the WRONG commit are the load-bearing part. Cases 3-6 and 9
 # exist for those guards specifically: case 9 (already pushed) is what keeps the
 # hook from rewriting published history, and it was added after a mutation run
-# showed the suite stayed green with that guard deleted. Cases 10-22 guard the
+# showed the suite stayed green with that guard deleted. Cases 10-26 guard the
 # target resolution: the cwd repo there holds another session's fresh commit.
 
 # The commands fed to the hook are text, not shell: a literal `~` or `$WT` in
@@ -200,6 +200,9 @@ CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
 fire_err "$CWD" '~/.claude/bin/git-commit.sh --repo "$WT" "feat: thing"'
 check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
 check "stderr names \$WT" yes "$(stderr_has '$WT')"
+# The reason, not just the name: without the expansion check the hook would
+# take "$WT" as a relative directory and only fail later, if at all.
+check "stderr says shell expansion" yes "$(stderr_has "shell expansion")"
 
 echo "== 18. --repo <nonexistent> -> nothing amended, stderr message =="
 CWD=$(newrepo r18); git -C "$CWD" commit -qm "feat: thing"
@@ -241,6 +244,38 @@ BARE="$T/r22-remote.git"; git init -q --bare "$BARE"
 git -C "$R" remote add origin "$BARE"
 git -C "$R" push -q origin HEAD 2>/dev/null
 fire_err "$R" "git -C $R commit -m 'feat: thing'"
+check "stderr empty" "" "$(<"$ERR")"
+
+# Cases 23-25: a directory change before the commit moves its target. The
+# approve hook auto-approves `env -C <dir> git commit`, so falling back to the
+# cwd there amends the wrong repo.
+
+echo "== 23. env -C <B> git commit, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r23-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r23-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "env -C $B git commit -m 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 24. cd <B> && git-commit.sh, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r24-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r24-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "cd $B && ~/.claude/bin/git-commit.sh 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 25. cd -; git commit -> nothing amended, stderr message =="
+CWD=$(newrepo r25); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" "cd -; git commit -m 'feat: thing'"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr names cd -" yes "$(stderr_has "cd -")"
+
+echo "== 26. --git-dir in a non-commit call -> no warning =="
+R=$(newrepo r26); git -C "$R" commit -qm "feat: thing"
+fire_err "$R" "git --git-dir=$R/.git log --grep commit"
 check "stderr empty" "" "$(<"$ERR")"
 
 echo

@@ -31,7 +31,8 @@
 # another segment of the chain), first match wins:
 #   1. git-commit.sh --repo <dir> / --repo=<dir>
 #   2. the -C <dir> of the `git ... commit` segment
-#   3. the session cwd
+#   3. the session cwd, moved by a `cd <dir>` segment before the commit or an
+#      `env -C <dir>` prefix on the commit segment
 # Parsing lives in lib/commit_target.py, which reuses the approve hook's
 # tokenizer so quotes and separators are read the same way.
 #
