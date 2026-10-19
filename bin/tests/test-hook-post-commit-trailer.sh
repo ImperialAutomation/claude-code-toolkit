@@ -216,6 +216,25 @@ fire_err "$CWD" "git commit -m 'unbalanced"
 check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
 check "stderr says it does not tokenize" yes "$(stderr_has "does not tokenize")"
 
+echo "== 21. commit && push in one call -> untouched, stderr names the hash =="
+R=$(newrepo r21); git -C "$R" commit -qm "feat: thing"
+BARE="$T/r21-remote.git"; git init -q --bare "$BARE"
+git -C "$R" remote add origin "$BARE"
+git -C "$R" push -q origin HEAD 2>/dev/null
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_err "$R" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing' && git -C $R push"
+check "pushed commit untouched" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+check "stderr names the hash" yes "$(stderr_has "$(git -C "$R" rev-parse --short HEAD)")"
+check "stderr says pushed in the same call" yes "$(stderr_has "pushed in the same call")"
+
+echo "== 22. pushed HEAD, no push in the command -> no warning =="
+R=$(newrepo r22); git -C "$R" commit -qm "feat: thing"
+BARE="$T/r22-remote.git"; git init -q --bare "$BARE"
+git -C "$R" remote add origin "$BARE"
+git -C "$R" push -q origin HEAD 2>/dev/null
+fire_err "$R" "git -C $R commit -m 'feat: thing'"
+check "stderr empty" "" "$(<"$ERR")"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]]

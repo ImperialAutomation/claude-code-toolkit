@@ -44,6 +44,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Exit statuses of lib/commit_target.py.
 EXIT_RESOLVED=0
 EXIT_UNRESOLVABLE=2
+# Its second output line when a `git push` follows the commit.
+PUSH_MARKER="push"
 
 TMP_ERR=$(mktemp)
 trap 'rm -f "$TMP_ERR"' EXIT
@@ -79,14 +81,9 @@ case $? in
         ;;
     *) exit 0 ;;
 esac
-REPO_DIR=${TARGET%%$'\n'*}
+{ read -r REPO_DIR; read -r PUSH_AFTER; } <<< "$TARGET"
 
 git -C "$REPO_DIR" rev-parse --verify HEAD &>/dev/null || exit 0
-
-# A hook that rewrites a commit already pushed would desync the remote.
-if git -C "$REPO_DIR" branch -r --contains HEAD 2>/dev/null | grep -q .; then
-    exit 0
-fi
 
 # Merge commits are not authored content.
 if [[ $(git -C "$REPO_DIR" rev-list --no-walk --count --merges HEAD 2>/dev/null) == "1" ]]; then
@@ -102,6 +99,16 @@ fi
 # (a grep over history, a --dry-run) must not rewrite an older commit.
 COMMIT_AGE=$(( $(date +%s) - $(git -C "$REPO_DIR" log -1 --format='%ct' 2>/dev/null || echo 0) ))
 if (( COMMIT_AGE > 120 )); then
+    exit 0
+fi
+
+# A hook that rewrites a commit already pushed would desync the remote. Checked
+# last, so the warning below only fires for a commit that needed the trailer.
+if git -C "$REPO_DIR" branch -r --contains HEAD 2>/dev/null | grep -q .; then
+    if [[ "$PUSH_AFTER" == "$PUSH_MARKER" ]]; then
+        HASH=$(git -C "$REPO_DIR" rev-parse --short HEAD)
+        echo "hook: commit $HASH in $REPO_DIR was pushed in the same call; the trailer was not added. On a feature branch: amend it in and force-push" >&2
+    fi
     exit 0
 fi
 

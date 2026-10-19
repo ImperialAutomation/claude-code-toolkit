@@ -49,6 +49,12 @@ EXIT_RESOLVED = 0
 EXIT_NO_COMMIT = 1
 EXIT_UNRESOLVABLE = 2
 
+GIT = "git"
+COMMIT_SUBCOMMAND = "commit"
+PUSH_SUBCOMMAND = "push"
+# Second output line when a push follows the commit; the hook compares against it.
+PUSH_MARKER = "push"
+
 COMMIT_WRAPPER = "git-commit.sh"
 REPO_OPTION = "--repo"
 # git-commit.sh options that consume the next argument, besides --repo.
@@ -67,7 +73,7 @@ class Unresolvable(Exception):
 
 def _git_invocation(tokens):
     """Return (subcommand, [-C values]) for a `git ...` segment, else None."""
-    if not tokens or os.path.basename(tokens[0]) != "git":
+    if not tokens or os.path.basename(tokens[0]) != GIT:
         return None
     dirs = []
     i = 1
@@ -129,7 +135,7 @@ def _commit_target(tokens, cwd):
         repo = _wrapper_repo(tokens)
         return _resolve_dir([] if repo is None else [repo], cwd)
     git = _git_invocation(tokens)
-    if git and git[0] == "commit":
+    if git and git[0] == COMMIT_SUBCOMMAND:
         return _resolve_dir(git[1], cwd)
     return None
 
@@ -139,7 +145,7 @@ def _is_push(tokens):
         git = _git_invocation(tokens)
     except Unresolvable:
         return False
-    return bool(git) and git[0] == "push"
+    return bool(git) and git[0] == PUSH_SUBCOMMAND
 
 
 def resolve(command, cwd):
@@ -184,7 +190,7 @@ def main():
         return EXIT_NO_COMMIT
     target, pushed_after = result
     print(target)
-    print("push" if pushed_after else "")
+    print(PUSH_MARKER if pushed_after else "")
     return EXIT_RESOLVED
 
 
