@@ -41,6 +41,13 @@ TRAILER="Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 # directories, and bin/ is reached through a symlink.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# Exit statuses of lib/commit_target.py.
+EXIT_RESOLVED=0
+EXIT_UNRESOLVABLE=2
+
+TMP_ERR=$(mktemp)
+trap 'rm -f "$TMP_ERR"' EXIT
+
 INPUT=$(cat)
 
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
@@ -61,7 +68,17 @@ fi
 # Resolve the repo the commit landed in from the commit segment itself; see
 # lib/commit_target.py for the order and what counts as unresolvable.
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-TARGET=$(echo "$COMMAND" | python3 "$SCRIPT_DIR/lib/commit_target.py" "$CWD" 2>/dev/null) || exit 0
+TARGET=$(echo "$COMMAND" | python3 "$SCRIPT_DIR/lib/commit_target.py" "$CWD" 2>"$TMP_ERR")
+case $? in
+    "$EXIT_RESOLVED") ;;
+    "$EXIT_UNRESOLVABLE")
+        # Never fall back to the cwd: amending the wrong commit is not
+        # recoverable, a missing trailer is.
+        echo "hook: Co-Authored-By trailer not added: $(<"$TMP_ERR"); add it manually if this call committed" >&2
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
 REPO_DIR=${TARGET%%$'\n'*}
 
 git -C "$REPO_DIR" rev-parse --verify HEAD &>/dev/null || exit 0

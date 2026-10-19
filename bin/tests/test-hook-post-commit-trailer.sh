@@ -43,6 +43,16 @@ fire() { # repodir command  — feed the hook a PostToolUse payload
         "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" 2>/dev/null
 }
 
+ERR="$T/stderr"
+fire_err() { # repodir command  — like fire, but keeps the hook's stderr in $ERR
+    printf '{"tool_input":{"command":%s},"cwd":%s}' \
+        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" 2>"$ERR"
+}
+
+stderr_has() { # pattern
+    grep -qF -- "$1" "$ERR" && echo yes || echo no
+}
+
 newrepo() {
     local d="$T/$1"; mkdir -p "$d"; git -C "$d" init -q
     git -C "$d" config user.email t@t; git -C "$d" config user.name T
@@ -171,6 +181,40 @@ R=$(newrepo r16); git -C "$R" commit -qm "feat: thing"
 BEFORE=$(git -C "$R" rev-parse HEAD)
 fire "$R" "git -C $R log --grep 'git commit'"
 check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+
+# Cases 17-20: a target the hook cannot resolve amends nothing (not even the
+# cwd repo) and says why on stderr; a silent skip is how missing trailers went
+# unnoticed.
+
+echo "== 17. --repo \"\$WT\" -> nothing amended, stderr names the target =="
+CWD=$(newrepo r17); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" '~/.claude/bin/git-commit.sh --repo "$WT" "feat: thing"'
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr names \$WT" yes "$(stderr_has '$WT')"
+
+echo "== 18. --repo <nonexistent> -> nothing amended, stderr message =="
+CWD=$(newrepo r18); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" "~/.claude/bin/git-commit.sh --repo $T/does-not-exist 'feat: thing'"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr names the missing dir" yes "$(stderr_has "$T/does-not-exist")"
+
+echo "== 19. two commit segments with different targets -> neither amended =="
+A=$(newrepo r19-a); git -C "$A" commit -qm "feat: a"
+B=$(newrepo r19-b); git -C "$B" commit -qm "feat: b"
+A_BEFORE=$(git -C "$A" rev-parse HEAD); B_BEFORE=$(git -C "$B" rev-parse HEAD)
+fire_err "$A" "~/.claude/bin/git-commit.sh --repo $A 'feat: a' && ~/.claude/bin/git-commit.sh --repo $B 'feat: b'"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+check "B untouched" "$B_BEFORE" "$(git -C "$B" rev-parse HEAD)"
+check "stderr says several targets" yes "$(stderr_has "different targets")"
+
+echo "== 20. command that does not tokenize -> nothing amended, stderr message =="
+CWD=$(newrepo r20); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" "git commit -m 'unbalanced"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr says it does not tokenize" yes "$(stderr_has "does not tokenize")"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
