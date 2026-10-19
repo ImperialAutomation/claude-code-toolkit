@@ -113,6 +113,65 @@ BEFORE=$(git -C "$R" rev-parse HEAD)
 fire "$R" "git -C $R commit -m 'feat: thing'"
 check "pushed commit untouched" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
 
+# Cases 10+ cover target resolution: the session cwd holds a fresh, unpushed,
+# trailer-less HEAD (another session's work in progress), so a hook that falls
+# back to the cwd instead of the commit's real target rewrites it.
+
+echo "== 10. git-commit.sh --repo <other>, cwd elsewhere -> trailer in <other> =="
+CWD=$(newrepo r10-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r10); git -C "$R" commit -qm "feat: thing"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing'"
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 11. --repo=<other> -> trailer in <other> =="
+CWD=$(newrepo r11-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r11); git -C "$R" commit -qm "feat: thing"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo=$R 'feat: thing'"
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 12. --repo '<other>' (quoted) -> trailer in <other> =="
+CWD=$(newrepo r12-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r12); git -C "$R" commit -qm "feat: thing"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo '$R' \"feat: thing\""
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 13. --repo ~/<dir> -> tilde expands to \$HOME =="
+CWD=$(newrepo r13-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r13); git -C "$R" commit -qm "feat: thing"
+FAKE_HOME="$T/home13"; mkdir -p "$FAKE_HOME"; ln -s "$R" "$FAKE_HOME/r13"
+HOME="$FAKE_HOME" fire "$CWD" "~/.claude/bin/git-commit.sh --repo ~/r13 'feat: thing'"
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 14. git -C <A> add && git-commit.sh --repo <B> -> trailer in B, A untouched =="
+A=$(newrepo r14-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r14-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "git -C $A add f && ~/.claude/bin/git-commit.sh --repo $B 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 15. git -C <A> status && git -C <B> commit -> the commit segment's -C wins =="
+A=$(newrepo r15-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r15-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "git -C $A status && git -C $B commit -m 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 16. message mentioning 'git commit' in a non-commit call -> untouched =="
+R=$(newrepo r16); git -C "$R" commit -qm "feat: thing"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire "$R" "git -C $R log --grep 'git commit'"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]]

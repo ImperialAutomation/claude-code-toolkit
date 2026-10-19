@@ -37,15 +37,18 @@ set -uo pipefail
 
 TRAILER="Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
+# Resolved from BASH_SOURCE, not the cwd: hooks run from arbitrary working
+# directories, and bin/ is reached through a symlink.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 INPUT=$(cat)
 
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 [[ -z "$COMMAND" ]] && exit 0
 
-# Only act on commands that actually create a commit. git-commit.sh is the
-# sanctioned path; raw `git commit` is matched too so the trailer does not
-# depend on which one was used.
-if ! echo "$COMMAND" | grep -qE '(git-commit\.sh|git +(-C +[^ ]+ +)?commit)'; then
+# Cheap pre-filter before the parser below, which decides whether the command
+# really commits (git-commit.sh or a raw `git ... commit`).
+if ! echo "$COMMAND" | grep -q 'commit'; then
     exit 0
 fi
 
@@ -55,13 +58,11 @@ if echo "$COMMAND" | grep -q -- '--no-edit'; then
     exit 0
 fi
 
-# Resolve the repo the command operated on: an explicit `git -C <dir>` wins,
-# otherwise the working directory of the session.
-REPO_DIR=$(echo "$COMMAND" | grep -oE 'git +-C +[^ ]+' | head -1 | awk '{print $3}')
-if [[ -z "$REPO_DIR" ]]; then
-    REPO_DIR=$(echo "$INPUT" | jq -r '.cwd // empty')
-fi
-[[ -z "$REPO_DIR" || ! -d "$REPO_DIR" ]] && exit 0
+# Resolve the repo the commit landed in from the commit segment itself; see
+# lib/commit_target.py for the order and what counts as unresolvable.
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+TARGET=$(echo "$COMMAND" | python3 "$SCRIPT_DIR/lib/commit_target.py" "$CWD" 2>/dev/null) || exit 0
+REPO_DIR=${TARGET%%$'\n'*}
 
 git -C "$REPO_DIR" rev-parse --verify HEAD &>/dev/null || exit 0
 
