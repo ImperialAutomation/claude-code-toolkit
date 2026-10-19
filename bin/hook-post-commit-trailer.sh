@@ -35,7 +35,9 @@
 
 set -uo pipefail
 
-TRAILER="Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+# Model-neutral on purpose: the PostToolUse payload carries no model name, so
+# any specific name here would misattribute every commit made by another model.
+TRAILER="Co-Authored-By: Claude <noreply@anthropic.com>"
 
 # Resolved from BASH_SOURCE, not the cwd: hooks run from arbitrary working
 # directories, and bin/ is reached through a symlink.

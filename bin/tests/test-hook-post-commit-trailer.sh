@@ -64,6 +64,9 @@ echo "== 1. plain commit without trailer -> added =="
 R=$(newrepo r1); git -C "$R" commit -qm "feat: thing"
 fire "$R" "git -C $R commit -m 'feat: thing'"
 check "trailer added" yes "$(has_trailer "$R")"
+# Model-neutral: the PostToolUse payload carries no model name.
+check "trailer text" "Co-Authored-By: Claude <noreply@anthropic.com>" \
+    "$(git -C "$R" log -1 --format='%B' | grep -i '^Co-Authored-By:')"
 
 echo "== 2. commit that already has a trailer -> untouched =="
 R=$(newrepo r2)
