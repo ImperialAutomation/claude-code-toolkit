@@ -13,7 +13,8 @@
 #   --file F   Read commit message from file F
 #   --stdin    Read commit message from stdin
 #   --amend    Amend the previous commit (use with caution)
-#   --repo D   Run git in repository directory D (avoids a leading `cd`, which
+#   --repo D, --repo=D
+#              Run git in repository directory D (avoids a leading `cd`, which
 #              would break the Bash(~/.claude/bin/*) permission match)
 #   --allow-protected
 #              Commit even when the target tree is on a protected branch
@@ -62,6 +63,10 @@ while [[ $# -gt 0 ]]; do
         --repo)
             REPO_DIR="$2"
             shift 2
+            ;;
+        --repo=*)
+            REPO_DIR="${1#--repo=}"
+            shift
             ;;
         --amend)
             AMEND="--amend"
