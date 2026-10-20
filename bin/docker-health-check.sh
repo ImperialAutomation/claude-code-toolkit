@@ -341,10 +341,12 @@ fi
 echo ""
 
 # Check logs for error patterns
-echo "── Log Issues (last 50 lines) ──"
+echo "── Log Issues (current run, last 50 lines) ──"
 
 LOG_ISSUES=0
 ERROR_PATTERNS='ERROR|CRITICAL|Traceback|ModuleNotFoundError|ImportError|FATAL|panic:'
+# Docker's StartedAt for a container that never started. Not a usable lower bound.
+NEVER_STARTED='0001-01-01T00:00:00Z'
 
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
@@ -356,8 +358,20 @@ while IFS= read -r line; do
     continue
   fi
 
-  # Get recent logs and check for error patterns
-  errors=$(docker logs --tail=50 "$name" 2>&1 | grep -E "$ERROR_PATTERNS" 2>/dev/null || true)
+  # Only the current run counts. The log survives a restart, so a quiet container
+  # (a database after a normal stop) keeps its previous run's shutdown FATALs in
+  # its last 50 lines for days, and a healthy stack would exit 1 on history.
+  # A crash loop is not hidden by this: its restart count is already an issue,
+  # and the status block above prints its logs without this bound.
+  # If StartedAt cannot be read, fall back to the unbounded tail rather than
+  # skipping the check.
+  log_args=(--tail=50)
+  started_at=$(docker inspect --format '{{.State.StartedAt}}' "$name" 2>/dev/null || echo "")
+  if [[ -n "$started_at" && "$started_at" != "$NEVER_STARTED" ]]; then
+    log_args+=(--since "$started_at")
+  fi
+
+  errors=$(docker logs "${log_args[@]}" "$name" 2>&1 | grep -E "$ERROR_PATTERNS" 2>/dev/null || true)
   if [[ -n "$errors" ]]; then
     error_count=$(echo "$errors" | wc -l | tr -d ' ')
     echo "  $name: $error_count error(s)"
