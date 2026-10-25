@@ -109,8 +109,47 @@ cmd_worktree() {
     printf '%s\n' "$dir"
 }
 
+# A linked worktree has a .git FILE. Removing it through git also drops its
+# entry under .git/worktrees; a bare rm -rf would leave that entry behind, and
+# `git worktree list` would keep showing a checkout that no longer exists.
+# --force twice: also when it has untracked or modified files, or is locked.
+remove_one() {
+    local target="$1" common=""
+    if [[ -f "$target/.git" ]] \
+        && common=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+        git --git-dir="$common" worktree remove --force --force "$target" >/dev/null 2>&1
+    fi
+    [[ -e "$target" ]] && rm -rf "$target" 2>/dev/null
+    [[ -n "$common" ]] && git --git-dir="$common" worktree prune 2>/dev/null
+    if [[ -e "$target" ]]; then
+        echo "could not remove $target (files a container wrote as root? remove them from inside a container, or ask the user)" >&2
+        return 1
+    fi
+    echo "removed $target"
+}
+
+cmd_clean() {
+    [[ ${#ARGS[@]} -eq 1 ]] || usage
+    local project_dir target rc=0
+    project_dir="$SCRATCH_ROOT/$(project_name)"
+    if [[ "${ARGS[0]}" == "--all" ]]; then
+        [[ -d "$project_dir" ]] || { echo "nothing to clean: $project_dir"; return 0; }
+        shopt -s nullglob dotglob
+        for target in "$project_dir"/*; do
+            remove_one "$target" || rc=1
+        done
+        shopt -u nullglob dotglob
+        [[ $rc -eq 0 ]] && rmdir "$project_dir" 2>/dev/null
+        return $rc
+    fi
+    target=$(purpose_dir "${ARGS[0]}") || exit 2
+    [[ -e "$target" ]] || { echo "nothing to clean: $target"; return 0; }
+    remove_one "$target"
+}
+
 case "$SUBCOMMAND" in
     dir) cmd_dir ;;
     worktree) cmd_worktree ;;
+    clean) cmd_clean ;;
     *) usage ;;
 esac

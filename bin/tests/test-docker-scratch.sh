@@ -94,6 +94,67 @@ check "no dir left after a failed ref" "no" \
     "$([[ -e "$T/scratch/acme-webshop/bad-ref" ]] && echo yes || echo no)"
 run worktree --repo "$REPO" only-purpose >/dev/null 2>&1; check "missing ref" "2" "$?"
 
+echo "== 9. clean removes a plain purpose dir, contents and all =="
+D=$(run dir --repo "$REPO" junk-1 2>/dev/null)
+mkdir -p "$D/backend/.pytest_cache" && touch "$D/backend/.pytest_cache/x" "$D/.hidden"
+run clean --repo "$REPO" junk-1 >/dev/null 2>&1; RC=$?
+check "exit 0" "0" "$RC"
+check "dir is gone" "no" "$([[ -e "$D" ]] && echo yes || echo no)"
+
+echo "== 10. clean unregisters a worktree instead of orphaning it =="
+WT="$T/scratch/acme-webshop/base-7"
+echo dirty > "$WT/untracked.txt"   # an untracked file must not block removal
+run clean --repo "$REPO" base-7 >/dev/null 2>&1; RC=$?
+check "exit 0" "0" "$RC"
+check "dir is gone" "no" "$([[ -e "$WT" ]] && echo yes || echo no)"
+check "git no longer lists it" "0" \
+    "$(git -C "$REPO" worktree list --porcelain | grep -cx "worktree $WT")"
+check "no admin entry left in .git/worktrees" "" \
+    "$(grep -lx "$WT/.git" "$REPO"/.git/worktrees/*/gitdir 2>/dev/null)"
+
+echo "== 10b. clean also unregisters a locked worktree =="
+# `git worktree prune` skips locked entries, so a plain rm -rf + prune would
+# orphan this one; only `worktree remove --force --force` takes it out.
+WT=$(run worktree --repo "$REPO" locked-1 HEAD 2>/dev/null)
+git -C "$REPO" worktree lock "$WT"
+run clean --repo "$REPO" locked-1 >/dev/null 2>&1; RC=$?
+check "exit 0" "0" "$RC"
+check "git no longer lists it" "0" \
+    "$(git -C "$REPO" worktree list --porcelain | grep -cx "worktree $WT")"
+
+echo "== 11. clean of something that is not there is not an error =="
+OUT=$(run clean --repo "$REPO" never-made 2>&1); RC=$?
+check "exit 0" "0" "$RC"
+check "says so" "1" "$(grep -c "nothing to clean" <<<"$OUT")"
+
+echo "== 12. clean --all empties this project only =="
+run dir --repo "$REPO" a >/dev/null 2>&1
+run worktree --repo "$REPO" b HEAD >/dev/null 2>&1
+OTHER="$T/Other"; make_repo "$OTHER"
+KEEP=$(run dir --repo "$OTHER" keep 2>/dev/null)
+run clean --repo "$REPO" --all >/dev/null 2>&1; RC=$?
+check "exit 0" "0" "$RC"
+check "project dir is gone" "no" "$([[ -e "$T/scratch/acme-webshop" ]] && echo yes || echo no)"
+check "worktree b unregistered" "0" \
+    "$(git -C "$REPO" worktree list --porcelain | grep -cx "worktree $T/scratch/acme-webshop/b")"
+check "other project untouched" "yes" "$([[ -d "$KEEP" ]] && echo yes || echo no)"
+
+echo "== 13. clean reports a dir it could not remove =="
+# Stands in for the root-owned files a container leaves in a bind mount on
+# native Linux Docker: the rm fails, and that must not be reported as success.
+D=$(run dir --repo "$REPO" stuck 2>/dev/null)
+mkdir -p "$D/locked" && touch "$D/locked/f" && chmod 555 "$D/locked"
+OUT=$(run clean --repo "$REPO" stuck 2>&1); RC=$?
+chmod 755 "$D/locked"
+check "exit 1" "1" "$RC"
+check "names the dir" "1" "$(grep -c "$D" <<<"$OUT")"
+
+echo "== 14. clean usage errors =="
+run clean --repo "$REPO" >/dev/null 2>&1; check "no target" "2" "$?"
+run clean --repo "$REPO" --all x >/dev/null 2>&1; check "--all plus a purpose" "2" "$?"
+run clean --repo "$REPO" ../Other >/dev/null 2>&1; check "escaping purpose" "2" "$?"
+check "other project still untouched" "yes" "$([[ -d "$KEEP" ]] && echo yes || echo no)"
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [[ $FAIL -eq 0 ]]
