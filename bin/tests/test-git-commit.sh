@@ -235,6 +235,20 @@ RC=$?
 check "exit zero" 0 "$RC"
 check "commit created" 2 "$(count_commits "$R")"
 
+echo "== 17. --repo=D commits in D, not in cwd =="
+# hook-post-commit-trailer.sh reads --repo=D as the commit's target. If this
+# script took it as a message line and committed in cwd instead, the hook would
+# amend D's HEAD: a commit this call never made.
+CALLER=$(newrepo r17caller feature-x)
+R=$(newrepo r17 feature-y)
+OUT=$(env -C "$CALLER" bash "$SCRIPT" --repo="$R" "feat: equals form" 2>&1)
+RC=$?
+check "exit zero" 0 "$RC"
+check "commit created in D" 2 "$(count_commits "$R")"
+check "no commit in cwd" 1 "$(count_commits "$CALLER")"
+check "option not in commit message" "feat: equals form" \
+    "$(git -C "$R" log -1 --format='%B')"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]]

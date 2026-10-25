@@ -11,7 +11,12 @@
 # from rewriting the WRONG commit are the load-bearing part. Cases 3-6 and 9
 # exist for those guards specifically: case 9 (already pushed) is what keeps the
 # hook from rewriting published history, and it was added after a mutation run
-# showed the suite stayed green with that guard deleted.
+# showed the suite stayed green with that guard deleted. Cases 10-26 guard the
+# target resolution: the cwd repo there holds another session's fresh commit.
+
+# The commands fed to the hook are text, not shell: a literal `~` or `$WT` in
+# them is exactly what the hook has to cope with.
+# shellcheck disable=SC2088,SC2016
 
 set -uo pipefail
 
@@ -43,6 +48,16 @@ fire() { # repodir command  — feed the hook a PostToolUse payload
         "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" 2>/dev/null
 }
 
+ERR="$T/stderr"
+fire_err() { # repodir command  — like fire, but keeps the hook's stderr in $ERR
+    printf '{"tool_input":{"command":%s},"cwd":%s}' \
+        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" 2>"$ERR"
+}
+
+stderr_has() { # pattern
+    grep -qF -- "$1" "$ERR" && echo yes || echo no
+}
+
 newrepo() {
     local d="$T/$1"; mkdir -p "$d"; git -C "$d" init -q
     git -C "$d" config user.email t@t; git -C "$d" config user.name T
@@ -54,6 +69,9 @@ echo "== 1. plain commit without trailer -> added =="
 R=$(newrepo r1); git -C "$R" commit -qm "feat: thing"
 fire "$R" "git -C $R commit -m 'feat: thing'"
 check "trailer added" yes "$(has_trailer "$R")"
+# Model-neutral: the PostToolUse payload carries no model name.
+check "trailer text" "Co-Authored-By: Claude <noreply@anthropic.com>" \
+    "$(git -C "$R" log -1 --format='%B' | grep -i '^Co-Authored-By:')"
 
 echo "== 2. commit that already has a trailer -> untouched =="
 R=$(newrepo r2)
@@ -112,6 +130,153 @@ git -C "$R" push -q origin HEAD 2>/dev/null
 BEFORE=$(git -C "$R" rev-parse HEAD)
 fire "$R" "git -C $R commit -m 'feat: thing'"
 check "pushed commit untouched" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+
+# Cases 10+ cover target resolution: the session cwd holds a fresh, unpushed,
+# trailer-less HEAD (another session's work in progress), so a hook that falls
+# back to the cwd instead of the commit's real target rewrites it.
+
+echo "== 10. git-commit.sh --repo <other>, cwd elsewhere -> trailer in <other> =="
+CWD=$(newrepo r10-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r10); git -C "$R" commit -qm "feat: thing"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing'"
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 11. --repo=<other> -> trailer in <other> =="
+CWD=$(newrepo r11-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r11); git -C "$R" commit -qm "feat: thing"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo=$R 'feat: thing'"
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 12. --repo '<other>' (quoted) -> trailer in <other> =="
+CWD=$(newrepo r12-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r12); git -C "$R" commit -qm "feat: thing"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo '$R' \"feat: thing\""
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 13. --repo ~/<dir> -> tilde expands to \$HOME =="
+CWD=$(newrepo r13-cwd); git -C "$CWD" commit -qm "feat: other session"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+R=$(newrepo r13); git -C "$R" commit -qm "feat: thing"
+FAKE_HOME="$T/home13"; mkdir -p "$FAKE_HOME"; ln -s "$R" "$FAKE_HOME/r13"
+HOME="$FAKE_HOME" fire "$CWD" "~/.claude/bin/git-commit.sh --repo ~/r13 'feat: thing'"
+check "trailer added in target" yes "$(has_trailer "$R")"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+
+echo "== 14. git -C <A> add && git-commit.sh --repo <B> -> trailer in B, A untouched =="
+A=$(newrepo r14-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r14-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "git -C $A add f && ~/.claude/bin/git-commit.sh --repo $B 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 15. git -C <A> status && git -C <B> commit -> the commit segment's -C wins =="
+A=$(newrepo r15-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r15-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "git -C $A status && git -C $B commit -m 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 16. message mentioning 'git commit' in a non-commit call -> untouched =="
+R=$(newrepo r16); git -C "$R" commit -qm "feat: thing"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire "$R" "git -C $R log --grep 'git commit'"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+
+# Cases 17-20: a target the hook cannot resolve amends nothing (not even the
+# cwd repo) and says why on stderr; a silent skip is how missing trailers went
+# unnoticed.
+
+echo "== 17. --repo \"\$WT\" -> nothing amended, stderr names the target =="
+CWD=$(newrepo r17); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" '~/.claude/bin/git-commit.sh --repo "$WT" "feat: thing"'
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr names \$WT" yes "$(stderr_has '$WT')"
+# The reason, not just the name: without the expansion check the hook would
+# take "$WT" as a relative directory and only fail later, if at all.
+check "stderr says shell expansion" yes "$(stderr_has "shell expansion")"
+
+echo "== 18. --repo <nonexistent> -> nothing amended, stderr message =="
+CWD=$(newrepo r18); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" "~/.claude/bin/git-commit.sh --repo $T/does-not-exist 'feat: thing'"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr names the missing dir" yes "$(stderr_has "$T/does-not-exist")"
+
+echo "== 19. two commit segments with different targets -> neither amended =="
+A=$(newrepo r19-a); git -C "$A" commit -qm "feat: a"
+B=$(newrepo r19-b); git -C "$B" commit -qm "feat: b"
+A_BEFORE=$(git -C "$A" rev-parse HEAD); B_BEFORE=$(git -C "$B" rev-parse HEAD)
+fire_err "$A" "~/.claude/bin/git-commit.sh --repo $A 'feat: a' && ~/.claude/bin/git-commit.sh --repo $B 'feat: b'"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+check "B untouched" "$B_BEFORE" "$(git -C "$B" rev-parse HEAD)"
+check "stderr says several targets" yes "$(stderr_has "different targets")"
+
+echo "== 20. command that does not tokenize -> nothing amended, stderr message =="
+CWD=$(newrepo r20); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" "git commit -m 'unbalanced"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr says it does not tokenize" yes "$(stderr_has "does not tokenize")"
+
+echo "== 21. commit && push in one call -> untouched, stderr names the hash =="
+R=$(newrepo r21); git -C "$R" commit -qm "feat: thing"
+BARE="$T/r21-remote.git"; git init -q --bare "$BARE"
+git -C "$R" remote add origin "$BARE"
+git -C "$R" push -q origin HEAD 2>/dev/null
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_err "$R" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing' && git -C $R push"
+check "pushed commit untouched" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+check "stderr names the hash" yes "$(stderr_has "$(git -C "$R" rev-parse --short HEAD)")"
+check "stderr says pushed in the same call" yes "$(stderr_has "pushed in the same call")"
+
+echo "== 22. pushed HEAD, no push in the command -> no warning =="
+R=$(newrepo r22); git -C "$R" commit -qm "feat: thing"
+BARE="$T/r22-remote.git"; git init -q --bare "$BARE"
+git -C "$R" remote add origin "$BARE"
+git -C "$R" push -q origin HEAD 2>/dev/null
+fire_err "$R" "git -C $R commit -m 'feat: thing'"
+check "stderr empty" "" "$(<"$ERR")"
+
+# Cases 23-25: a directory change before the commit moves its target. The
+# approve hook auto-approves `env -C <dir> git commit`, so falling back to the
+# cwd there amends the wrong repo.
+
+echo "== 23. env -C <B> git commit, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r23-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r23-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "env -C $B git commit -m 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 24. cd <B> && git-commit.sh, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r24-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r24-b); git -C "$B" commit -qm "feat: thing"
+fire "$A" "cd $B && ~/.claude/bin/git-commit.sh 'feat: thing'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+echo "== 25. cd -; git commit -> nothing amended, stderr message =="
+CWD=$(newrepo r25); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_err "$CWD" "cd -; git commit -m 'feat: thing'"
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "stderr names cd -" yes "$(stderr_has "cd -")"
+
+echo "== 26. --git-dir in a non-commit call -> no warning =="
+R=$(newrepo r26); git -C "$R" commit -qm "feat: thing"
+fire_err "$R" "git --git-dir=$R/.git log --grep commit"
+check "stderr empty" "" "$(<"$ERR")"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

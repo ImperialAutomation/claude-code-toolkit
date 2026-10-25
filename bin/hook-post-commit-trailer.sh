@@ -27,25 +27,57 @@
 #     }
 #   }
 #
-# Skips:
+# Target repo, taken from the commit segment of the command itself (never from
+# another segment of the chain), first match wins:
+#   1. git-commit.sh --repo <dir> / --repo=<dir>
+#   2. the -C <dir> of the `git ... commit` segment
+#   3. the session cwd, moved by a `cd <dir>` segment before the commit or an
+#      `env -C <dir>` prefix on the commit segment
+# Parsing lives in lib/commit_target.py, which reuses the approve hook's
+# tokenizer so quotes and separators are read the same way.
+#
+# Skips silently:
 #   - Bash calls that did not commit
 #   - Commits that already carry the trailer
 #   - Repos with no commit yet, or a detached/unborn HEAD
 #   - Merge commits (the trailer belongs on the authored commit)
+#   - Commits older than 120 s
+#   - Pushed commits, when the command did not push them
+#
+# Skips with a stderr message, so a missing trailer does not go unnoticed:
+#   - An unresolvable target: a shell variable or backtick in it, a directory
+#     that does not exist, several commit segments with different targets, or a
+#     command that does not tokenize. Never falls back to the cwd: amending the
+#     wrong commit cannot be undone, a missing trailer can.
+#   - A commit pushed by a `git push` later in the same call (names the hash)
 
 set -uo pipefail
 
-TRAILER="Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+# Model-neutral on purpose: the PostToolUse payload carries no model name, so
+# any specific name here would misattribute every commit made by another model.
+TRAILER="Co-Authored-By: Claude <noreply@anthropic.com>"
+
+# Resolved from BASH_SOURCE, not the cwd: hooks run from arbitrary working
+# directories, and bin/ is reached through a symlink.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# Exit statuses of lib/commit_target.py.
+EXIT_RESOLVED=0
+EXIT_UNRESOLVABLE=2
+# Its second output line when a `git push` follows the commit.
+PUSH_MARKER="push"
+
+TMP_ERR=$(mktemp)
+trap 'rm -f "$TMP_ERR"' EXIT
 
 INPUT=$(cat)
 
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 [[ -z "$COMMAND" ]] && exit 0
 
-# Only act on commands that actually create a commit. git-commit.sh is the
-# sanctioned path; raw `git commit` is matched too so the trailer does not
-# depend on which one was used.
-if ! echo "$COMMAND" | grep -qE '(git-commit\.sh|git +(-C +[^ ]+ +)?commit)'; then
+# Cheap pre-filter before the parser below, which decides whether the command
+# really commits (git-commit.sh or a raw `git ... commit`).
+if ! echo "$COMMAND" | grep -q 'commit'; then
     exit 0
 fi
 
@@ -55,20 +87,23 @@ if echo "$COMMAND" | grep -q -- '--no-edit'; then
     exit 0
 fi
 
-# Resolve the repo the command operated on: an explicit `git -C <dir>` wins,
-# otherwise the working directory of the session.
-REPO_DIR=$(echo "$COMMAND" | grep -oE 'git +-C +[^ ]+' | head -1 | awk '{print $3}')
-if [[ -z "$REPO_DIR" ]]; then
-    REPO_DIR=$(echo "$INPUT" | jq -r '.cwd // empty')
-fi
-[[ -z "$REPO_DIR" || ! -d "$REPO_DIR" ]] && exit 0
+# Resolve the repo the commit landed in from the commit segment itself; see
+# lib/commit_target.py for the order and what counts as unresolvable.
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+TARGET=$(echo "$COMMAND" | python3 "$SCRIPT_DIR/lib/commit_target.py" "$CWD" 2>"$TMP_ERR")
+case $? in
+    "$EXIT_RESOLVED") ;;
+    "$EXIT_UNRESOLVABLE")
+        # Never fall back to the cwd: amending the wrong commit is not
+        # recoverable, a missing trailer is.
+        echo "hook: Co-Authored-By trailer not added: $(<"$TMP_ERR"); add it manually if this call committed" >&2
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+{ read -r REPO_DIR; read -r PUSH_AFTER; } <<< "$TARGET"
 
 git -C "$REPO_DIR" rev-parse --verify HEAD &>/dev/null || exit 0
-
-# A hook that rewrites a commit already pushed would desync the remote.
-if git -C "$REPO_DIR" branch -r --contains HEAD 2>/dev/null | grep -q .; then
-    exit 0
-fi
 
 # Merge commits are not authored content.
 if [[ $(git -C "$REPO_DIR" rev-list --no-walk --count --merges HEAD 2>/dev/null) == "1" ]]; then
@@ -84,6 +119,16 @@ fi
 # (a grep over history, a --dry-run) must not rewrite an older commit.
 COMMIT_AGE=$(( $(date +%s) - $(git -C "$REPO_DIR" log -1 --format='%ct' 2>/dev/null || echo 0) ))
 if (( COMMIT_AGE > 120 )); then
+    exit 0
+fi
+
+# A hook that rewrites a commit already pushed would desync the remote. Checked
+# last, so the warning below only fires for a commit that needed the trailer.
+if git -C "$REPO_DIR" branch -r --contains HEAD 2>/dev/null | grep -q .; then
+    if [[ "$PUSH_AFTER" == "$PUSH_MARKER" ]]; then
+        HASH=$(git -C "$REPO_DIR" rev-parse --short HEAD)
+        echo "hook: commit $HASH in $REPO_DIR was pushed in the same call; the trailer was not added. On a feature branch: amend it in and force-push" >&2
+    fi
     exit 0
 fi
 
