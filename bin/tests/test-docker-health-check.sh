@@ -45,7 +45,12 @@ contains() { # haystack needle -> yes/no
 #               answers any query, the pre-fix behaviour.
 # STUB_HEALTH   "name=status" pairs, one per line; inspect reads .State.Health.Status
 # STUB_RESTARTS "name=count" pairs, one per line; absent name means 0
-# STUB_LOGS     text returned by `docker logs` for every container
+# STUB_LOGS     text returned by `docker logs` for every container: the current run
+# STUB_LOGS_PREVIOUS_RUN  text logged before the container's last start. Returned
+#               only when `docker logs` is called without --since, which is how
+#               Docker behaves: the log survives a restart.
+# STUB_STARTED  "name=timestamp" pairs; inspect reads .State.StartedAt
+# STUB_LOGS_CALLED  file that records every `docker logs` invocation
 # STUB_DAEMON_ERR  when set, every subcommand fails with this on stderr and
 #               exit 1: a dead daemon or an unreadable socket.
 # STUB_LABELS   "project<TAB>comma,separated,config,files" rows, one per
@@ -145,10 +150,17 @@ case "$sub" in
     case "$fmt" in
       *RestartCount*) lookup "${STUB_RESTARTS:-}" "$name" "0" ;;
       *Health.Status*) lookup "${STUB_HEALTH:-}" "$name" "" ;;
+      *StartedAt*) lookup "${STUB_STARTED:-}" "$name" "" ;;
       *) echo "" ;;
     esac
     ;;
   logs)
+    [[ -n "${STUB_LOGS_CALLED:-}" ]] && echo "logs $*" >> "$STUB_LOGS_CALLED"
+    since=""
+    for a in "$@"; do [[ "$a" == "--since" ]] && since=1; done
+    if [[ -z "$since" && -n "${STUB_LOGS_PREVIOUS_RUN:-}" ]]; then
+        printf '%s\n' "$STUB_LOGS_PREVIOUS_RUN"
+    fi
     printf '%s\n' "${STUB_LOGS:-}"
     ;;
   *)
@@ -510,6 +522,51 @@ check "empty stack is still exit 1"      "1"   "$RC"
 check "empty stack says no containers"   "yes" "$(contains "$OUT" "no containers found")"
 check "empty stack blames no daemon"     "no"  "$(contains "$OUT" "cannot reach the Docker daemon")"
 unset STUB_COMPOSE
+
+echo "== 15. the log check counts only the container's current run =="
+# The bug: a database container stopped normally logs shutdown FATALs, then logs
+# almost nothing after its restart. Those lines stay in its last 50 for days, and
+# a healthy stack exited 1 on them.
+STUB_PS="$(c myapp_db running 'Up 2 days')"
+STUB_HEALTH=""
+STUB_STARTED="myapp_db=2026-10-13T08:00:00.123456789Z"
+STUB_LOGS_PREVIOUS_RUN=$(printf '%s\n' \
+    "FATAL:  terminating connection due to administrator command" \
+    "LOG:  database system is shut down")
+STUB_LOGS="LOG:  database system is ready to accept connections"
+STUB_LOGS_CALLED="$T/logs-called-15"
+: > "$STUB_LOGS_CALLED"
+export STUB_PS STUB_HEALTH STUB_STARTED STUB_LOGS_PREVIOUS_RUN STUB_LOGS STUB_LOGS_CALLED
+OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
+check "previous run's FATAL does not fail" "0"   "$RC"
+check "no log errors reported"             "yes" "$(contains "$OUT" "No errors detected")"
+check "logs asked since the start"         "yes" \
+    "$(contains "$(cat "$STUB_LOGS_CALLED")" "--since 2026-10-13T08:00:00.123456789Z")"
+
+# An error in the current run is still found.
+STUB_LOGS="ERROR:  relation orders does not exist"
+export STUB_LOGS
+OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
+check "current-run error still exits 1" "1"   "$RC"
+check "current-run error is reported"   "yes" "$(contains "$OUT" "relation")"
+
+# StartedAt unreadable: fall back to the unbounded tail rather than skipping the
+# check. The previous run's FATAL is then counted, as before this change.
+STUB_STARTED=""
+STUB_LOGS="LOG:  database system is ready to accept connections"
+: > "$STUB_LOGS_CALLED"
+export STUB_STARTED STUB_LOGS
+OUT=$(run "$T/no-compose" --filter myapp_ 2>&1); RC=$?
+check "no StartedAt falls back to the tail" "1"  "$RC"
+check "no --since without StartedAt"        "no" "$(contains "$(cat "$STUB_LOGS_CALLED")" "--since")"
+
+# A container that never started reports Docker's zero time, which is no bound.
+STUB_STARTED="myapp_db=0001-01-01T00:00:00Z"
+: > "$STUB_LOGS_CALLED"
+export STUB_STARTED
+run "$T/no-compose" --filter myapp_ >/dev/null 2>&1
+check "zero StartedAt is not used as --since" "no" "$(contains "$(cat "$STUB_LOGS_CALLED")" "--since")"
+unset STUB_PS STUB_HEALTH STUB_STARTED STUB_LOGS_PREVIOUS_RUN STUB_LOGS STUB_LOGS_CALLED
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
