@@ -71,6 +71,29 @@ run >/dev/null 2>&1; check "no subcommand" "2" "$?"
 run bogus x >/dev/null 2>&1; check "unknown subcommand" "2" "$?"
 run dir --repo "$T/missing" x >/dev/null 2>&1; check "missing --repo dir" "2" "$?"
 
+echo "== 6. worktree checks out <ref> detached at the purpose dir =="
+FIRST=$(git -C "$REPO" rev-parse HEAD~1)
+OUT=$(run worktree --repo "$REPO" base-7 HEAD~1 2>/dev/null); RC=$?
+check "exit 0" "0" "$RC"
+check "printed path" "$T/scratch/acme-webshop/base-7" "$OUT"
+check "checkout is at <ref>" "$FIRST" "$(git -C "$OUT" rev-parse HEAD 2>/dev/null)"
+check "HEAD is detached" "" "$(git -C "$OUT" branch --show-current 2>/dev/null)"
+check "git lists it as a worktree" "1" \
+    "$(git -C "$REPO" worktree list --porcelain | grep -cx "worktree $OUT")"
+check "the main tree's branch is untouched" "main" "$(git -C "$REPO" branch --show-current)"
+
+echo "== 7. worktree refuses a purpose dir that already exists =="
+run worktree --repo "$REPO" base-7 HEAD >/dev/null 2>&1; RC=$?
+check "exit 1" "1" "$RC"
+check "existing checkout unchanged" "$FIRST" "$(git -C "$OUT" rev-parse HEAD 2>/dev/null)"
+
+echo "== 8. worktree needs a git repo and a valid ref =="
+run worktree --repo "$T/Plain Dir" w HEAD >/dev/null 2>&1; check "non-git --repo" "2" "$?"
+run worktree --repo "$REPO" bad-ref no-such-ref >/dev/null 2>&1; check "unknown ref" "1" "$?"
+check "no dir left after a failed ref" "no" \
+    "$([[ -e "$T/scratch/acme-webshop/bad-ref" ]] && echo yes || echo no)"
+run worktree --repo "$REPO" only-purpose >/dev/null 2>&1; check "missing ref" "2" "$?"
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [[ $FAIL -eq 0 ]]

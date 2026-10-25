@@ -10,9 +10,13 @@
 # linters and `docker build .` never see it) and a cleanup that needs no prompt.
 #
 # Usage:
-#   docker-scratch.sh dir [--repo D] <purpose>
+#   docker-scratch.sh dir      [--repo D] <purpose>
+#   docker-scratch.sh worktree [--repo D] <purpose> <ref>
 #
 #   dir       create <root>/<project>/<purpose> and print its absolute path
+#   worktree  check <ref> out there as a detached linked worktree of D (the
+#             base / pre-fix tree a container runs the tests in) and print the
+#             path; refuses a purpose dir that already exists
 #
 #   <root>     $CLAUDE_SCRATCH_ROOT, default ~/.cache/claude-scratch
 #   <project>  basename of the repo's MAIN worktree (so a linked worktree such
@@ -24,10 +28,13 @@
 #
 # Exit codes:
 #   0  done; prints the path
-#   2  usage error, invalid <purpose>, or --repo is not a directory
+#   1  worktree: purpose dir exists, unknown ref, or git failed
+#   2  usage error, invalid <purpose>, or --repo is not a directory (worktree:
+#      not a git repository)
 #
 # Examples:
 #   docker-scratch.sh dir --repo ~/Projects/Acme pytest-cache-42
+#   docker-scratch.sh worktree --repo ~/Projects/Acme base-42 origin/develop
 
 set -uo pipefail
 
@@ -35,7 +42,8 @@ SCRATCH_ROOT="${CLAUDE_SCRATCH_ROOT:-$HOME/.cache/claude-scratch}"
 PURPOSE_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
 usage() {
-    echo "usage: $(basename "$0") dir [--repo D] <purpose>" >&2
+    echo "usage: $(basename "$0") dir      [--repo D] <purpose>" >&2
+    echo "       $(basename "$0") worktree [--repo D] <purpose> <ref>" >&2
     exit 2
 }
 
@@ -84,7 +92,25 @@ cmd_dir() {
     printf '%s\n' "$dir"
 }
 
+cmd_worktree() {
+    [[ ${#ARGS[@]} -eq 2 ]] || usage
+    git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die_usage "--repo is not a git repository: $REPO"
+    local dir ref="${ARGS[1]}"
+    dir=$(purpose_dir "${ARGS[0]}") || exit 2
+    if [[ -e "$dir" ]]; then
+        echo "already exists, refusing to reuse it: $dir (remove it with: $(basename "$0") clean ${ARGS[0]})" >&2
+        exit 1
+    fi
+    # Resolve the ref before git creates anything, so a typo leaves no
+    # half-made directory behind.
+    git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || { echo "unknown ref: $ref" >&2; exit 1; }
+    mkdir -p "$(dirname "$dir")" || exit 1
+    git -C "$REPO" worktree add --quiet --detach "$dir" "$ref" >&2 || exit 1
+    printf '%s\n' "$dir"
+}
+
 case "$SUBCOMMAND" in
     dir) cmd_dir ;;
+    worktree) cmd_worktree ;;
     *) usage ;;
 esac
