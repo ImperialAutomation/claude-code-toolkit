@@ -155,6 +155,36 @@ run clean --repo "$REPO" --all x >/dev/null 2>&1; check "--all plus a purpose" "
 run clean --repo "$REPO" ../Other >/dev/null 2>&1; check "escaping purpose" "2" "$?"
 check "other project still untouched" "yes" "$([[ -d "$KEEP" ]] && echo yes || echo no)"
 
+echo "== 15. clean removes a symlink as a link, never what it points at =="
+# A link to a linked worktree elsewhere is the dangerous case: following it,
+# `git worktree remove` would delete that outside checkout.
+VICTIM="$T/Victim"; make_repo "$VICTIM"
+git -C "$VICTIM" worktree add -q --detach "$T/outside-wt" HEAD 2>/dev/null
+mkdir -p "$T/outside-plain" && touch "$T/outside-plain/keep"
+LREPO="$T/Linky"; make_repo "$LREPO"
+LDIR=$(dirname "$(run dir --repo "$LREPO" real 2>/dev/null)")
+ln -s "$T/outside-wt" "$LDIR/to-wt"
+ln -s "$T/outside-plain" "$LDIR/to-plain"
+ln -s "$T/does-not-exist" "$LDIR/dangling"
+run clean --repo "$LREPO" to-wt >/dev/null 2>&1; check "single: exit 0" "0" "$?"
+check "single: link gone" "no" "$([[ -L "$LDIR/to-wt" ]] && echo yes || echo no)"
+check "single: outside worktree intact" "yes" "$([[ -f "$T/outside-wt/.git" ]] && echo yes || echo no)"
+check "single: still registered in its repo" "1" "$(git -C "$VICTIM" worktree list | grep -c "outside-wt")"
+run clean --repo "$LREPO" dangling >/dev/null 2>&1; check "dangling: exit 0" "0" "$?"
+check "dangling: link gone" "no" "$([[ -L "$LDIR/dangling" ]] && echo yes || echo no)"
+ln -s "$T/outside-wt" "$LDIR/to-wt"
+run clean --repo "$LREPO" --all >/dev/null 2>&1; check "--all: exit 0" "0" "$?"
+check "--all: project dir gone" "no" "$([[ -e "$LDIR" ]] && echo yes || echo no)"
+check "--all: outside worktree intact" "yes" "$([[ -f "$T/outside-wt/.git" ]] && echo yes || echo no)"
+check "--all: outside plain dir intact" "yes" "$([[ -f "$T/outside-plain/keep" ]] && echo yes || echo no)"
+
+echo "== 16. clean refuses a symlinked project dir =="
+SREPO="$T/Swapped"; make_repo "$SREPO"
+mkdir -p "$T/elsewhere/p" && ln -s "$T/elsewhere" "$CLAUDE_SCRATCH_ROOT/swapped"
+run clean --repo "$SREPO" --all >/dev/null 2>&1; check "--all: exit 1" "1" "$?"
+run clean --repo "$SREPO" p >/dev/null 2>&1; check "single: exit 1" "1" "$?"
+check "target dir intact" "yes" "$([[ -d "$T/elsewhere/p" ]] && echo yes || echo no)"
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [[ $FAIL -eq 0 ]]

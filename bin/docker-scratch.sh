@@ -127,6 +127,18 @@ cmd_worktree() {
 # --force twice: also when it has untracked or modified files, or is locked.
 remove_one() {
     local target="$1" common=""
+    # A symlink is removed as a link and never followed: the tests below would
+    # look through it, and git would then remove the worktree it points at,
+    # wherever that is.
+    if [[ -L "$target" ]]; then
+        rm -f "$target" 2>/dev/null
+        if [[ -L "$target" ]]; then
+            echo "could not remove symlink $target" >&2
+            return 1
+        fi
+        echo "removed symlink $target"
+        return 0
+    fi
     if [[ -f "$target/.git" ]] \
         && common=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
         git --git-dir="$common" worktree remove --force --force "$target" >/dev/null 2>&1
@@ -144,6 +156,8 @@ cmd_clean() {
     [[ ${#ARGS[@]} -eq 1 ]] || usage
     local project_dir target rc=0
     project_dir="$SCRATCH_ROOT/$(project_name)"
+    # Through a symlinked project dir every rm below would land in its target.
+    [[ -L "$project_dir" ]] && { echo "refusing: $project_dir is a symlink" >&2; return 1; }
     if [[ "${ARGS[0]}" == "--all" ]]; then
         [[ -d "$project_dir" ]] || { echo "nothing to clean: $project_dir"; return 0; }
         shopt -s nullglob dotglob
@@ -155,7 +169,7 @@ cmd_clean() {
         return $rc
     fi
     target=$(purpose_dir "${ARGS[0]}") || exit 2
-    [[ -e "$target" ]] || { echo "nothing to clean: $target"; return 0; }
+    [[ -e "$target" || -L "$target" ]] || { echo "nothing to clean: $target"; return 0; }
     remove_one "$target"
 }
 
