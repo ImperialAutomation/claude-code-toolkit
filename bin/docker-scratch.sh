@@ -12,11 +12,17 @@
 # Usage:
 #   docker-scratch.sh dir      [--repo D] <purpose>
 #   docker-scratch.sh worktree [--repo D] <purpose> <ref>
+#   docker-scratch.sh clean    [--repo D] <purpose> | --all
 #
 #   dir       create <root>/<project>/<purpose> and print its absolute path
 #   worktree  check <ref> out there as a detached linked worktree of D (the
 #             base / pre-fix tree a container runs the tests in) and print the
 #             path; refuses a purpose dir that already exists
+#   clean     remove one purpose dir, or with --all every one of this project.
+#             A linked worktree is removed through git, so it does not linger in
+#             `git worktree list`. Nothing outside <root>/<project> is touched:
+#             <purpose> is validated, so the rm cannot be pointed elsewhere.
+#             Something that is not there is reported, not an error.
 #
 #   <root>     $CLAUDE_SCRATCH_ROOT, default ~/.cache/claude-scratch
 #   <project>  basename of the repo's MAIN worktree (so a linked worktree such
@@ -27,14 +33,19 @@
 #   --repo D   the tree that decides <project>; default the current directory
 #
 # Exit codes:
-#   0  done; prints the path
-#   1  worktree: purpose dir exists, unknown ref, or git failed
+#   0  done; dir/worktree print the path, clean prints what it removed
+#   1  worktree: purpose dir exists, unknown ref, or git failed;
+#      clean: something could not be removed (typically files a container wrote
+#      as root into the mount on native Linux Docker; Docker Desktop maps them
+#      to your own user, so there it does not occur)
 #   2  usage error, invalid <purpose>, or --repo is not a directory (worktree:
 #      not a git repository)
 #
 # Examples:
 #   docker-scratch.sh dir --repo ~/Projects/Acme pytest-cache-42
 #   docker-scratch.sh worktree --repo ~/Projects/Acme base-42 origin/develop
+#   docker run --rm -v <printed path>:/app ...    # the path, pasted literally
+#   docker-scratch.sh clean --repo ~/Projects/Acme base-42
 
 set -uo pipefail
 
@@ -44,6 +55,7 @@ PURPOSE_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 usage() {
     echo "usage: $(basename "$0") dir      [--repo D] <purpose>" >&2
     echo "       $(basename "$0") worktree [--repo D] <purpose> <ref>" >&2
+    echo "       $(basename "$0") clean    [--repo D] <purpose> | --all" >&2
     exit 2
 }
 

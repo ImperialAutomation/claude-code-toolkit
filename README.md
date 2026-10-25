@@ -312,10 +312,13 @@ not.
 |--------|-------|-------------|
 | `project-test.sh` | `project-test.sh [pytest-args...]` | Run pytest with automatic venv detection (guardrailed to ~/Projects/). The venv follows the test path's project root, so a path in another worktree uses that worktree's interpreter |
 | `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, alembic, ruff) with auto-detection, falling back to PATH. `--repo` picks the project root when it is not the current directory. The auto-approve hook approves it only when `<cmd>` is approvable on its own, and otherwise denies it with a hint to run `<cmd>` bare, so `pip` gets the same permission flow as it does bare |
+| `docker-scratch.sh` | `docker-scratch.sh dir\|worktree\|clean [--repo D] <purpose> [<ref>]` | Scratch location a Docker container can mount: `~/.cache/claude-scratch/<project>/<purpose>/`. `dir` creates and prints it, `worktree` checks a ref out there as a detached base checkout, `clean <purpose>\|--all` removes it (worktrees through git) without a prompt |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
 | `release.sh` | `release.sh [major\|minor\|patch]` | Create a GitHub release for a WordPress plugin |
+
+`docker-scratch.sh` exists because Docker Desktop shares `$HOME` with its VM but not `/tmp`, so a tree in the scratchpad or `/tmp` cannot be bind-mounted (`mounts denied: ... is not shared from the host`). Without a fixed alternative an agent improvises one, and whole base checkouts end up in `~/Downloads`. The location sits under `$HOME` so Docker shares it, and outside every project tree so test discovery, linters and `docker build .` never pick up a second checkout. `clean` is the reason it is a script rather than a documented path: it validates `<purpose>` as one path component, so its `rm -rf` cannot reach outside the scratch root, and it unregisters a worktree through `git worktree remove` instead of leaving it in `git worktree list`. On native Linux Docker a container running as root leaves root-owned files in the mount; `clean` then exits 1 naming the directory rather than reporting success.
 
 ### Hooks
 
