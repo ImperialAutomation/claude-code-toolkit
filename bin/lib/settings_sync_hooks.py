@@ -15,8 +15,9 @@ the template dropped) stays, and fields of an existing entry (`timeout`, ...)
 are not compared. A missing entry is copied verbatim into the first live group
 of the same event and matcher, or into a new group appended to that event.
 
-Writes only when something is missing: the original bytes go to
-<settings>.bak, the new file replaces the old one atomically with the same mode.
+Writes only when something is missing: the original bytes go to a new
+<settings>.<YYYYmmdd-HHMMSS>.bak (never an existing file), and the new file
+replaces the old one atomically with the same mode.
 The output is two-space-indented JSON, so a hand-formatted file is normalized on
 its first write; key order is kept.
 
@@ -31,11 +32,13 @@ Exit status:
 
 import argparse
 import copy
+import itertools
 import json
 import os
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,6 +46,7 @@ import settings_template  # noqa: E402
 
 DEFAULT_SETTINGS = "~/.claude/settings.json"
 DEFAULT_TEMPLATE = Path(__file__).resolve().parents[2] / "claude-md" / "settings-global.jsonc"
+BACKUP_TIMESTAMP = "%Y%m%d-%H%M%S"
 BACKUP_SUFFIX = ".bak"
 NO_MATCHER_LABEL = "no matcher"
 
@@ -117,6 +121,23 @@ def _write_atomically(path, text, mode):
         raise
 
 
+def _write_backup(path, original):
+    """Write `original` to a new <path>.<timestamp>.bak and return its name.
+
+    Never replaces an existing file: a plain <path>.bak may be a backup the user
+    made by hand, and two syncs in one second must not share a name.
+    """
+    stem = f"{path}.{time.strftime(BACKUP_TIMESTAMP)}"
+    for attempt in itertools.count():
+        backup = f"{stem}{'' if attempt == 0 else f'-{attempt}'}{BACKUP_SUFFIX}"
+        try:
+            with open(backup, "xb") as f:
+                f.write(original)
+            return backup
+        except FileExistsError:
+            continue
+
+
 def _load_live(path):
     try:
         with open(path, "rb") as f:
@@ -166,10 +187,8 @@ def main(argv=None):
         return 0
 
     merge(live, missing)
-    backup = settings + BACKUP_SUFFIX
     mode = stat.S_IMODE(os.stat(settings).st_mode)
-    with open(backup, "wb") as f:
-        f.write(original)
+    backup = _write_backup(settings, original)
     _write_atomically(settings, settings_template.dumps(live), mode)
     print(f"added {len(missing)} hook(s) to {settings} (backup: {backup})")
     return 0

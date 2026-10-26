@@ -65,8 +65,8 @@ check "precondition: hook removed" "no" "$(contains "$(cat "$H1/.claude/settings
 out=$(install_into "$H1")
 check "re-run reports the added hook" "yes" "$(contains "$out" "added: PreToolUse [Bash] $FOREIGN")"
 check "hook is back in settings.json" "yes" "$(contains "$(cat "$H1/.claude/settings.json")" "$FOREIGN")"
-check "backup written next to it" "present" \
-    "$([[ -e "$H1/.claude/settings.json.bak" ]] && echo present || echo absent)"
+check "backup written next to it" "1" \
+    "$(compgen -G "$H1/.claude/settings.json.*.bak" | grep -c .)"
 out=$(install_into "$H1")
 check "third run reports up to date" "yes" "$(contains "$out" "settings hooks up to date")"
 

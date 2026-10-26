@@ -51,6 +51,10 @@ for event, groups in d.get("hooks", {}).items():
 
 count_entry() { entries "$1" | grep -cxF "$2"; }
 
+# Backups written by the sync for settings file $1, one per line, oldest first.
+backups() { compgen -G "$1.*.bak" | sort; }
+count_backups() { backups "$1" | grep -c .; }
+
 FAKE_HOME="$T/home"
 mkdir -p "$FAKE_HOME"
 
@@ -123,6 +127,8 @@ LIVE="$T/live.json"
 write_live "$LIVE"
 cp "$LIVE" "$T/live.orig"
 chmod 600 "$LIVE"
+# A backup someone made by hand under the obvious name must survive the sync.
+printf 'hand-made backup\n' > "$LIVE.bak"
 out=$(run --settings "$LIVE" 2>&1); status=$?
 check "exit 0" "0" "$status"
 check "foreign-worktree added once" "1" \
@@ -168,16 +174,22 @@ check "event order kept, new event last" "['PreToolUse', 'PostToolUse', 'Session
 check "file mode kept" "600" "$(stat -c %a "$LIVE")"
 
 echo "== 4. a backup of the original is written =="
-check "backup holds the original bytes" "same" "$(same "$T/live.orig" "$LIVE.bak")"
-check "summary names the backup" "yes" "$(contains "$out" "$LIVE.bak")"
+check "exactly one backup written" "1" "$(count_backups "$LIVE")"
+BAK=$(backups "$LIVE")
+check "backup named <settings>.<timestamp>.bak" "yes" \
+    "$([[ "$BAK" =~ \.[0-9]{8}-[0-9]{6}(-[0-9]+)?\.bak$ ]] && echo yes || echo no)"
+check "backup holds the original bytes" "same" "$(same "$T/live.orig" "$BAK")"
+check "summary names the backup" "yes" "$(contains "$out" "$BAK")"
+check "existing .bak left alone" "hand-made backup" "$(cat "$LIVE.bak")"
 
 echo "== 5. a second run changes nothing =="
 cp "$LIVE" "$T/after-first"
-cp "$LIVE.bak" "$T/bak-after-first"
+cp "$BAK" "$T/bak-after-first"
 out=$(run --settings "$LIVE" 2>&1); status=$?
 check "second run exit 0" "0" "$status"
 check "second run file byte-identical" "same" "$(same "$T/after-first" "$LIVE")"
-check "second run leaves the backup alone" "same" "$(same "$T/bak-after-first" "$LIVE.bak")"
+check "second run writes no new backup" "1" "$(count_backups "$LIVE")"
+check "second run leaves the backup alone" "same" "$(same "$T/bak-after-first" "$BAK")"
 check "second run reports up to date" "yes" "$(contains "$out" "up to date")"
 check "second run adds nothing" "0" "$(grep -c '^added: ' <<< "$out")"
 
@@ -191,7 +203,26 @@ check "dry-run names the missing hook" "yes" \
     "$(contains "$out" "would add: PreToolUse [Bash] ~/.claude/bin/foreign-worktree.sh")"
 check "dry-run reports two" "2" "$(grep -c '^would add: ' <<< "$out")"
 check "dry-run leaves the file alone" "same" "$(same "$T/dry.orig" "$DRY")"
-check "dry-run writes no backup" "absent" "$([[ -e "$DRY.bak" ]] && echo present || echo absent)"
+check "dry-run writes no backup" "0" "$(count_backups "$DRY")"
+
+echo "== 6b. two syncs within one second keep both backups =="
+# Timestamps have one-second resolution; the second backup must not replace
+# the first.
+QUICK="$T/quick.json"
+write_live "$QUICK"
+cp "$QUICK" "$T/quick.first-orig"
+run --settings "$QUICK" >/dev/null 2>&1
+printf '{\n  "theme": "second"\n}\n' > "$QUICK"
+cp "$QUICK" "$T/quick.second-orig"
+run --settings "$QUICK" >/dev/null 2>&1
+check "two backups" "2" "$(count_backups "$QUICK")"
+matches() { # original -> how many backups of $QUICK equal it
+    local n=0 b
+    while read -r b; do cmp -s "$1" "$b" && n=$((n+1)); done < <(backups "$QUICK")
+    echo "$n"
+}
+check "first original kept" "1" "$(matches "$T/quick.first-orig")"
+check "second original kept" "1" "$(matches "$T/quick.second-orig")"
 
 echo "== 7. a live file without hooks gets every template hook =="
 BARE="$T/bare.json"
@@ -221,8 +252,7 @@ out=$(run --settings "$BROKEN" 2>&1); status=$?
 check "invalid JSON exits 1" "1" "$status"
 check "invalid JSON is named" "yes" "$(contains "$out" "not valid JSON")"
 check "invalid file left alone" "same" "$(same "$T/broken.orig" "$BROKEN")"
-check "invalid file gets no backup" "absent" \
-    "$([[ -e "$BROKEN.bak" ]] && echo present || echo absent)"
+check "invalid file gets no backup" "0" "$(count_backups "$BROKEN")"
 run --settings "$T/nope.json" >/dev/null 2>&1
 check "missing live file exits 1" "1" "$?"
 check "missing live file is not created" "absent" \

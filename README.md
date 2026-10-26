@@ -316,7 +316,7 @@ not.
 | `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, alembic, ruff) with auto-detection, falling back to PATH. `--repo` picks the project root when it is not the current directory. The auto-approve hook approves it only when `<cmd>` is approvable on its own, and otherwise denies it with a hint to run `<cmd>` bare, so `pip` gets the same permission flow as it does bare |
 | `docker-scratch.sh` | `docker-scratch.sh dir\|worktree\|clean [--repo D] <purpose> [<ref>]` | Scratch location a Docker container can mount: `~/.cache/claude-scratch/<project>/<purpose>/`. `dir` creates and prints it, `worktree` checks a ref out there as a detached base checkout, `clean <purpose>\|--all` removes it (worktrees through git) without a prompt |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
-| `settings-sync-hooks.sh` | `settings-sync-hooks.sh [--dry-run] [--settings PATH] [--template PATH]` | Add hooks from `settings-global.jsonc` that are missing in `~/.claude/settings.json`; backs up to `settings.json.bak`; run by `install.sh` |
+| `settings-sync-hooks.sh` | `settings-sync-hooks.sh [--dry-run] [--settings PATH] [--template PATH]` | Add hooks from `settings-global.jsonc` that are missing in `~/.claude/settings.json`; backs up to a new `settings.json.<timestamp>.bak`; run by `install.sh` |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
 | `release.sh` | `release.sh [major\|minor\|patch]` | Create a GitHub release for a WordPress plugin |
@@ -457,7 +457,7 @@ Because it is a copy, later changes to the template do not reach it by themselve
 - A hook entry counts as present when the live file has the same event, matcher and command anywhere, in whichever group. Your grouping may differ from the template's.
 - A missing entry is added to the first live group with the same event and matcher, or in a new group.
 - It only adds. Your own hooks, hooks the template has dropped, permissions, env and all other keys stay as they are. Permission or env changes in the template have to be merged by hand.
-- It writes only when something is missing. It first saves the original to `settings.json.bak`, then replaces the file atomically (2-space JSON, key order kept). `--dry-run` shows what it would add.
+- It writes only when something is missing. It first saves the original to a new `settings.json.<YYYYmmdd-HHMMSS>.bak` (an existing backup is never overwritten), then replaces the file atomically (2-space JSON, key order kept). `--dry-run` shows what it would add.
 
 ### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
 
