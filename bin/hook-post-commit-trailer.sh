@@ -13,9 +13,15 @@
 # never apply it, and any required checklist gate keyed to that label never
 # runs — a review gate that is green because it never executed.
 #
-# Advisory-but-corrective: amends the trailer in and reports on stderr so the
-# agent sees what happened. Always exits 0; a failure to amend must never break
-# the session.
+# Advisory-but-corrective: amends the trailer in and tells the agent what
+# happened. Always exits 0; a failure to amend must never break the session.
+#
+# Reports go out as PostToolUse `additionalContext` JSON on stdout, which the
+# model receives as a system reminder after the tool result. Not stderr: on
+# exit 0 a PostToolUse hook's stderr never reaches the model, and the agent that
+# made the commit is the one that can fix it cheaply, before pushing. Not exit
+# 2: an advisory should not be presented as a hook error. Stdout therefore
+# carries nothing but that JSON; every git call below writes to /dev/null.
 #
 # Installation: register in settings.json (project or global):
 #   {
@@ -44,7 +50,7 @@
 #   - Commits older than 120 s
 #   - Pushed commits, when the command did not push them
 #
-# Skips with a stderr message, so a missing trailer does not go unnoticed:
+# Skips with a message to the model, so a missing trailer does not go unnoticed:
 #   - An unresolvable target: a shell variable or backtick in it, a directory
 #     that does not exist, several commit segments with different targets, or a
 #     command that does not tokenize. Never falls back to the cwd: amending the
@@ -69,6 +75,13 @@ PUSH_MARKER="push"
 
 TMP_ERR=$(mktemp)
 trap 'rm -f "$TMP_ERR"' EXIT
+
+# Tells the model: one additionalContext object on stdout. jq --arg keeps quotes
+# and newlines in the message from breaking the JSON.
+report() { # message
+    jq -cn --arg msg "$1" \
+        '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $msg}}'
+}
 
 INPUT=$(cat)
 
@@ -96,7 +109,7 @@ case $? in
     "$EXIT_UNRESOLVABLE")
         # Never fall back to the cwd: amending the wrong commit is not
         # recoverable, a missing trailer is.
-        echo "hook: Co-Authored-By trailer not added: $(<"$TMP_ERR"); add it manually if this call committed" >&2
+        report "hook: Co-Authored-By trailer not added: $(<"$TMP_ERR"); add it manually if this call committed"
         exit 0
         ;;
     *) exit 0 ;;
@@ -127,7 +140,7 @@ fi
 if git -C "$REPO_DIR" branch -r --contains HEAD 2>/dev/null | grep -q .; then
     if [[ "$PUSH_AFTER" == "$PUSH_MARKER" ]]; then
         HASH=$(git -C "$REPO_DIR" rev-parse --short HEAD)
-        echo "hook: commit $HASH in $REPO_DIR was pushed in the same call; the trailer was not added. On a feature branch: amend it in and force-push" >&2
+        report "hook: commit $HASH in $REPO_DIR was pushed in the same call; the trailer was not added. On a feature branch: amend it in and force-push"
     fi
     exit 0
 fi
@@ -136,9 +149,9 @@ fi
 # opener, for one), so exactly those commits would silently stay unlabelled.
 if git -C "$REPO_DIR" commit --amend --no-edit --no-verify --allow-empty \
         --trailer "$TRAILER" &>/dev/null; then
-    echo "hook: added missing '$TRAILER' to HEAD (agent-authored label depends on it)" >&2
+    report "hook: added missing '$TRAILER' to HEAD of $REPO_DIR, so its SHA changed (agent-authored label depends on it)"
 else
-    echo "hook: could not add Co-Authored-By trailer to HEAD; add it manually so the agent-authored label applies" >&2
+    report "hook: could not add Co-Authored-By trailer to HEAD of $REPO_DIR; add it manually so the agent-authored label applies"
 fi
 
 exit 0
