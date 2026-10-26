@@ -1,6 +1,10 @@
 #!/bin/bash
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Set when the settings step fails. The remaining steps are independent of it,
+# so they still run; the exit status at the end reports the failure.
+SETTINGS_FAILED=0
+
 # Create ~/.claude if it doesn't exist
 mkdir -p ~/.claude
 
@@ -48,7 +52,7 @@ fi
 if [ -e ~/.claude/settings.json ]; then
     # Not overwritten (it holds your own permissions and settings), but hooks
     # added to the template since the first install are merged in.
-    "$REPO_DIR/bin/settings-sync-hooks.sh"
+    "$REPO_DIR/bin/settings-sync-hooks.sh" || SETTINGS_FAILED=1
 else
     # Strips JSONC comments and expands __HOME__; see the helper for why.
     python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > ~/.claude/settings.json
@@ -88,3 +92,8 @@ fi
 
 # Create knowledge directory (user-owned, not symlinked — for lessons learned, reference docs, etc.)
 mkdir -p ~/.claude/knowledge
+
+if [ "$SETTINGS_FAILED" -ne 0 ]; then
+    echo "install.sh: the settings step failed, see the error above." >&2
+    exit 1
+fi

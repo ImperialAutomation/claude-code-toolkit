@@ -70,6 +70,16 @@ check "backup written next to it" "1" \
 out=$(install_into "$H1")
 check "third run reports up to date" "yes" "$(contains "$out" "settings hooks up to date")"
 
+echo "== 3. a failing sync fails the install, after the remaining steps =="
+H3="$T/broken-live"
+mkdir -p "$H3/.claude"
+echo '{ not json' > "$H3/.claude/settings.json"
+out=$(install_into "$H3"); rc=$?
+check "exits non-zero" "nonzero" "$([[ $rc -ne 0 ]] && echo nonzero || echo zero)"
+check "sync error is in the output" "yes" "$(contains "$out" "settings-sync-hooks:")"
+check "toolkit.yaml still created" "yes" "$([[ -f "$H3/.claude/toolkit.yaml" ]] && echo yes || echo no)"
+check "knowledge/ still created" "yes" "$([[ -d "$H3/.claude/knowledge" ]] && echo yes || echo no)"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
