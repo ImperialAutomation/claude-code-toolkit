@@ -181,6 +181,95 @@ check "unknown option exits 2" "2" "$(run "$MAIN" --nope >/dev/null 2>&1; echo $
 check "usage goes to stderr" "yes" \
     "$(case "$(run "$MAIN" --nope 2>&1 >/dev/null)" in *usage*) echo yes ;; *) echo no ;; esac)"
 
+echo "== 6. --create builds toolkit work beside the live checkout =="
+# The live checkout is the tree ~/.claude/bin points into: whatever branch it is
+# on runs in every session. --create must never put a feature branch there, and
+# must change nothing at all in any other repository.
+#
+#   <T>/origin.git            bare remote, main
+#   <T>/toolkit               main worktree, live via <T>/home/.claude/bin
+#   <T>/toolkit-158           created by --create on issue-158-<slug>
+TK="$T/toolkit"
+git init -q --bare -b main "$T/origin.git"
+git init -q -b main "$TK"
+git -C "$TK" config user.email "dev@example.com"
+git -C "$TK" config user.name "Test Developer"
+mkdir -p "$TK/bin"
+touch "$TK/bin/tool.sh"
+git -C "$TK" add bin/tool.sh
+git -C "$TK" commit -q -m "initial commit"
+git -C "$TK" remote add origin "$T/origin.git"
+git -C "$TK" push -q -u origin main 2>/dev/null
+# origin/main moves ahead of the local main: the new branch must start from the
+# remote, which is what review merged, not from whatever main happens to hold.
+git -C "$TK" commit -q --allow-empty -m "remote-only commit"
+git -C "$TK" push -q origin main 2>/dev/null
+git -C "$TK" reset -q --hard HEAD~1
+REMOTE_TIP=$(git -C "$TK" rev-parse origin/main)
+
+LIVE_HOME="$T/home"
+mkdir -p "$LIVE_HOME/.claude"
+ln -s "$TK/bin" "$LIVE_HOME/.claude/bin"
+PLAIN_HOME="$T/plain-home"
+mkdir -p "$PLAIN_HOME/.claude/bin"
+
+run_home() { # home cwd [args...]
+    local home="$1" cwd="$2"; shift 2
+    (cd "$cwd" && HOME="$home" bash "$SCRIPT" "$@")
+}
+
+check "creates the sibling worktree" "$T/toolkit-158" \
+    "$(run_home "$LIVE_HOME" "$TK" --issue 158 --create live-guard 2>/dev/null)"
+check "sibling is on issue-158-<slug>" "issue-158-live-guard" \
+    "$(git -C "$T/toolkit-158" branch --show-current 2>/dev/null)"
+check "sibling starts at origin/main" "$REMOTE_TIP" \
+    "$(git -C "$T/toolkit-158" rev-parse HEAD 2>/dev/null)"
+check "live checkout stays on main" "main" "$(git -C "$TK" branch --show-current)"
+# A second run is how resumed work starts: it must find the tree, not fail on
+# an existing branch or path, and not create a second one.
+check "second run reuses the worktree" "$T/toolkit-158" \
+    "$(run_home "$LIVE_HOME" "$TK" --issue 158 --create live-guard 2>/dev/null)"
+check "second run with another slug still reuses it" "$T/toolkit-158" \
+    "$(run_home "$LIVE_HOME" "$TK" --issue 158 --create other-words 2>/dev/null)"
+check "still exactly two worktrees" "2" "$(git -C "$TK" worktree list | grep -c .)"
+# A sibling path already holding a worktree of this repo on another branch is
+# reused too: the path is the convention, the branch is the caller's business.
+git -C "$TK" worktree add -q --detach "$T/toolkit-159" >/dev/null 2>&1
+check "existing sibling path is reused" "$T/toolkit-159" \
+    "$(run_home "$LIVE_HOME" "$TK" --issue 159 --create x 2>/dev/null)"
+# A sibling path that is something else must not be overwritten or adopted.
+mkdir -p "$T/toolkit-160"
+check "foreign directory at the sibling path is refused" "1" \
+    "$(run_home "$LIVE_HOME" "$TK" --issue 160 --create x >/dev/null 2>&1; echo $?)"
+check "refusal prints nothing on stdout" "" \
+    "$(run_home "$LIVE_HOME" "$TK" --issue 160 --create x 2>/dev/null)"
+# Without an issue number there is no branch to create.
+check "--create without --issue in the live checkout exits 1" "1" \
+    "$(run_home "$LIVE_HOME" "$TK" --create x >/dev/null 2>&1; echo $?)"
+check "--create without a slug exits 2" "2" \
+    "$(run_home "$LIVE_HOME" "$TK" --issue 161 --create >/dev/null 2>&1; echo $?)"
+# From inside a linked toolkit worktree nothing is live, so nothing is created.
+check "from a linked toolkit worktree it stays there" "$T/toolkit-158" \
+    "$(run_home "$LIVE_HOME" "$T/toolkit-158" --issue 4242 --create x 2>/dev/null)"
+# An explicit hint naming the live checkout is still the live checkout.
+check "a hint naming the live checkout still creates" "$T/toolkit-162" \
+    "$(run_home "$LIVE_HOME" "$T/toolkit-158" --issue 162 --create y toolkit 2>/dev/null)"
+
+# Any other repository: --create changes nothing, output and status identical.
+for args in "" "--issue 77" "--issue 4242" "dev1" "nope" "dev"; do
+    # shellcheck disable=SC2086
+    without=$(run_home "$LIVE_HOME" "$MAIN" $args 2>&1; echo "exit $?")
+    # shellcheck disable=SC2086
+    with=$(run_home "$LIVE_HOME" "$MAIN" $args --create x 2>&1; echo "exit $?")
+    check "non-toolkit repo, '$args': --create is a no-op" "$without" "$with"
+done
+check "non-toolkit repo: no worktree created" "3" "$(git -C "$MAIN" worktree list | grep -c .)"
+# ~/.claude/bin not a symlink: nothing is live, the toolkit is just a repo.
+check "no symlink: --create is a no-op" "$TK" \
+    "$(run_home "$PLAIN_HOME" "$TK" --issue 163 --create z 2>/dev/null)"
+check "no symlink: nothing created" "no" \
+    "$([[ -e "$T/toolkit-163" ]] && echo yes || echo no)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
