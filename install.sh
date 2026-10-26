@@ -58,8 +58,8 @@ else
     # Written to a temp file in ~/.claude (same filesystem, so the mv is
     # atomic): a failed load must not leave a settings.json behind, or the
     # next run treats it as an existing file.
-    TMP_SETTINGS=$(mktemp ~/.claude/settings.json.XXXXXX)
-    if python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > "$TMP_SETTINGS" \
+    if TMP_SETTINGS=$(mktemp ~/.claude/settings.json.XXXXXX) \
+        && python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > "$TMP_SETTINGS" \
         && mv "$TMP_SETTINGS" ~/.claude/settings.json; then
         echo "Installed: ~/.claude/settings.json (copied from settings-global.jsonc)"
     else
