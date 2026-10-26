@@ -84,7 +84,8 @@ ALTIJD `~/.claude/bin/git-commit.sh [--repo <dir>]`. NOOIT `git commit -m`,
   de fout is onschuldig en maakt Write mogelijk), `Write` de message daarheen, dan
   `~/.claude/bin/git-commit.sh --file /tmp/<project>-commit-msg-<nr>.txt`.
 - Elke agent-commit eindigt met de `Co-Authored-By`-trailer. `hook-post-commit-trailer.sh`
-  vult een vergeten trailer aan en meldt op stderr wanneer dat niet kan. Een commit
+  vult een vergeten trailer aan (HEAD krijgt dan een nieuwe SHA) of meldt waarom dat
+  niet kon; beide komen als system reminder na het tool-resultaat binnen. Een commit
   die in dezelfde call gepusht wordt krijgt hem niet: **commit en push in aparte calls**.
 - Nooit committen op een base branch. `git-commit.sh` weigert een branch die de repo
   beschermt via een gecommitte `.claude/protected-branches` (één naam per regel) of
