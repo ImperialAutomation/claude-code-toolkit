@@ -9,12 +9,23 @@
 # location would otherwise decide which interpreter runs — two trees created
 # months apart can hold different Python minor versions, and nothing says so.
 #
+# Must run inside ~/Projects (PWD, or --repo when given).
+#
+# hook-auto-approve-bash.py judges <command> like a bare command: python, pytest,
+# alembic, ruff, mypy and uv pass without a prompt; pip or python3 prompt exactly
+# as they do bare. An absolute .venv/bin/<one of those tools> path is approved
+# too, so calling the venv binary directly also works.
+#
 # Usage: venv-run.sh [--repo <dir>] <command> [args...]
 # Example: venv-run.sh python -c "import sys; print(sys.version)"
 # Example: venv-run.sh pip install -r requirements.txt
 # Example: venv-run.sh alembic upgrade head
 # Example: venv-run.sh --repo ~/Projects/billing-api-dev1 alembic upgrade head
 set -euo pipefail
+
+case "${1:-}" in
+  -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
+esac
 
 ALLOWED_ROOT="$HOME/Projects"
 

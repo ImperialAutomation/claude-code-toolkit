@@ -645,6 +645,11 @@ COMMAND_RUNNING_WRAPPERS = {
 }
 
 
+# The only argument vector under which a wrapper runs no command: each of them
+# answers it with its header comment and exits 0.
+WRAPPER_HELP_FLAGS = frozenset({"-h", "--help"})
+
+
 def command_running_wrapper(token):
     """The script name if `token` invokes a ~/.claude/bin/ wrapper from
     COMMAND_RUNNING_WRAPPERS, any spelling; otherwise None."""
@@ -1151,6 +1156,10 @@ def is_segment_safe(segment_tokens, rules=NO_BASH_RULES):
 
     wrapper = command_running_wrapper(first)
     if wrapper:
+        # `<wrapper> --help` runs nothing but the script's own help text, and
+        # global CLAUDE.md points at that text for a wrapper's details.
+        if len(stripped) == 2 and stripped[1] in WRAPPER_HELP_FLAGS:
+            return True
         inner = COMMAND_RUNNING_WRAPPERS[wrapper].parse(stripped[1:])
         if inner is None or is_blocked_by_settings(inner, rules):
             return False
@@ -1251,10 +1260,15 @@ def main():
                 "permissionDecision": "deny",
                 "permissionDecisionReason": (
                     "Hook: `until ...; do sleep N; done` waiting on a file is a "
-                    "wait loop. Use ~/.claude/bin/wait-for-pattern.sh <file> "
-                    "<extended-regex> [timeout-seconds] [poll-seconds] instead: "
-                    "it matches Bash(~/.claude/bin/*) and needs no permission "
-                    "prompt. The file need not exist yet. Loops waiting on "
+                    "wait loop. Use ~/.claude/bin/wait-for-pattern.sh "
+                    "[--newer-than <epoch>] <file> <extended-regex> "
+                    "[timeout-seconds] [poll-seconds] instead: it matches "
+                    "Bash(~/.claude/bin/*) and needs no permission prompt. The "
+                    "file need not exist yet. For a file with a fixed name that "
+                    "an earlier run may have written (a per-task progress "
+                    "file), record SPAWNED_AT=$(date +%s) before starting the "
+                    "process and pass --newer-than $SPAWNED_AT, or the "
+                    "previous run's DONE answers for the new one. Loops waiting on "
                     "anything else (an HTTP status, a container state, a "
                     "command's exit status) are not affected by this rule."
                 ),
@@ -1276,7 +1290,10 @@ def main():
                     "`npm --prefix <dir> <args>` for npm, or "
                     "`env -C <dir> <cmd>` for anything else that genuinely "
                     "needs its working directory. All three are a single "
-                    "command, so they match normally."
+                    "command, so they match normally. `env -C` is auto-approved "
+                    "only when <dir> is inside ~/Projects AND <cmd> would be "
+                    "approved on its own; anything else still prompts. "
+                    "`bash -c \"cd x && ...\"` is no way around this."
                 ),
             }
         }

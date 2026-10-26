@@ -37,6 +37,8 @@
 #
 # Note: the file need not exist yet — a missing file is a normal starting
 # state (the writing process may not have created it), not an error.
+#
+# For a container, wait-for-healthy.sh <container> is the equivalent.
 
 set -euo pipefail
 
@@ -55,6 +57,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --) shift; break ;;
+        -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
         -*) echo "unknown option: $1" >&2; usage ;;
         *) break ;;
     esac

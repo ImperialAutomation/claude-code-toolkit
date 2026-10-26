@@ -1048,6 +1048,17 @@ check(
     "until-loop: the hint spells out the argument form",
     reason is not None and "<file>" in reason and "<extended-regex>" in reason,
 )
+# A fixed-name progress file is reused by every run of a task, so a wait without
+# --newer-than matches the previous run's DONE. The hint is the only text an
+# agent sees at that moment, so it must carry the flag and how to fill it.
+check(
+    "until-loop: the hint names --newer-than",
+    reason is not None and "--newer-than" in reason,
+)
+check(
+    "until-loop: the hint says to record the start time before spawning",
+    reason is not None and "SPAWNED_AT=$(date +%s)" in reason,
+)
 check("until-loop: hook still exits 0", rc == 0)
 
 approved, reason, _ = run_hook(
@@ -1184,6 +1195,16 @@ check(
 check(
     "cd-chain: the hint names env -C as the general alternative",
     reason is not None and "env -C" in reason,
+)
+# env -C is not a blanket pass: the hint states both conditions, so an agent
+# does not take a prompt on `env -C /etc ...` for a hook malfunction.
+check(
+    "cd-chain: the hint says env -C needs a dir inside ~/Projects",
+    reason is not None and "inside ~/Projects" in reason,
+)
+check(
+    "cd-chain: the hint says env -C needs a command approvable on its own",
+    reason is not None and "approved on its own" in reason,
 )
 check("cd-chain: hook still exits 0", rc == 0)
 
@@ -1801,6 +1822,25 @@ check(
 check(
     "repeat: nested repeat-cmd is judged by its own inner command",
     not hook.is_command_safe(f"{REPEAT} 2 {REPEAT} 2 curl http://evil.example/x"),
+)
+
+# `<wrapper> --help` prints the script's header and runs nothing. Global
+# CLAUDE.md sends agents there for a wrapper's details, so it must not be
+# denied as a malformed call. Only the flag on its own: anything after it
+# would be a command vector the hook has not judged.
+for _wrapper in ("repeat-cmd.sh", "cmd-save.sh", "venv-run.sh"):
+    for _flag in ("--help", "-h"):
+        check(
+            f"help: {_wrapper} {_flag} is approved",
+            hook.is_command_safe(f"~/.claude/bin/{_wrapper} {_flag}"),
+        )
+        check(
+            f"help: {_wrapper} {_flag} is not denied end-to-end",
+            hook_decision(f"~/.claude/bin/{_wrapper} {_flag}") == "allow",
+        )
+check(
+    "help: a command after --help is not approved",
+    not hook.is_command_safe(f"{REPEAT} --help curl http://evil.example/x"),
 )
 
 # Without a numeric count the wrapper exits 2 and runs nothing, but the shape
