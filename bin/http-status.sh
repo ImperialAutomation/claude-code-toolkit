@@ -13,6 +13,7 @@
 # Output:
 #   One URL  — the status code alone, so it fits in an `if` or a comparison.
 #   Several  — "<status>  <url>" per line, in argument order.
+#   A transport failure prints ERR in place of the status (not curl's 000).
 #
 # Exit codes:
 #   0  every URL answered (a 4xx/5xx IS an answer — assert on it yourself)
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         ''|*[!0-9.]*) echo "--max-time must be a number: $MAX_TIME" >&2; exit 2 ;;
       esac
       shift 2 ;;
+    -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) URLS+=("$1"); shift ;;
   esac

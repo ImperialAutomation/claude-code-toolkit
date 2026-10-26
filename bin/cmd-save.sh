@@ -25,7 +25,16 @@
 # a failure rather than to carry data.
 #
 # Flag parsing stops at the output file, so everything after it belongs to the
-# command and a command's own flags are never mistaken for the wrapper's.
+# command and a command's own flags are never mistaken for the wrapper's. Options
+# therefore always go BEFORE <output-file>: `cmd-save.sh /tmp/o --stderr merge
+# git log` runs `--stderr` as the command.
+#
+# hook-auto-approve-bash.py approves this wrapper only when <command> would be
+# approved on its own; otherwise it denies with a hint to run <command> bare.
+#
+# Output: one line, "<output-file> (<bytes> bytes, exit <status>)". The byte
+# count makes an empty capture visible; a 0-byte file is otherwise unnoticed
+# until something downstream behaves strangely.
 #
 # Exit codes:
 #   the command's own status, so a failed command is never read as a successful
@@ -63,6 +72,7 @@ while [[ $# -gt 0 ]]; do
             shift 2 ;;
         --strip-ansi) STRIP_ANSI=true; shift ;;
         --) shift; break ;;
+        -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;
         *) break ;;
     esac
