@@ -18,7 +18,8 @@ MUST use `~/.claude/bin/git-find-base-branch --repo <worktree>` for base branch 
 ## Worktree
 
 Everything below operates on ONE worktree, written here as `<worktree>`. Resolve
-it first, in Phase 1, before reading or changing anything.
+it in Phase 1, right after fetching the issue and before reading or changing
+anything else.
 
 **Why this is explicit rather than assumed:** your working directory resets
 between every Bash call, and so do exported variables. Nothing carries the target
@@ -30,8 +31,12 @@ land on another session's branch, carrying that session's staged files, and exit
 ### Resolving it
 
 ```bash
-~/.claude/bin/git-resolve-worktree.sh --issue $ARGUMENTS <hint-if-given>
+~/.claude/bin/git-resolve-worktree.sh --issue <N> --create <slug> <hint-if-given>
 ```
+
+`<N>` is the issue number, the first word of `$ARGUMENTS`. `<slug>` is the short
+kebab-case summary of the issue title that the branch will carry
+(`issue-<N>-<slug>`), which is why the issue is fetched before this call.
 
 The hint is the second word of `$ARGUMENTS`, if the user gave one. It may be the
 exact name of a worktree (an exact name always wins over a longer sibling, so
@@ -45,8 +50,15 @@ normal, and the script then simply reports the current worktree, exactly as it
 does with no arguments at all. Single-worktree projects therefore never notice
 this skill has a worktree concept.
 
+`--create` matters in one repository only: the toolkit checkout that
+`~/.claude/bin` points into, whose branch is live in every session. When the
+answer would be that tree, the script answers with the sibling worktree
+`../<repo>-<N>` instead, creating it on `issue-<N>-<slug>` from `origin/<base>`
+or reusing it when it exists. Everywhere else `--create` changes nothing.
+
 The script prints one absolute path and exits 0, or prints nothing to stdout and
-exits non-zero. Non-zero means the user's own hint was wrong or ambiguous.
+exits non-zero. Non-zero means the user's own hint was wrong or ambiguous, or
+`--create` could not make the sibling; either way its stderr says which.
 **Then stop and show them its stderr** — it lists the candidates with their
 branches. Do not pick one yourself and do not fall back to the current directory;
 an unresolved hint is a question for the user, not a guess to make.
@@ -90,10 +102,12 @@ ran against.
 
 ## Phase 1: Discovery & Planning
 
-0. **Resolve `<worktree>`** as described in the Worktree section above, and report
+0. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/<project>-issue-<N>.json issue view <N> --json title,body,labels`, then use the Read tool to read it.
+   Pick the branch `<slug>` from its title. `gh` finds the repository from any of
+   its worktrees, so this is safe before `<worktree>` is known.
+1. **Resolve `<worktree>`** as described in the Worktree section above, and report
    it to the user. Every path and git command in the phases below assumes this is
    settled — do it before reading any source file, or you will read the wrong one.
-1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/<project>-issue-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels`, then use the Read tool to read it
 2. **Check for linked Sentry issues** in the issue body:
    * Look for Sentry issue references — short IDs of the form `<PROJECT>-<PLATFORM>-<SUFFIX>`, Sentry URLs, or "Sentry Issues" sections
    * If found, note the Sentry issue IDs — these will be referenced in commit messages and the PR body for automatic resolution
@@ -124,9 +138,10 @@ STOP HERE and ask for confirmation before proceeding to implementation.
 ## Phase 2: Branch & TDD Implementation
 
 1. Create and checkout branch in the target tree:
-   `git -C <worktree> checkout -b issue-$ARGUMENTS-<descriptive-label>`
-   If `<worktree>` was resolved via `--issue` it is already on that branch — check
-   with `git -C <worktree> branch --show-current` before creating it.
+   `git -C <worktree> checkout -b issue-<N>-<slug>`
+   If `<worktree>` was resolved via `--issue`, or created by `--create`, it is
+   already on that branch — check with `git -C <worktree> branch --show-current`
+   before creating it.
 2. Before writing new code, verify your assumptions:
    * If using model attributes, confirm they exist: `grep "attribute_name" models.py`
    * If importing classes, confirm they exist: `python -c "from module import Class"`
