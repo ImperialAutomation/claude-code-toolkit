@@ -55,8 +55,17 @@ if [ -e ~/.claude/settings.json ]; then
     "$REPO_DIR/bin/settings-sync-hooks.sh" || SETTINGS_FAILED=1
 else
     # Strips JSONC comments and expands __HOME__; see the helper for why.
-    python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > ~/.claude/settings.json
-    echo "Installed: ~/.claude/settings.json (copied from settings-global.jsonc)"
+    # Written to a temp file in ~/.claude (same filesystem, so the mv is
+    # atomic): a failed load must not leave a settings.json behind, or the
+    # next run treats it as an existing file.
+    TMP_SETTINGS=$(mktemp ~/.claude/settings.json.XXXXXX)
+    if python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > "$TMP_SETTINGS" \
+        && mv "$TMP_SETTINGS" ~/.claude/settings.json; then
+        echo "Installed: ~/.claude/settings.json (copied from settings-global.jsonc)"
+    else
+        rm -f "$TMP_SETTINGS"
+        SETTINGS_FAILED=1
+    fi
 fi
 
 # Create toolkit.yaml if it does not exist

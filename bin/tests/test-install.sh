@@ -80,6 +80,24 @@ check "sync error is in the output" "yes" "$(contains "$out" "settings-sync-hook
 check "toolkit.yaml still created" "yes" "$([[ -f "$H3/.claude/toolkit.yaml" ]] && echo yes || echo no)"
 check "knowledge/ still created" "yes" "$([[ -d "$H3/.claude/knowledge" ]] && echo yes || echo no)"
 
+echo "== 4. a failing template load on first install leaves nothing behind =="
+# install.sh reads the template next to itself, so a scratch copy of the repo
+# with a broken template makes the real helper fail; nothing is mocked.
+R4="$T/broken-repo"
+mkdir -p "$R4/claude-md"
+cp "$INSTALL" "$R4/install.sh"
+cp -r "$REPO_DIR/bin" "$R4/bin"
+echo '{ not json' > "$R4/claude-md/settings-global.jsonc"
+H4="$T/broken-template"
+mkdir -p "$H4"
+out=$(env HOME="$H4" bash "$R4/install.sh" 2>&1); rc=$?
+check "exits non-zero" "nonzero" "$([[ $rc -ne 0 ]] && echo nonzero || echo zero)"
+check "no settings.json written" "no" "$([[ -e "$H4/.claude/settings.json" ]] && echo yes || echo no)"
+# Whatever the temp file is called: the only regular file left is toolkit.yaml.
+check "no temp file left in ~/.claude" "0" \
+    "$(find "$H4/.claude" -maxdepth 1 -type f ! -name toolkit.yaml | grep -c .)"
+check "no install reported" "no" "$(contains "$out" "Installed: ~/.claude/settings.json")"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
