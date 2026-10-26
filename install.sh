@@ -46,28 +46,12 @@ fi
 
 # Copy global settings (not symlink — Claude Code writes to this file)
 if [ -e ~/.claude/settings.json ]; then
-    echo "~/.claude/settings.json already exists. Remove it first if you want to reinstall."
+    # Not overwritten (it holds your own permissions and settings), but hooks
+    # added to the template since the first install are merged in.
+    "$REPO_DIR/bin/settings-sync-hooks.sh"
 else
-    # Strip JSONC comments to produce valid JSON, and expand __HOME__ into the
-    # real home directory. Values under "env" reach their subprocess as literal
-    # strings — nothing expands `~` or `${HOME}` for them — so the placeholder
-    # has to be resolved here, at install time, on the machine that has a $HOME.
-    sed 's|//.*||' "$REPO_DIR/claude-md/settings-global.jsonc" | python3 -c "
-import sys, json, os
-config = json.load(sys.stdin)
-
-def expand(value):
-    if isinstance(value, str):
-        return value.replace('__HOME__', os.path.expanduser('~'))
-    if isinstance(value, list):
-        return [expand(item) for item in value]
-    if isinstance(value, dict):
-        return {key: expand(item) for key, item in value.items()}
-    return value
-
-json.dump(expand(config), sys.stdout, indent=2)
-print()
-" > ~/.claude/settings.json
+    # Strips JSONC comments and expands __HOME__; see the helper for why.
+    python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > ~/.claude/settings.json
     echo "Installed: ~/.claude/settings.json (copied from settings-global.jsonc)"
 fi
 

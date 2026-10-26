@@ -4,8 +4,15 @@
 // Claude Code writes to this file when you approve permissions per-session,
 // so it must be a real file, not a symlink.
 //
-// After modifying this template, re-run install.sh or manually copy:
-//   cp ~/Projects/claude-code-toolkit/claude-md/settings-global.jsonc ~/.claude/settings.json
+// An existing ~/.claude/settings.json is never overwritten. Hooks added here
+// after the first install reach it through ~/.claude/bin/settings-sync-hooks.sh
+// (also run by install.sh): it adds every hook entry missing there, keyed by
+// (event, matcher, command), and leaves all other keys and your own hooks alone.
+// Use --dry-run to see what it would add. Other changes to this template
+// (permissions, env) are not synced; merge those by hand.
+//
+// Do not put "//" inside a string value: comments are stripped per line, and
+// that would cut the string.
 {
   "permissions": {
     "allow": [
