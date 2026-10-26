@@ -21,7 +21,7 @@
 # exit 0 a PostToolUse hook's stderr never reaches the model, and the agent that
 # made the commit is the one that can fix it cheaply, before pushing. Not exit
 # 2: an advisory should not be presented as a hook error. Stdout therefore
-# carries nothing but that JSON; every git call below writes to /dev/null.
+# carries nothing but that JSON; no other command below writes to stdout.
 #
 # Installation: register in settings.json (project or global):
 #   {

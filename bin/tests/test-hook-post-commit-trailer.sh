@@ -48,7 +48,7 @@ has_trailer() {
 
 fire() { # repodir command  — feed the hook a PostToolUse payload
     printf '{"tool_input":{"command":%s},"cwd":%s}' \
-        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" 2>/dev/null
+        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" &>/dev/null
 }
 
 # The hook reports to the model through stdout JSON, not stderr: a PostToolUse
