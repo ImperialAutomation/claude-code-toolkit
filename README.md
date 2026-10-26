@@ -31,6 +31,8 @@ This creates five symlinks and copies one file:
 
 The settings file is copied (not symlinked) because Claude Code writes to it when you approve permissions during a session. Restart Claude Code after installation.
 
+Running `install.sh` again never overwrites an existing `~/.claude/settings.json`. It does run `settings-sync-hooks.sh`, which adds hooks the template gained since your first install (see [Global Settings](#global-settings-claude-mdsettings-globaljsonc)).
+
 This repo is public, so it also ships a [pre-commit](https://pre-commit.com/) hook that scans staged changes for secrets with [gitleaks](https://github.com/gitleaks/gitleaks) before every commit. Install it once per clone:
 
 ```bash
@@ -314,6 +316,7 @@ not.
 | `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, alembic, ruff) with auto-detection, falling back to PATH. `--repo` picks the project root when it is not the current directory. The auto-approve hook approves it only when `<cmd>` is approvable on its own, and otherwise denies it with a hint to run `<cmd>` bare, so `pip` gets the same permission flow as it does bare |
 | `docker-scratch.sh` | `docker-scratch.sh dir\|worktree\|clean [--repo D] <purpose> [<ref>]` | Scratch location a Docker container can mount: `~/.cache/claude-scratch/<project>/<purpose>/`. `dir` creates and prints it, `worktree` checks a ref out there as a detached base checkout, `clean <purpose>\|--all` removes it (worktrees through git) without a prompt |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
+| `settings-sync-hooks.sh` | `settings-sync-hooks.sh [--dry-run] [--settings PATH] [--template PATH]` | Add hooks from `settings-global.jsonc` that are missing in `~/.claude/settings.json`; backs up to `settings.json.bak`; run by `install.sh` |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
 | `release.sh` | `release.sh [major\|minor\|patch]` | Create a GitHub release for a WordPress plugin |
@@ -377,6 +380,7 @@ claude-code-toolkit/
 │   ├── cmd-save.sh                ← save any command's output to file
 │   ├── strip-ansi.sh              ← copy a file without ANSI escape codes
 │   ├── sync-toolkit.sh            ← sync toolkit from configured git sources
+│   ├── settings-sync-hooks.sh     ← add missing template hooks to settings.json
 │   ├── json-find-key.sh           ← search for keys in nested JSON files
 │   ├── odt2txt.sh                 ← convert ODT to plain text via pandoc
 │   ├── release.sh                 ← create GitHub release for WordPress plugin
@@ -447,6 +451,13 @@ Copied to `~/.claude/settings.json` by install.sh. Pre-configures permissions so
 - **Toolkit** — helper scripts from `~/.claude/bin/`
 
 This is a copy (not symlink) because Claude Code writes to it when you approve permissions during a session.
+
+Because it is a copy, later changes to the template do not reach it by themselves. For hooks, `settings-sync-hooks.sh` (also run by `install.sh` when the file exists) closes that gap:
+
+- A hook entry counts as present when the live file has the same event, matcher and command anywhere, in whichever group. Your grouping may differ from the template's.
+- A missing entry is added to the first live group with the same event and matcher, or in a new group.
+- It only adds. Your own hooks, hooks the template has dropped, permissions, env and all other keys stay as they are. Permission or env changes in the template have to be merged by hand.
+- It writes only when something is missing. It first saves the original to `settings.json.bak`, then replaces the file atomically (2-space JSON, key order kept). `--dry-run` shows what it would add.
 
 ### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
 
