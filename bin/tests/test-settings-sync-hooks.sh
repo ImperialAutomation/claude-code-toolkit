@@ -260,6 +260,42 @@ check "missing live file is not created" "absent" \
 printf '[1, 2]\n' > "$T/array.json"
 run --settings "$T/array.json" >/dev/null 2>&1
 check "non-object JSON exits 1" "1" "$?"
+# Malformed hook entries get a message, not a Python traceback.
+printf '{"hooks": {"Stop": [{"hooks": ["not-an-object"]}]}}\n' > "$T/bad-entry.json"
+cp "$T/bad-entry.json" "$T/bad-entry.orig"
+out=$(run --settings "$T/bad-entry.json" 2>&1); status=$?
+check "non-object hook entry exits 1" "1" "$status"
+check "non-object hook entry is named" "yes" "$(contains "$out" "hooks.Stop group is malformed")"
+check "non-object hook entry: no traceback" "no" "$(contains "$out" "Traceback")"
+check "non-object hook entry: file left alone" "same" "$(same "$T/bad-entry.orig" "$T/bad-entry.json")"
+printf '{"hooks": {"Stop": [{"matcher": ["x"], "hooks": []}]}}\n' > "$T/bad-matcher.json"
+out=$(run --settings "$T/bad-matcher.json" 2>&1); status=$?
+check "non-string matcher exits 1" "1" "$status"
+check "non-string matcher: no traceback" "no" "$(contains "$out" "Traceback")"
+printf '[1]\n' > "$T/array-template.jsonc"
+printf '{}\n' > "$T/for-array-template.json"
+out=$(env HOME="$FAKE_HOME" bash "$SCRIPT" --template "$T/array-template.jsonc" \
+    --settings "$T/for-array-template.json" 2>&1); status=$?
+check "non-object template exits 1" "1" "$status"
+check "non-object template: no traceback" "no" "$(contains "$out" "Traceback")"
+
+echo "== 9b. a failed write is reported and changes nothing =="
+RO="$T/readonly-dir"
+mkdir "$RO"
+printf '{\n  "theme": "dark"\n}\n' > "$RO/settings.json"
+cp "$RO/settings.json" "$T/ro.orig"
+chmod 555 "$RO"
+out=$(run --settings "$RO/settings.json" 2>&1); status=$?
+chmod 755 "$RO"
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "  SKIP: running as root, directory permissions are not enforced"
+else
+    check "unwritable directory exits 1" "1" "$status"
+    check "write failure is named" "yes" "$(contains "$out" "cannot write")"
+    check "write failure: no traceback" "no" "$(contains "$out" "Traceback")"
+    check "write failure: no 'added:' line" "0" "$(grep -c '^added: ' <<< "$out")"
+    check "write failure: file left alone" "same" "$(same "$T/ro.orig" "$RO/settings.json")"
+fi
 
 echo "== 10. usage errors =="
 run --settings "$LIVE" --bogus >/dev/null 2>&1

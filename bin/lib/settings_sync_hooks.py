@@ -26,7 +26,8 @@ Usage:
 
 Exit status:
     0  up to date, hooks added, or (--dry-run) the missing ones reported
-    1  the live settings or the template could not be read or are malformed
+    1  the live settings or the template could not be read or are malformed,
+       or the live settings could not be written (the original is unchanged)
     2  usage error
 """
 
@@ -56,7 +57,13 @@ class Malformed(Exception):
 
 
 def _groups(config, source):
-    """Yield (event, group) for every hook group, refusing a malformed shape."""
+    """Yield (event, group) for every hook group, refusing a malformed shape.
+
+    Every group and hook entry is checked before anything is yielded from it,
+    so a malformed file ends in a Malformed message instead of a traceback.
+    """
+    if not isinstance(config, dict):
+        raise Malformed(f"{source}: not a JSON object")
     hooks = config.get("hooks", {})
     if not isinstance(hooks, dict):
         raise Malformed(f"{source}: \"hooks\" is not an object")
@@ -64,7 +71,15 @@ def _groups(config, source):
         if not isinstance(groups, list):
             raise Malformed(f"{source}: hooks.{event} is not a list")
         for group in groups:
-            if not isinstance(group, dict) or not isinstance(group.get("hooks", []), list):
+            if (
+                not isinstance(group, dict)
+                or not isinstance(group.get("matcher"), (str, type(None)))
+                or not isinstance(group.get("hooks", []), list)
+                or not all(
+                    isinstance(hook, dict) and isinstance(hook.get("command"), (str, type(None)))
+                    for hook in group.get("hooks", [])
+                )
+            ):
                 raise Malformed(f"{source}: a hooks.{event} group is malformed")
             yield event, group
 
@@ -180,16 +195,23 @@ def main(argv=None):
         print(f"settings hooks up to date: {settings}")
         return 0
 
-    verb = "would add" if args.dry_run else "added"
-    for entry in missing:
-        print(f"{verb}: {describe(*entry)}")
     if args.dry_run:
+        for entry in missing:
+            print(f"would add: {describe(*entry)}")
         return 0
 
     merge(live, missing)
-    mode = stat.S_IMODE(os.stat(settings).st_mode)
-    backup = _write_backup(settings, original)
-    _write_atomically(settings, settings_template.dumps(live), mode)
+    try:
+        mode = stat.S_IMODE(os.stat(settings).st_mode)
+        backup = _write_backup(settings, original)
+        _write_atomically(settings, settings_template.dumps(live), mode)
+    except OSError as exc:
+        # Reported before any "added:" line, so a failed write never reads
+        # as a successful one. The original file is unchanged either way.
+        print(f"settings-sync-hooks: cannot write {settings}: {exc}", file=sys.stderr)
+        return 1
+    for entry in missing:
+        print(f"added: {describe(*entry)}")
     print(f"added {len(missing)} hook(s) to {settings} (backup: {backup})")
     return 0
 
