@@ -74,6 +74,18 @@ check 2 "cd <live> earlier in the chain"          "$OTHER" "cd $TK && git checko
 check 2 "later segment of a chain"                "$TK" "git status; git checkout -b x"
 check 2 "from a subdirectory of the live checkout" "$TK/bin" "git switch feature"
 check 2 "global option before the subcommand"     "$TK" "git -c core.x=y checkout -b x"
+# git's option parser accepts stuck values and clustered short flags.
+check 2 "checkout -b with a stuck value"          "$TK" "git checkout -bx"
+check 2 "checkout -b inside a short-flag cluster" "$TK" "git checkout -qb x"
+check 2 "switch -c with a stuck value"            "$TK" "git switch -cx"
+check 2 "switch -d inside a short-flag cluster"   "$TK" "git switch -qd main"
+# A trailing `--` with no pathspec after it still moves HEAD to <branch>.
+check 2 "checkout <branch> -- with no path"       "$TK" "git checkout feature --"
+# Prefixes that still run git in (or against) the live checkout.
+check 2 "env var assignment before git"           "$TK" "FOO=1 git checkout -b x"
+check 2 "env before git"                          "$TK" "env FOO=1 git switch feature"
+check 2 "env -C <live>"                           "$OTHER" "env -C $TK git switch feature"
+check 2 "env --chdir=<live>"                      "$OTHER" "env --chdir=$TK git switch feature"
 
 # The deny reason must name the way out, or the agent improvises one.
 check 2 "deny reason probe"                       "$TK" "git checkout -b x"
@@ -97,6 +109,11 @@ check 0 "checkout <path> that is no ref"          "$TK" "git checkout f.txt"
 check 0 "checkout <branch> -- <path>"             "$TK" "git checkout feature -- f.txt"
 check 0 "checkout <branch> <path>"                "$TK" "git checkout feature f.txt"
 check 0 "checkout with no argument"               "$TK" "git checkout"
+check 0 "checkout <base> -- <path>"               "$TK" "git checkout main -- f.txt"
+check 0 "checkout -f <base>"                      "$TK" "git checkout -f main"
+check 0 "switch <base> --discard-changes"         "$TK" "git switch main --discard-changes"
+check 0 "short-flag cluster without a branch flag" "$TK" "git checkout -qf main"
+check 0 "env -C elsewhere"                        "$TK" "env -C $OTHER git switch -c z"
 
 # Allowed: not the live checkout.
 check 0 "checkout -b in a linked worktree"        "$WT" "git checkout -b y"

@@ -29,7 +29,8 @@
 #     seen by any hook.
 #
 # The target tree is the hook input's cwd, followed through `cd <dir>` earlier
-# in the same command chain and through git's own -C options.
+# in the same command chain, through an `env -C`/`--chdir` prefix and through
+# git's own -C options. Leading VAR=value assignments are skipped.
 #
 # Installation: register in settings.json under PreToolUse / matcher "Bash":
 #   { "type": "command", "command": "~/.claude/bin/hook-block-toolkit-live-checkout.sh" }
@@ -124,18 +125,27 @@ judge_git() { # cwd words...
     [ "$root" = "$LIVE_ROOT" ] || return 0
     base=$(live_base_branch "$LIVE_ROOT")
 
+    # Short options that create a branch or detach. git accepts them stuck to
+    # their value (-bx) and clustered behind other flags (-qb x); neither
+    # command has another short option that takes a value, so the letter
+    # anywhere in a single-dash word means that option.
+    local branch_flags=bB
+    [ "$sub" = switch ] && branch_flags=cCd
+
     local -a positional=()
     local arg
-    for arg in "$@"; do
+    while [ $# -gt 0 ]; do
+        arg=$1; shift
         case "$arg" in
             # Path mode: whatever precedes `--` is a tree-ish to read from, not
-            # a branch to move to.
-            --) [ "$sub" = checkout ] && return 0 ;;
-            -b|-B|--orphan|--orphan=*|--detach|-c|-C|--create|--create=*|--force-create|--force-create=*)
+            # a branch to move to. A trailing `--` with no pathspec after it
+            # only disambiguates <branch> and still moves HEAD.
+            --) if [ "$sub" = checkout ]; then [ $# -gt 0 ] && return 0; break; fi ;;
+            --orphan|--orphan=*|--detach|--create|--create=*|--force-create|--force-create=*)
                 block "$LIVE_ROOT" "$base" ;;
-            -d) [ "$sub" = switch ] && block "$LIVE_ROOT" "$base" ;;
             -) block "$LIVE_ROOT" "$base" ;;
-            -*) ;;
+            --*) ;;
+            -*) [[ "${arg#-}" == *["$branch_flags"]* ]] && block "$LIVE_ROOT" "$base" ;;
             *) positional+=("$arg") ;;
         esac
     done
@@ -153,11 +163,29 @@ judge_git() { # cwd words...
 }
 
 # Walk the chain segment by segment, following `cd` for the segments after it.
+# Leading `VAR=value` assignments and an `env` prefix still run git; env's -C
+# moves only its own command, not the segments after it.
 judge_segment() { # words...
+    local dir=$CWD
+    while [ $# -gt 0 ] && [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do shift; done
+    if [ "${1:-}" = env ]; then
+        shift
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -C|--chdir) [ $# -ge 2 ] || return 0; dir=$(resolve_dir "$dir" "$2"); shift 2 ;;
+                --chdir=*) dir=$(resolve_dir "$dir" "${1#--chdir=}"); shift ;;
+                -C*) dir=$(resolve_dir "$dir" "${1#-C}"); shift ;;
+                -u|--unset) shift 2 ;;
+                -*) shift ;;
+                *=*) shift ;;
+                *) break ;;
+            esac
+        done
+    fi
     [ $# -eq 0 ] && return 0
     case "$1" in
         cd) [ $# -ge 2 ] && CWD=$(resolve_dir "$CWD" "$2") ;;
-        git) shift; judge_git "$CWD" "$@" ;;
+        git) shift; judge_git "$dir" "$@" ;;
     esac
 }
 
