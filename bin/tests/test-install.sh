@@ -49,6 +49,27 @@ check "settings.json is the loaded template, byte for byte" "same" \
 check "__HOME__ expanded to the install's HOME" "yes" \
     "$(contains "$(cat "$H1/.claude/settings.json")" "\"$H1/.claude/playwright-output\"")"
 
+echo "== 2. a re-run brings a missing template hook into the existing file =="
+FOREIGN="~/.claude/bin/hook-block-foreign-worktree-git.sh"
+# Drop the hook from the installed file, as on a machine installed before the
+# template gained it.
+python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for group in d["hooks"]["PreToolUse"]:
+    group["hooks"] = [h for h in group["hooks"] if h["command"] != sys.argv[1]]
+json.dump(d, sys.stdout, indent=2)
+' "$FOREIGN" < "$H1/.claude/settings.json" > "$T/without.json"
+mv "$T/without.json" "$H1/.claude/settings.json"
+check "precondition: hook removed" "no" "$(contains "$(cat "$H1/.claude/settings.json")" "$FOREIGN")"
+out=$(install_into "$H1")
+check "re-run reports the added hook" "yes" "$(contains "$out" "added: PreToolUse [Bash] $FOREIGN")"
+check "hook is back in settings.json" "yes" "$(contains "$(cat "$H1/.claude/settings.json")" "$FOREIGN")"
+check "backup written next to it" "present" \
+    "$([[ -e "$H1/.claude/settings.json.bak" ]] && echo present || echo absent)"
+out=$(install_into "$H1")
+check "third run reports up to date" "yes" "$(contains "$out" "settings hooks up to date")"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -46,7 +46,9 @@ fi
 
 # Copy global settings (not symlink — Claude Code writes to this file)
 if [ -e ~/.claude/settings.json ]; then
-    echo "~/.claude/settings.json already exists. Remove it first if you want to reinstall."
+    # Not overwritten (it holds your own permissions and settings), but hooks
+    # added to the template since the first install are merged in.
+    "$REPO_DIR/bin/settings-sync-hooks.sh"
 else
     # Strips JSONC comments and expands __HOME__; see the helper for why.
     python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > ~/.claude/settings.json
