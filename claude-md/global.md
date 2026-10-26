@@ -28,140 +28,72 @@ typografisch horen.
 
 ## Bash Permissies (CRITICAL)
 
-Twee regels die ALTIJD gelden:
+Permissieregels matchen op het EERSTE woord van elk segment. Een vorm die daar
+iets anders zet dan het eigenlijke commando (`cd x &&`, `source ... &&`, een
+`for`/`until`-lus, een redirect `>`, een tweede segment na `;`/`&&`) prompt, ook
+als het commando zelf allowed is. Alles in `~/.claude/bin/` matcht
+`Bash(~/.claude/bin/*)` en draait promptloos; daar staan de wrappers die zo'n vorm
+één commando maken.
 
-1. NOOIT `cd path &&` voor een commando zetten — permissies matchen op het EERSTE woord (`cd`), niet op het eigenlijke commando
-2. NOOIT absolute paden naar venv binaries gebruiken — `*` in permissiepatronen matcht NIET over `/` heen, dus `/home/.../venv/bin/python` matcht niet op `Bash(*/python *)`
+`hook-auto-approve-bash.py` weigert de meeste van deze vormen met een deny-hint die
+het alternatief en de voorwaarden noemt. **Volg de hint**, zoek geen omweg
+(`bash -c "cd x && ..."` is net zo ongematcht).
 
-### Venv commando's
+| Niet | Wel |
+|---|---|
+| `cd <dir> && <cmd>` | `git -C <dir>`, `npm --prefix <dir>`, anders `env -C <dir> <cmd>` |
+| `sed -n 'X,Yp' <file>`, inline Python die een bestand leest | Read, Grep, Edit |
+| `until [ -f F ]; do sleep N; done` | `wait-for-pattern.sh`; `wait-for-healthy.sh <container>` voor containers |
+| `<cmd> > /tmp/out` | `cmd-save.sh <outfile> <cmd>` |
+| `for i in 1 2 3; do <cmd>; done` (metingen) | `repeat-cmd.sh <count> <cmd>` |
+| `for`/`&&`-reeks van `gh`-calls | `batch-issue-status.sh`, `batch-issue-view.sh` |
+| twee `curl -w "%{http_code}"` op één regel | `http-status.sh <url>...` |
+| `... \| sed 's/\x1b\[[0-9;]*m//g'` | `strip-ansi.sh <file>`, of meteen `cmd-save.sh --strip-ansi` |
+| `source .venv/bin/activate && python ...` | `venv-run.sh python ...` (zie Venv) |
 
-VERPLICHT `~/.claude/bin/` wrapper scripts gebruiken voor venv binaries:
+`env -u NAME` en `env FOO=1 <cmd>` gaan net zo door als `env -C`, los of
+gecombineerd; andere `env`-opties (`-i`, `-S`, `--`) en een `-u` ná `FOO=1`
+prompten.
 
-    ~/.claude/bin/project-test.sh [pytest-args...]    # pytest
-    ~/.claude/bin/venv-run.sh python -c "..."          # python, alembic, ruff, etc.
+**Wrappers die een commando uitvoeren** (`cmd-save.sh`, `repeat-cmd.sh`,
+`venv-run.sh`) geven niets wat het kale commando niet heeft, en ook niet minder: je
+eigen allowregels voor het commando tellen mee. Weigert de hook zo'n aanroep, voer
+dan het kale commando uit dat de hint noemt. Details per wrapper (opties, exit codes,
+valkuilen): `~/.claude/bin/<script> --help`.
 
-Deze scripts:
-- Matchen `Bash(~/.claude/bin/*)` (altijd allowed, geen permissieprompt)
-- Detecteren automatisch de project venv (.venv, backend/.venv, etc.)
-- Valideren dat je binnen ~/Projects/ draait
+### Venv
 
-`venv-run.sh` is een wrapper die een commando uitvoert (zie hieronder): `python`,
-`pytest`, `alembic`, `ruff`, `mypy` en `uv` gaan zonder prompt, `pip` of
-`python3` prompten net als hun kale vorm.
-
-**Meerdere worktrees: zeg welke boom je bedoelt.** De venv wordt gezocht vanaf de
-projectroot, en welke root dat is hangt af van wat je meegeeft:
-
-- `project-test.sh` leidt de root af uit het testpad. Een pad in worktree B
-  gebruikt de venv van B, ook als je shell in A staat; het script meldt het
-  verschil. Paden uit twee roots tegelijk weigert het.
-- `venv-run.sh` krijgt een commando, geen pad, en kan dus niets afleiden. Werk je
-  in een andere boom dan `$PWD`, geef dan `--repo <dir>` mee:
-  `~/.claude/bin/venv-run.sh --repo <worktree> alembic upgrade head`
-
-Zonder dat draait de opdracht op de interpreter en dependency-set van de boom
-waar je shell toevallig staat. Twee worktrees die maanden uit elkaar zijn
-aangemaakt hebben zelden dezelfde Python-minorversie, en niets meldt dat.
+- pytest: `~/.claude/bin/project-test.sh [pytest-args...]`; python, alembic, ruff,
+  mypy, uv: `~/.claude/bin/venv-run.sh <cmd> [args...]`. Beide vinden de project-venv
+  zelf en draaien alleen binnen `~/Projects`. Een directe
+  `<pad>/.venv/bin/{python,pytest,alembic,ruff,mypy,uv}` wordt ook goedgekeurd;
+  `pip` en `python3` prompten, ook achter `venv-run.sh`. `python -m pytest` alleen als
+  `python` in PATH zit en `Bash(python *)` allowed is.
+- **Meerdere worktrees: zeg welke boom je bedoelt.** `project-test.sh` leidt de venv
+  af uit het testpad. `venv-run.sh` krijgt geen pad: werk je in een andere boom dan
+  `$PWD`, geef `--repo <worktree>` mee. Anders draait het op de interpreter van de
+  boom waar je shell staat, en een andere Python-minorversie meldt niets.
 
 ### Git commits
 
-ALTIJD `~/.claude/bin/git-commit.sh` — NOOIT raw `git commit`.
+ALTIJD `~/.claude/bin/git-commit.sh [--repo <dir>]`. NOOIT `git commit -m`,
+`git commit -F`, heredocs, multi-arg met veel regels, of Bash voor file-aanmaak.
 
-**Kort** (single-line, geen body):
-```bash
-~/.claude/bin/git-commit.sh "feat: short description"
-```
-
-**Lang** (met body) — gebruik een project+nr-specifieke bestandsnaam (zie "Tmp-bestandsnamen" hieronder). Voorbeeld voor een project in `~/Projects/Acme-Webshop`, issue #42:
-1. `Read` tool op `/tmp/acme-webshop-commit-msg-42.txt` (ook als het niet bestaat — fout is onschuldig, maakt Write mogelijk)
-2. `Write` tool: commit message naar `/tmp/acme-webshop-commit-msg-42.txt`
-3. `~/.claude/bin/git-commit.sh --file /tmp/acme-webshop-commit-msg-42.txt`
-
-NOOIT: `git commit -m`, `git commit -F`, heredocs, multi-arg met veel regels, of Bash voor file-aanmaak.
-
-**Co-Authored-By-trailer.** Elke agent-commit eindigt met de `Co-Authored-By`-trailer. Repo's die zwaardere review ophangen aan een `agent-authored`-label passen dat label zonder trailer nooit toe, waardoor de bijbehorende verplichte checklist stil niet draait — een groene gate die nooit gedraaid heeft. **Enforced, not advisory:** `hook-post-commit-trailer.sh` (PostToolUse op Bash) voegt de trailer alsnog toe aan een verse, ongepushte, niet-merge commit en meldt dat op stderr. Het doel komt uit het commit-segment zelf (`--repo`, anders de `-C` van `git commit`, anders de cwd na een eventuele `cd` of `env -C`); een doel dat niet vast te stellen is (`--repo "$WT"`, een map die niet bestaat) en een commit die in dezelfde call al gepusht is krijgen geen trailer maar wel een stderr-melding. Commit en push dus in aparte calls. Bewust NIET in `git-commit.sh`: dat script gebruik je ook zelf, en een trailer daar zou je eigen commits als agent-authored bestempelen.
+- **Kort:** `~/.claude/bin/git-commit.sh "feat: short description"`
+- **Lang:** `Read` op `/tmp/<project>-commit-msg-<nr>.txt` (ook als het niet bestaat;
+  de fout is onschuldig en maakt Write mogelijk), `Write` de message daarheen, dan
+  `~/.claude/bin/git-commit.sh --file /tmp/<project>-commit-msg-<nr>.txt`.
+- Elke agent-commit eindigt met de `Co-Authored-By`-trailer. `hook-post-commit-trailer.sh`
+  vult een vergeten trailer aan en meldt op stderr wanneer dat niet kan. Een commit
+  die in dezelfde call gepusht wordt krijgt hem niet: **commit en push in aparte calls**.
+- Nooit committen op een base branch. `git-commit.sh` weigert een branch die de repo
+  beschermt via een gecommitte `.claude/protected-branches` (één naam per regel) of
+  `git config toolkit.protectedBranch`; `--allow-protected` waar een directe commit
+  de bedoeling is.
 
 ### Git branches
 
 Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug>` een korte kebab-case samenvatting van de issue-titel is. Bijv. issue #3 "Per-feature code discipline" → `issue-3-code-discipline`. Zo is elke branch traceerbaar naar zijn issue. Branches zonder issue (los experiment) mogen afwijken.
-
-**Nooit committen op een base branch.** In repo's waar elke wijziging via een PR
-binnenkomt is een commit op `develop`/`master`/`main` altijd een vergissing.
-**Enforced, not advisory:** `git-commit.sh` leest de branch van de doelboom
-(`--repo`, anders cwd) en weigert als die beschermd is. Welke branches dat zijn
-staat per repo in `<repo>/.claude/protected-branches` (één naam per regel) of in
-`git config --get-all toolkit.protectedBranch`; staat er niets, dan is niets
-beschermd en verandert er niets. Commit dat bestand: ongetrackt bestaat het
-alleen in de boom waar je het aanmaakte, dus een linked worktree ziet geen
-config en de guard slaat daar nooit aan, precies waar de vergissing het vaakst
-gebeurt. De git-config-route heeft dat probleem niet, want worktrees delen
-`.git/config`. Een weigering kost één `switch -c`; een commit
-op een base branch kost handwerk om te ontwarren. `--allow-protected` overrulet
-het waar een directe commit de bedoeling is. Detached HEAD mag altijd (rebase,
-bisect).
-
-### Wat NIET werkt (ook al lijkt het logisch)
-
-- `cd backend && python ...` — eerste woord is `cd`
-- `source .venv/bin/activate && python ...` — eerste woord is `source`
-- `/absolute/path/.venv/bin/python ...` — `*` matcht niet over `/`
-- `python -m pytest ...` — alleen als `python` in PATH zit EN `Bash(python *)` allowed is
-
-### Werkdirectory meegeven: `env -C`, nooit `cd &&`
-
-**`cd <dir> && <cmd>` is enforced, not advisory.** `hook-auto-approve-bash.py`
-denyt elke `cd` met een commando erachter, met een hint die de alternatieven
-noemt. Ook binnen `~/Projects`, waar de hook zo'n keten vroeger stilletjes
-goedkeurde: aan een goedgekeurde `cd`-keten zie je niet af dat dezelfde vorm
-overal elders prompt, dus die uitzondering leerde juist het patroon aan dat de
-frictie veroorzaakt. Een kale `cd <dir>` zonder vervolgcommando blijft ongemoeid.
-
-Heeft een commando zijn werkdirectory echt nodig (een script dat `./.env` leest,
-`npx playwright test` dat config en specs vanaf cwd resolvet), gebruik dan de
-vorm die één commando blijft en dus gewoon matcht:
-
-| In plaats van | Gebruik |
-|---|---|
-| `cd <dir> && git ...` | `git -C <dir> ...` |
-| `cd <dir> && npm ...` | `npm --prefix <dir> ...` |
-| `cd <dir> && <iets anders>` | `env -C <dir> <iets anders>` |
-
-`env -C` wordt auto-approved onder twee voorwaarden tegelijk: `<dir>` ligt binnen
-`~/Projects`, én `<cmd>` zou op zichzelf al goedgekeurd worden. Een niet-toegestaan
-commando wordt er niet door witgewassen (`env -C <projectdir> ./start.sh` prompt
-gewoon), en een `env -C /etc cat passwd` evenmin. `bash -c "cd x && ..."` lost
-niets op; dat is net zo ongematcht als de kale `cd`.
-
-`env -u NAME` (een variabele weghalen, bv. `env -u VIRTUAL_ENV uv run ...`) en
-`env FOO=1 <cmd>` gaan op dezelfde manier door, los of gecombineerd met `-C`.
-Andere `env`-opties (`-i`, `-S`, `--`) en een `-u` ná een `FOO=1` prompten gewoon.
-
-### Wrappers die een commando uitvoeren
-
-Drie scripts voeren het commando uit dat je ze geeft: `repeat-cmd.sh`,
-`cmd-save.sh` en `venv-run.sh` (dat zonder venv terugvalt op PATH). Ze matchen
-`Bash(~/.claude/bin/*)`, dus die regel alleen zou elk commando erachter stil
-goedkeuren. **Enforced, not advisory: een wrapper geeft niets wat het kale
-commando niet heeft.** `hook-auto-approve-bash.py` beoordeelt het commando na de
-opties van de wrapper met dezelfde regels als een los commando, en antwoordt
-`deny` met een hint als het niet goedgekeurd zou worden. Geen `ask`: een
-hook-ask gaat vóór de allowregels en de auto-mode-classifier, en laat dus elke
-sessie hangen waar niemand naar kijkt. De hint noemt het kale commando; **voer
-dat zonder de wrapper uit**, dan beslist de normale permissieflow (settings,
-auto mode of een prompt). Heeft de aanroep niet de gedocumenteerde vorm, dan
-noemt de hint die vorm. Dat werkt recursief: `repeat-cmd.sh 1
-~/.claude/bin/cmd-save.sh /tmp/o curl x` wordt geweigerd, `... git status` niet.
-
-Omgekeerd geeft een wrapper ook niet *minder*: een commando dat kaal mag via een
-eigen `Bash(...)`-allowregel (in `~/.claude/settings*.json` of in de
-`.claude/settings*.json` van het project waar het draait) mag ook achter de
-wrapper. Zo gaat `cmd-save.sh /tmp/o ~/Projects/acme/bin/backend-test.sh ...`
-door in een project `acme` waarvan de settings
-`Bash(/home/jan/Projects/acme/bin/*)` bevatten. De regel matcht ook na de prefixen waar de hook doorheen kijkt (`cd`, `env -C`/`env -u`,
-`VAR=`, `rtk`): `cmd-save.sh /tmp/o env -C <dir> python3 x.py` valt onder
-`Bash(python3 *)`. Een deny- of ask-regel op het commando wint, met of zonder
-die prefixen. De allowregel van de wrapper zelf (`Bash(~/.claude/bin/*)`) telt
-nooit voor wat hij uitvoert.
 
 ## Code Quality
 
@@ -176,8 +108,6 @@ nooit voor wat hij uitvoert.
 
 ## Available Utilities
 
-- **Running tests** (`~/.claude/bin/project-test.sh`): see "Bash Permissies" section above
-- **Venv commands** (`~/.claude/bin/venv-run.sh <cmd> [args]`): run any venv binary (python, alembic, ruff, etc.)
 - **Project audits** (`/audit`): run one or all project audits from `~/.claude/bin/`:
   - `i18n-audit.py` — missing/unused/inconsistent translation keys (auto-detects framework)
   - `env-audit.sh` — .env vs .env.example sync, empty values, secrets tracked by git
@@ -200,31 +130,13 @@ nooit voor wat hij uitvoert.
   - Use Read to read files — not `cat`, `head`, or `tail`
   - Use Write to create new files (auto-creates parent directories) — not `mkdir` + Bash
   - Use `git rm` to delete files — not `rm`
-- Bash tool: always save API responses to a file first, then read the file. Use `~/.claude/bin/gh-save.sh /tmp/<project>-<purpose>-<nr>.json <gh-args>` to save `gh` output (shell redirects like `>` trigger permission prompts).
-- **Output van een ander commando naar een bestand: `~/.claude/bin/cmd-save.sh <outfile> <commando> [args...]`.** Een redirect verslaat permissiematching: de regel matcht op het eerste woord, dus `docker exec ... > /tmp/out` valt niet meer onder `Bash(docker *)` en prompt élke keer. De wrapper is één commando en matcht `Bash(~/.claude/bin/*)`. Hij geeft de exit-status van het commando zélf door (een mislukt commando schrijft anders een bestand en lijkt geslaagd, waarna je een foutmelding als data leest) en print het aantal bytes (een capture van 0 bytes is onzichtbaar tot iets verderop vreemd doet). stderr gaat standaard níet mee in het bestand, want een waarschuwing midden in een JSON-capture maakt die onparseerbaar; gebruik `--stderr merge` als de capture juist bedoeld is om een fout te diagnosticeren. Opties staan altijd vóór `<outfile>`: alles erna is het commando, dus `cmd-save.sh /tmp/o --stderr merge git log` voert `--stderr` uit. Typisch voor database-, container- en cluster-CLI's: `cmd-save.sh /tmp/<project>-pods-<nr>.json kubectl get pods -o json`. Goedgekeurd alleen als `<commando>` dat op zichzelf ook is (zie "Wrappers die een commando uitvoeren").
-- **Kleurcodes in opgeslagen output: `~/.claude/bin/strip-ansi.sh <file> [<outfile>]`, nooit `| sed 's/\x1b\[[0-9;]*m//g'`.** Test-runner-output (vitest, pytest met kleur) zit vol ANSI-escapes, en een `grep ... | sed ... | head`-keten prompt élke keer op het `sed`-segment. Het script schrijft een schone kopie naar `<outfile>` (standaard `<file>.clean`) en laat de input ongemoeid; lees die kopie daarna met Read of Grep, dan verdwijnt de keten. Het verwijdert ook de cursorcodes en hyperlinks van vitest die die sed-regex laat staan. Maak je de capture zelf, gebruik dan meteen `cmd-save.sh --strip-ansi <outfile> <commando>`, dan is het bestand vanaf het begin schoon.
+  - `python3 -c`, `sed` and `awk` never for file reading, writing, searching or modifying; `python3 -c` for calculation or data transformation is fine
+- Save API responses to a file first, then read the file: `~/.claude/bin/gh-save.sh /tmp/<project>-<purpose>-<nr>.json <gh-args>` for `gh`, `cmd-save.sh` for anything else.
 - Never use command substitution with pipes for API data
-- Never write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc). These don't match permission patterns like `Bash(git *)`. Instead: use the Write tool to write to `/tmp/` with a project+nr-specific name (see "Tmp-bestandsnamen"), then reference the file in Bash (e.g., `git commit -F /tmp/acme-webshop-commit-msg-42.txt`, `gh issue create --body-file /tmp/acme-webshop-issue-body-42.md`).
-- **Tmp-bestandsnamen: ALTIJD uniek per project + taak.** NOOIT generieke namen als `/tmp/commit-msg.txt` of `/tmp/pr-body.md` — er draaien vaak meerdere agents tegelijk, ook in verschillende projecten, en die overschrijven elkaars bestand. Schema: `/tmp/<project>-<doel>-<nr>.<ext>`, waarbij `<project>` de basename van de working directory is, lowercase, niet-alfanumerieke tekens vervangen door `-` (bv. `~/Projects/Acme-Webshop` → `acme-webshop`), en `<nr>` het issue- of PR-nummer. Voorbeelden: `/tmp/acme-webshop-commit-msg-42.txt`, `/tmp/acme-webshop-pr-body-42.md`, `/tmp/acme-webshop-issue-body-42.md`. Zonder issue/PR-nummer: gebruik een kort beschrijvend doel (`/tmp/acme-webshop-deploy-log.txt`).
-
-  **Waar scratchbestanden staan: in de scratchpad, anders in `/tmp`, nooit in een gebruikersmap.** Een sessie-scratchbestand (capture, API-response, tussenoutput, backup vóór een edit) schrijf je in de scratchpad als de systeemprompt er een noemt, anders als `/tmp/<project>-<doel>-<nr>.<ext>`. Nooit in `~/Downloads`, `~` of de projectboom: zo'n bestand ruimt niemand automatisch op, dus moet het later met de hand weg, en die `rm` prompt élke keer. In de scratchpad valt er niets op te ruimen.
-
-  De recepten die een `/tmp/<project>-...`-pad voorschrijven (commit-messages, PR/issue-bodies, de `gh-save.sh`-captures van skills) blijven bewust op `/tmp`, ook als er een scratchpad is: skills hardcoden die paden, het scratchpad-pad verschilt per sessie, en een subagent heeft er niet altijd een. Schrijft een recept of skill een `/tmp`-pad voor, volg dat; voor alle andere scratch heeft de scratchpad voorrang. Beide plekken zijn goed, een gebruikersmap nooit.
-
-  **De ene uitzondering: bestanden die een container moet mounten.** Docker Desktop deelt `$HOME` met zijn VM, maar `/tmp` niet, dus `docker run -v` op de scratchpad of `/tmp` faalt met `mounts denied: ... is not shared from the host`. Zo'n bestand of boom (een base- of pre-fix-checkout om tests in een container te draaien, een map die de container moet zien) gaat naar `~/.cache/claude-scratch/<project>/<doel>-<nr>/`, en alleen via `~/.claude/bin/docker-scratch.sh`:
-
-      docker-scratch.sh dir      --repo <worktree> <doel>-<nr>          # maakt en print het pad
-      docker-scratch.sh worktree --repo <worktree> <doel>-<nr> <ref>    # detached checkout daar
-      docker-scratch.sh clean    --repo <worktree> <doel>-<nr>          # of --all; ook de worktree-registratie
-
-  Plak het geprinte pad letterlijk in de `docker run -v`, geen `$(...)`. Ruim op met `clean` zodra de container klaar is; dat prompt niet, een losse `rm -rf` wel (en wordt buiten `/tmp` door `hook-block-destructive.sh` geweigerd). Faalt `clean` met exit 1, dan heeft een container als root bestanden in de mount gezet (native Linux Docker): meld dat, en verplaats de boom niet naar een andere map. Dit is geen gebruikersmap en geen ontsnappingsroute: wat geen container hoeft te mounten, blijft in de scratchpad of `/tmp`, en `~/Downloads`, `~` en de projectboom blijven verboden, ook als een mount faalt.
-- Never use `python3 -c`, `sed`, or `awk` for file reading, writing, searching, or modifications. Use Grep/Read to find content, then Edit to replace. `python3 -c` is allowed for non-file operations (calculations, data transformations, etc.). **Enforced, not advisory:** `hook-auto-approve-bash.py` denies `sed -n 'X,Yp' <file>` and inline Python (`-c` or a heredoc) that opens a file for reading, with a hint naming the right tool. Writes and pure calculation still fall through to a normal prompt.
-- Never wait for a file with `until <conditie>; do sleep N; done`. Dat is een compound command, dus permissiematching faalt op het tweede segment en het prompt elke keer. Gebruik `~/.claude/bin/wait-for-pattern.sh [--newer-than <epoch>] <file> <extended-regex> [timeout-seconds] [poll-seconds]`: die matcht `Bash(~/.claude/bin/*)` en draait promptloos; het bestand hoeft nog niet te bestaan. Voor containers is `~/.claude/bin/wait-for-healthy.sh <container>` het equivalent.
-
-  **Wacht je op een bestand met een vaste naam, dan `--newer-than` meegeven.** Een voortgangsbestand per taak wordt door élke run van die taak hergebruikt, en niets leegt het tussendoor: de tweede run matcht binnen een seconde de `DONE` van de eerste, en je rapporteert het resultaat van de vorige run als dat van de nieuwe. Een volledig, plausibel, verkeerd antwoord, en niets in het bestand zegt welke run het schreef; exit 0 ook niet, de mtime wel. Leg `SPAWNED_AT=$(date +%s)` vast vóór je het proces start en geef die mee: alleen een write ná dat moment kan het patroon dan vervullen. **Enforced, not advisory:** `hook-auto-approve-bash.py` denyt de bestandsvormen (`[ -f FILE ]`, `test -f FILE`, `grep PATTERN FILE`) met een hint. Lussen die op iets anders wachten (HTTP-status, containertoestand, exit-status) worden niet geraakt en vallen door naar een normale prompt.
-- **Een commando N keer herhalen (warm/koud-metingen): `~/.claude/bin/repeat-cmd.sh <count> <commando> [args...]`, nooit `for i in 1 2 3; do <cmd>; done`.** Het `for`-segment matcht geen enkele allow-regel, dus elke meting prompt. De wrapper draait het commando `<count>` keer, gooit de output weg, stopt bij de eerste exit ≠ 0 (met het nummer van die run, zijn exit-status en zijn stderr) en print één regel met aantal runs, totale tijd en tijd per run. De reset en de stats-query blijven losse, enkele commando's: `repeat-cmd.sh 10 docker exec <db> psql ... -c "<query>"`. Goedgekeurd alleen als `<commando>` dat op zichzelf ook is (zie "Wrappers die een commando uitvoeren").
-- Voor HTTP-smoketests: `~/.claude/bin/http-status.sh [--body] [--max-time SECS] <url> [url...]`. De directe vorm (`curl -s -o /dev/null -w "%{http_code}\n" <url>`) wil je zelden maar één keer, en twee ervan op een regel is een compound command: alles na de `;` of `&&` blijft ongematcht en prompt élke keer, ook met een brede `Bash(curl *)`-regel. De wrapper is één commando en matcht `Bash(~/.claude/bin/*)`. Eén URL geeft alleen de status (past in een `if`), meerdere geven `<status>  <url>` per regel. Een 4xx/5xx is een geldig antwoord (exit 0); alleen transportfouten (DNS, connection refused, timeout) geven `ERR` en exit 1. Voor auth-headers, retries of JSON-parsing roep je `curl` gewoon direct aan; wachten tot een service omhoog is doe je met `wait-for-pattern.sh` of `wait-for-healthy.sh`.
-- For batch operations on multiple issues, always use `~/.claude/bin/` scripts (e.g., `batch-issue-status.sh`, `batch-issue-view.sh`). Never use `for` loops or chained `&&` commands to repeat `gh` calls.
+- Never write files via Bash (no `echo >`, `cat <<`, `tee`, heredoc): Write the file, then reference it (`git-commit.sh --file ...`, `gh issue create --body-file ...`).
+- **Tmp-bestandsnamen: ALTIJD uniek per project + taak**, want parallelle agents overschrijven elkaars `/tmp/pr-body.md`. Schema: `/tmp/<project>-<doel>-<nr>.<ext>`; `<project>` is de basename van de working directory, lowercase, niet-alfanumeriek → `-` (`~/Projects/Acme-Webshop` → `acme-webshop`), `<nr>` het issue- of PR-nummer, of anders een kort beschrijvend doel (`/tmp/acme-webshop-deploy-log.txt`).
+- **Scratchbestanden: in de scratchpad, anders in `/tmp`, nooit in een gebruikersmap** (`~/Downloads`, `~`, de projectboom): daar ruimt niemand ze op en elke `rm` prompt. Schrijft een recept of skill een `/tmp/<project>-...`-pad voor (commit-messages, PR/issue-bodies, `gh-save.sh`-captures), volg dat; die paden zijn hardcoded en een subagent heeft niet altijd een scratchpad.
+- **De ene uitzondering: wat een container moet mounten.** Docker Desktop deelt `/tmp` niet met zijn VM, dus zo'n bestand of boom gaat alleen via `~/.claude/bin/docker-scratch.sh` (`dir`/`worktree`/`clean`; regels en exit codes in `--help`). Ruim op met `clean`, niet met `rm -rf`.
 
 <!--
 RTK (Rust Token Killer) — optional, install separately: https://github.com/rtk-ai/rtk

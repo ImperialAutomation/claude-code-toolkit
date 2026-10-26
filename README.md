@@ -110,6 +110,8 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 **Why?** Claude Code permissions match on the **first word** of a Bash command. An inline loop like `for issue in 15 16 17; do gh issue view $issue ...; done` gets blocked because the first word is `for`, not `gh`. By wrapping batch operations in scripts, permissions can match on the script path (`~/.claude/bin/*`).
 
+Global CLAUDE.md names each wrapper in one line and leaves the details to the script: `cmd-save.sh`, `strip-ansi.sh`, `repeat-cmd.sh`, `http-status.sh`, `wait-for-pattern.sh`, `docker-scratch.sh`, `venv-run.sh` and `doc-budget-check.sh` answer `--help` with their header comment (usage, exit codes, rules of use). `bin/tests/test-script-help.sh` pins that the help still carries what CLAUDE.md no longer says.
+
 ### Issue & PR management
 
 | Script | Usage | Description |
@@ -328,7 +330,7 @@ not.
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
-| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare |
+| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare (`<wrapper> --help` alone runs nothing and is approved) |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
@@ -341,6 +343,7 @@ All scripts are already allowed in the global settings (`~/.claude/settings.json
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json] [--rewrite-prefix CMD]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Chain friction is attributed to the segment that defeats matching, not the first token. Hook denies (including `cd <dir> && <cmd>` chains) are reported separately and excluded from the estimate. Used by `/retro`'s Permission Friction phase |
+| `doc-budget-check.sh` | `doc-budget-check.sh [--warn SIZE] [--fail SIZE] [--repo DIR] <doc-root>...` | Per-file byte budget for markdown docs: lists files over the warn size (default 15K), exits 1 for any over the fail size (default 25K). Skips `archive/` dirs; deliberate exceptions go in `<repo>/.claude/doc-budget-exceptions`, and an exception that is back under budget is reported as stale. Used by `/retro` before and after writing; works as a pre-commit or CI step (see `--help`) |
 
 ## Repository Structure
 
@@ -393,6 +396,7 @@ claude-code-toolkit/
 │   ├── test-hook-block-foreign-worktree-git.sh ← standalone tests for the above
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 │   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
+│   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
 │   └── test-permission-friction.py ← standalone tests for the above
 ├── skills/                    ← skill definitions (procedures)
@@ -465,13 +469,14 @@ The global settings include three `PreToolUse` hooks that run **in all permissio
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, leading `VAR=value` env prefixes (except variables that make a command load or run code, such as `PATH`, `PAGER`, `PYTHONPATH` and the `LD_*`/`GIT_*`/`npm_config_*` families: those are never stripped, so the command prompts), and a model-typed `rtk` or `rtk proxy` prefix (so `rtk grep ...` is judged as `grep ...`), then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
-   The same hook also **denies** three shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
+   The same hook also **denies** four shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
 
    | Denied | Use instead |
    |---|---|
    | `sed -n 'X,Yp' <file>` | the Read tool with offset/limit |
    | inline Python (`-c` or a heredoc) that opens a file for reading | Read, Grep, or Edit |
-   | `until <file-condition>; do sleep N; done` | `wait-for-pattern.sh <file> <extended-regex> [timeout] [poll]` |
+   | `until <file-condition>; do sleep N; done` | `wait-for-pattern.sh [--newer-than <epoch>] <file> <extended-regex> [timeout] [poll]` |
+   | `cd <dir> && <cmd>` | `git -C`, `npm --prefix`, or `env -C <dir> <cmd>` (approved when `<dir>` is inside `~/Projects` and `<cmd>` is approvable on its own) |
 
    Each deny is deliberately narrow, so that work with no wrapper to point at keeps falling through to a normal prompt rather than being blocked: a real `sed` stream edit, Python doing calculation or writing a file, and wait loops polling anything other than a file (an HTTP status, a container state, a command's exit status) are all left alone. `while` loops are not matched either: `while [ -f X ]` waits for a file to *disappear*, which `wait-for-pattern.sh` cannot express.
 
@@ -512,7 +517,7 @@ Rules provide contextual policies that load based on frontmatter configuration. 
 | `code-review.md` | Always | No performative agreement, verify before implementing, push back when feedback is wrong |
 | `testing.md` | Test files, fakes and mocks | Real behavior over mocks, fakes validate like the real API, 5 test scenarios per feature, realistic fixtures |
 | `documentation.md` | .md files | Current purpose over history, usage guidance, no changelogs |
-| `stripe-testing.md` | Payment/billing/webhook files | Never real cards, no raw PANs in code, assert on decline codes, prove webhook idempotency |
+| `stripe-testing.md` | Stripe-named files and `stripe/` dirs (generic payment/billing files load `payments.md` only) | Never real cards, no raw PANs in code, assert on decline codes, prove webhook idempotency |
 
 ### Project Template (`claude-md/project-template.md`)
 
