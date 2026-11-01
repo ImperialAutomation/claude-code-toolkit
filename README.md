@@ -39,6 +39,8 @@ Running `install.sh` again never overwrites an existing `~/.claude/settings.json
     repo: https://github.com/ImperialAutomation/claude-code-toolkit.git
 ```
 
+Finally, it installs the [MarkItDown](https://github.com/microsoft/markitdown) CLI (`uv tool install 'markitdown[all]'`), which agents use to convert Office files, HTML and EPUB to Markdown. This needs [uv](https://docs.astral.sh/uv/); without it the step is skipped with a warning and the rest of the install still runs. An existing MarkItDown install is left as is (upgrade with `uv tool upgrade markitdown`). On an install whose `settings.json` predates this, add `"Bash(markitdown *)"` to `permissions.allow` by hand (or via `/permissions`): the sync only merges hooks.
+
 This repo is public, so it also ships a [pre-commit](https://pre-commit.com/) hook that scans staged changes for secrets with [gitleaks](https://github.com/gitleaks/gitleaks) before every commit. Install it once per clone:
 
 ```bash
