@@ -280,6 +280,11 @@ check(
 )
 
 check(
+    "is_command_safe: cd into project + markitdown conversion (issue #213)",
+    hook.is_command_safe("cd ~/Projects/acme-webshop && markitdown docs/spec.docx -o /tmp/spec.md"),
+)
+
+check(
     "is_command_safe: env-var prefix on allowed command",
     hook.is_command_safe("FOO=bar git status"),
 )

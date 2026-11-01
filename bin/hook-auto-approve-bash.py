@@ -32,7 +32,7 @@ ALLOWLIST = {
     "wc", "sort", "echo", "printf", "mkdir", "cp",
     "mv", "chmod", "tee", "python", "ruff", "uv",
     "mypy", "pytest", "alembic",
-    "source", "xdg-open", "sleep", "test", "true",
+    "source", "xdg-open", "markitdown", "sleep", "test", "true",
 }
 
 # Bare "&" can never actually reach this set as its own token since & was
