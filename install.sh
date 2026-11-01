@@ -78,7 +78,7 @@ if [ ! -f ~/.claude/toolkit.yaml ]; then
 # Run /sync-toolkit pull to update from source repos.
 sources:
   - name: public
-    repo: https://github.com/JanKeijzer/claude-code-toolkit.git
+    repo: https://github.com/ImperialAutomation/claude-code-toolkit.git
     branch: main
     install:
       skills: skills/
@@ -86,8 +86,8 @@ sources:
       claude-md: claude-md/global.md
 
   # Uncomment for private skills:
-  # - name: imperial
-  #   repo: git@github.com:imperial-automation/claude-toolkit-private.git
+  # - name: private
+  #   repo: git@github.com:<org>/<private-repo>.git
   #   branch: main
   #   install:
   #     skills: skills/

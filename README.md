@@ -16,7 +16,7 @@ Rules keep the global CLAUDE.md lean by moving context-specific instructions out
 ## Installation
 
 ```bash
-git clone https://github.com/JanKeijzer/claude-code-toolkit.git ~/Projects/claude-code-toolkit
+git clone https://github.com/ImperialAutomation/claude-code-toolkit.git ~/Projects/claude-code-toolkit
 cd ~/Projects/claude-code-toolkit
 ./install.sh
 ```
@@ -33,7 +33,13 @@ The settings file is copied (not symlinked) because Claude Code writes to it whe
 
 Running `install.sh` again never overwrites an existing `~/.claude/settings.json`. It does run `settings-sync-hooks.sh`, which adds hooks the template gained since your first install (see [Global Settings](#global-settings-claude-mdsettings-globaljsonc)).
 
-`install.sh` also installs the [MarkItDown](https://github.com/microsoft/markitdown) CLI (`uv tool install 'markitdown[all]'`), which agents use to convert Office files, HTML and EPUB to Markdown. This needs [uv](https://docs.astral.sh/uv/); without it the step is skipped with a warning and the rest of the install still runs. An existing MarkItDown install is left as is (upgrade with `uv tool upgrade markitdown`). On an install whose `settings.json` predates this, add `"Bash(markitdown *)"` to `permissions.allow` by hand (or via `/permissions`): the sync only merges hooks.
+`install.sh` also creates `~/.claude/toolkit.yaml`, the source list for `/sync-toolkit`, but only when it is missing; a re-run never updates it. Check that its `public` source points at this repo, and fix the `repo:` line by hand if it names an older location:
+
+```yaml
+    repo: https://github.com/ImperialAutomation/claude-code-toolkit.git
+```
+
+Finally, it installs the [MarkItDown](https://github.com/microsoft/markitdown) CLI (`uv tool install 'markitdown[all]'`), which agents use to convert Office files, HTML and EPUB to Markdown. This needs [uv](https://docs.astral.sh/uv/); without it the step is skipped with a warning and the rest of the install still runs. An existing MarkItDown install is left as is (upgrade with `uv tool upgrade markitdown`). On an install whose `settings.json` predates this, add `"Bash(markitdown *)"` to `permissions.allow` by hand (or via `/permissions`): the sync only merges hooks.
 
 This repo is public, so it also ships a [pre-commit](https://pre-commit.com/) hook that scans staged changes for secrets with [gitleaks](https://github.com/gitleaks/gitleaks) before every commit. Install it once per clone:
 
