@@ -4,6 +4,9 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Set when the settings step fails. The remaining steps are independent of it,
 # so they still run; the exit status at the end reports the failure.
 SETTINGS_FAILED=0
+# Same for the MarkItDown step.
+MARKITDOWN_FAILED=0
+MARKITDOWN_SPEC='markitdown[all]'
 
 # Create ~/.claude if it doesn't exist
 mkdir -p ~/.claude
@@ -102,7 +105,21 @@ fi
 # Create knowledge directory (user-owned, not symlinked — for lessons learned, reference docs, etc.)
 mkdir -p ~/.claude/knowledge
 
+# Install the MarkItDown CLI (file-to-Markdown converter, see "Available
+# Utilities" in claude-md/global.md). uv skips an existing install; upgrade it
+# with `uv tool upgrade markitdown`. Optional: without uv this only warns.
+if command -v uv >/dev/null 2>&1; then
+    uv tool install "$MARKITDOWN_SPEC" || MARKITDOWN_FAILED=1
+else
+    echo "warning: uv not found, skipping MarkItDown. Install uv, then run: uv tool install '$MARKITDOWN_SPEC'" >&2
+fi
+
 if [ "$SETTINGS_FAILED" -ne 0 ]; then
     echo "install.sh: the settings step failed, see the error above." >&2
+fi
+if [ "$MARKITDOWN_FAILED" -ne 0 ]; then
+    echo "install.sh: the MarkItDown step failed, see the error above." >&2
+fi
+if [ "$SETTINGS_FAILED" -ne 0 ] || [ "$MARKITDOWN_FAILED" -ne 0 ]; then
     exit 1
 fi

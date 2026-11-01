@@ -6,6 +6,7 @@
 #
 # install.sh writes under ~, so every run gets a throwaway HOME. The symlinks it
 # creates there point at this checkout and are removed with the directory.
+# A stub uv shadows the real one, so no run downloads MarkItDown.
 
 set -uo pipefail
 
@@ -37,9 +38,25 @@ status_of() { # exit status -> zero/nonzero
     [[ "$1" -eq 0 ]] && echo zero || echo nonzero
 }
 
-install_into() { # home -> install.sh output (stdout+stderr)
+# Stub uv: logs its arguments to $UV_LOG, exits with $UV_STUB_RC (default 0).
+STUB_BIN="$T/stub-bin"
+mkdir -p "$STUB_BIN"
+cat > "$STUB_BIN/uv" << 'EOF'
+#!/bin/bash
+echo "$*" >> "$UV_LOG"
+exit "${UV_STUB_RC:-0}"
+EOF
+chmod +x "$STUB_BIN/uv"
+UV_LOG="$T/uv.log"
+STUB_PATH="$STUB_BIN:$PATH"
+
+# PATH without any directory that holds a uv, for the "uv missing" case.
+NO_UV_PATH=$(IFS=:; for d in $PATH; do [[ -x "$d/uv" ]] || printf '%s:' "$d"; done)
+NO_UV_PATH=${NO_UV_PATH%:}
+
+install_into() { # home [path] -> install.sh output (stdout+stderr)
     mkdir -p "$1"
-    env HOME="$1" bash "$INSTALL" 2>&1
+    env HOME="$1" PATH="${2:-$STUB_PATH}" UV_LOG="$UV_LOG" bash "$INSTALL" 2>&1
 }
 
 echo "== 1. first install writes the loaded template =="
@@ -97,13 +114,38 @@ cp -r "$REPO_DIR/bin" "$R4/bin"
 echo '{ not json' > "$R4/claude-md/settings-global.jsonc"
 H4="$T/broken-template"
 mkdir -p "$H4"
-out=$(env HOME="$H4" bash "$R4/install.sh" 2>&1); rc=$?
+out=$(env HOME="$H4" PATH="$STUB_PATH" UV_LOG="$UV_LOG" bash "$R4/install.sh" 2>&1); rc=$?
 check "exits non-zero" "nonzero" "$(status_of $rc)"
 check "no settings.json written" "no" "$([[ -e "$H4/.claude/settings.json" ]] && echo yes || echo no)"
 # Whatever the temp file is called: the only regular file left is toolkit.yaml.
 check "no temp file left in ~/.claude" "0" \
     "$(find "$H4/.claude" -maxdepth 1 -type f ! -name toolkit.yaml | grep -c .)"
 check "no install reported" "no" "$(contains "$out" "Installed: ~/.claude/settings.json")"
+
+echo "== 5. MarkItDown is installed as a uv tool =="
+H5="$T/markitdown"
+rm -f "$UV_LOG"
+out=$(install_into "$H5"); rc=$?
+check "exits 0" "zero" "$(status_of $rc)"
+check "uv asked to install markitdown with all extras" "tool install markitdown[all]" \
+    "$(cat "$UV_LOG" 2>/dev/null)"
+
+echo "== 6. without uv the MarkItDown step warns and the install succeeds =="
+H6="$T/no-uv"
+check "precondition: no uv on the stripped PATH" "no" \
+    "$(env PATH="$NO_UV_PATH" bash -c 'command -v uv' >/dev/null && echo yes || echo no)"
+out=$(install_into "$H6" "$NO_UV_PATH"); rc=$?
+check "exits 0" "zero" "$(status_of $rc)"
+check "warns that uv is missing" "yes" "$(contains "$out" "uv not found")"
+check "settings.json still installed" "yes" "$([[ -f "$H6/.claude/settings.json" ]] && echo yes || echo no)"
+
+echo "== 7. a failing uv install fails the install, after the remaining steps =="
+H7="$T/uv-fails"
+out=$(UV_STUB_RC=1 install_into "$H7"); rc=$?
+check "exits non-zero" "nonzero" "$(status_of $rc)"
+check "reports the failed MarkItDown step" "yes" "$(contains "$out" "the MarkItDown step failed")"
+check "toolkit.yaml still created" "yes" "$([[ -f "$H7/.claude/toolkit.yaml" ]] && echo yes || echo no)"
+check "knowledge/ still created" "yes" "$([[ -d "$H7/.claude/knowledge" ]] && echo yes || echo no)"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
