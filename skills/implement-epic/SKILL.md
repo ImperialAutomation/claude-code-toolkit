@@ -199,7 +199,7 @@ git -C <worktree> checkout -b issue-<N>-<slug>
 ```
 
 If `<worktree>` was resolved via `--issue`, or created by `--create`, it is
-already on that branch — confirm with `git -C <worktree> branch --show-current`
+already on that branch: confirm with `git -C <worktree> branch --show-current`
 first.
 
 Store the feature branch name as `feature_branch`.

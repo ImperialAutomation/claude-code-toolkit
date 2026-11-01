@@ -140,7 +140,7 @@ STOP HERE and ask for confirmation before proceeding to implementation.
 1. Create and checkout branch in the target tree:
    `git -C <worktree> checkout -b issue-<N>-<slug>`
    If `<worktree>` was resolved via `--issue`, or created by `--create`, it is
-   already on that branch — check with `git -C <worktree> branch --show-current`
+   already on that branch: check with `git -C <worktree> branch --show-current`
    before creating it.
 2. Before writing new code, verify your assumptions:
    * If using model attributes, confirm they exist: `grep "attribute_name" models.py`
