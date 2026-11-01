@@ -56,6 +56,9 @@ check "__HOME__ expanded to the install's HOME" "yes" \
 # The repo moved; the old URL only works while GitHub keeps redirecting it.
 check "toolkit.yaml points at the current repo" "yes" \
     "$(contains "$(cat "$H1/.claude/toolkit.yaml")" "repo: https://github.com/ImperialAutomation/claude-code-toolkit.git")"
+# A concrete private repo name in the example reads as one that exists.
+check "private source example is a placeholder" "yes" \
+    "$(contains "$(cat "$H1/.claude/toolkit.yaml")" "#   repo: git@github.com:<org>/<private-repo>.git")"
 
 echo "== 2. a re-run brings a missing template hook into the existing file =="
 FOREIGN="~/.claude/bin/hook-block-foreign-worktree-git.sh"

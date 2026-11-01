@@ -83,8 +83,8 @@ sources:
       claude-md: claude-md/global.md
 
   # Uncomment for private skills:
-  # - name: imperial
-  #   repo: git@github.com:imperial-automation/claude-toolkit-private.git
+  # - name: private
+  #   repo: git@github.com:<org>/<private-repo>.git
   #   branch: main
   #   install:
   #     skills: skills/
