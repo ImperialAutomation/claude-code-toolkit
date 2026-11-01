@@ -50,9 +50,21 @@ chmod +x "$STUB_BIN/uv"
 UV_LOG="$T/uv.log"
 STUB_PATH="$STUB_BIN:$PATH"
 
-# PATH without any directory that holds a uv, for the "uv missing" case.
-NO_UV_PATH=$(IFS=:; for d in $PATH; do [[ -x "$d/uv" ]] || printf '%s:' "$d"; done)
-NO_UV_PATH=${NO_UV_PATH%:}
+# PATH without uv, for the "uv missing" case. A directory that holds a uv is
+# replaced by a copy of symlinks to everything else in it, so a uv installed
+# next to bash and python3 (e.g. /usr/bin from a distro package) does not take
+# them out of PATH too.
+NO_UV_PATH=""
+n=0
+IFS=: read -ra path_dirs <<< "$PATH"
+for d in "${path_dirs[@]}"; do
+    if [[ -x "$d/uv" ]]; then
+        n=$((n+1)); farm="$T/no-uv-$n"; mkdir -p "$farm"
+        for f in "$d"/*; do [[ "${f##*/}" == uv ]] || ln -s "$f" "$farm/"; done
+        d="$farm"
+    fi
+    NO_UV_PATH+="${NO_UV_PATH:+:}$d"
+done
 
 install_into() { # home [path] -> install.sh output (stdout+stderr)
     mkdir -p "$1"
@@ -133,7 +145,9 @@ check "uv asked to install markitdown with all extras" "tool install markitdown[
 echo "== 6. without uv the MarkItDown step warns and the install succeeds =="
 H6="$T/no-uv"
 check "precondition: no uv on the stripped PATH" "no" \
-    "$(env PATH="$NO_UV_PATH" bash -c 'command -v uv' >/dev/null && echo yes || echo no)"
+    "$(env PATH="$NO_UV_PATH" "$BASH" -c 'command -v uv' >/dev/null && echo yes || echo no)"
+check "precondition: bash and python3 still on the stripped PATH" "yes" \
+    "$(env PATH="$NO_UV_PATH" "$BASH" -c 'command -v bash && command -v python3' >/dev/null && echo yes || echo no)"
 out=$(install_into "$H6" "$NO_UV_PATH"); rc=$?
 check "exits 0" "zero" "$(status_of $rc)"
 check "warns that uv is missing" "yes" "$(contains "$out" "uv not found")"
