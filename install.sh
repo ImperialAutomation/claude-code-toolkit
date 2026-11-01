@@ -75,7 +75,7 @@ if [ ! -f ~/.claude/toolkit.yaml ]; then
 # Run /sync-toolkit pull to update from source repos.
 sources:
   - name: public
-    repo: https://github.com/JanKeijzer/claude-code-toolkit.git
+    repo: https://github.com/ImperialAutomation/claude-code-toolkit.git
     branch: main
     install:
       skills: skills/

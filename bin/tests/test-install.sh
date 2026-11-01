@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tests for install.sh's handling of ~/.claude/settings.json.
+# Tests for install.sh's handling of ~/.claude/settings.json and toolkit.yaml.
 #
 # Usage:
 #   bin/tests/test-install.sh
@@ -53,6 +53,9 @@ check "settings.json is the loaded template, byte for byte" "same" \
     "$(cmp -s "$T/expected.json" "$H1/.claude/settings.json" && echo same || echo differs)"
 check "__HOME__ expanded to the install's HOME" "yes" \
     "$(contains "$(cat "$H1/.claude/settings.json")" "\"$H1/.claude/playwright-output\"")"
+# The repo moved; the old URL only works while GitHub keeps redirecting it.
+check "toolkit.yaml points at the current repo" "yes" \
+    "$(contains "$(cat "$H1/.claude/toolkit.yaml")" "repo: https://github.com/ImperialAutomation/claude-code-toolkit.git")"
 
 echo "== 2. a re-run brings a missing template hook into the existing file =="
 FOREIGN="~/.claude/bin/hook-block-foreign-worktree-git.sh"
