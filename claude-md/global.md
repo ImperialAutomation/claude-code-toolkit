@@ -118,6 +118,10 @@ Werk aan een issue → branchnaam VERPLICHT `issue-<nummer>-<slug>`, waar `<slug
   - `secret-scan.sh` — scan codebase for hardcoded secrets, API keys, tokens
   - `security-headers-check.sh <url>` — check HTTP security headers (CSP, HSTS, etc.)
   - `owasp-zap-scan.sh <url>` — OWASP ZAP baseline scan via Docker (requires running target)
+- **MarkItDown** (`markitdown`, installed via `uv tool`): convert Office files
+  (docx/pptx/xlsx), HTML, EPUB and similar to Markdown. `markitdown <file> -o <out>.md`.
+  Use for batch conversion or large documents; for a single PDF or image the
+  Read tool suffices. Write output to the scratchpad or `/tmp`, not the project tree.
 
 ## Claude Code Workarounds
 
