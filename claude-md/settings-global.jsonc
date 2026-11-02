@@ -36,6 +36,10 @@
       "Bash(sort *)",
       "Bash(echo *)",
       "Bash(printf *)",
+      // jq only reads JSON. The rtk form is listed too: the RTK hook rewrites
+      // jq to `rtk jq` without approving it, and `rtk` is not read-only.
+      "Bash(jq *)",
+      "Bash(rtk jq *)",
 
       // ── File management ───────────────────────────────────────
       // Creating directories and copying/moving files. Needed for
