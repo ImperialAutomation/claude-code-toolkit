@@ -75,6 +75,10 @@
       // given file or URL and writes only to its -o path.
       "Bash(markitdown *)",
 
+      // ── Linting ───────────────────────────────────────────────
+      // ShellCheck only reads the scripts it is given and reports.
+      "Bash(shellcheck *)",
+
       // ── Toolkit ───────────────────────────────────────────────
       // Helper scripts and hooks from the toolkit's bin/ directory.
       "Bash(~/.claude/bin/*)",
