@@ -555,7 +555,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 
 | Skill | Syntax | Description |
 |-------|--------|-------------|
-| `/refine` | `/refine <issue>` | Refine a GitHub issue through interactive Q&A to sharpen scope and criteria |
+| `/refine` | `/refine <issue> [auto]` | Refine a GitHub issue through interactive Q&A to sharpen scope and criteria |
 | `/decompose` | `/decompose <issue>` | Break down a large issue into sub-issues with a tracking PR |
 | `/extend` | `/extend [issue]` or `/extend add #issue [to #parent]` | Add more sub-issues or link existing issues to a tracking PR |
 | `/implement` | `/implement <issue>` | Implement a GitHub issue with automated PR creation |
@@ -584,7 +584,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 
 | Skill | Syntax | When to Use |
 |-------|--------|-------------|
-| `/refine` | `/refine <issue>` | Sharpen scope & acceptance criteria (run on parent AND each sub-issue) |
+| `/refine` | `/refine <issue> [auto]` | Sharpen scope & acceptance criteria (run on parent AND each sub-issue) |
 | `/decompose` | `/decompose <issue>` | Start: break down large issue |
 | `/implement-epic` | `/implement-epic <parent-issue>` | Auto-implement all sub-issues |
 | `/extend` | `/extend [issue]` or `/extend add #issue` | Later: add more sub-issues or link existing |
@@ -682,14 +682,18 @@ Configuration lives in `~/.claude/toolkit.yaml`. Add private repos there for pro
 **When:** You have a rough issue that needs sharper scope and acceptance criteria. Use on the parent issue before `/decompose`, then on each sub-issue after. Every refine pass makes the issue more concrete and catches gaps early.
 
 **What it does:**
-1. Reads the existing issue and explores the codebase for context
-2. Asks focused questions in rounds of 2-4 to clarify scope, criteria, and dependencies
-3. Proposes an updated issue body with clear structure
-4. Updates the issue after confirmation
+1. Reads the existing issue, detects its sub-issues (native GitHub sub-issues and `- [ ] #N` task-list items) and explores the codebase for context
+2. Asks focused questions one at a time, each with options, trade-offs and a recommendation
+3. Records every decision in a `## Decisions` section of the issue: options, recommendation, choice and whether a human made it. Entries are append-only; a changed decision is marked `superseded by D<m>`, not overwritten
+4. Proposes an updated issue body with clear structure
+5. Updates the issue after confirmation, then carries the decisions into each affected sub-issue's scope, acceptance criteria and `## Decisions` section (each change shown first)
+
+With `auto`, the agent adopts its own recommendation for every decision, writes the parent and affected sub-issues without stopping, and ends with a summary of the decisions and the edited issues.
 
 **Syntax:**
 ```bash
 /refine 42
+/refine 42 auto
 ```
 
 **Example output:**
