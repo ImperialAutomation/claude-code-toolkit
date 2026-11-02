@@ -21,9 +21,10 @@
 #
 # Configuration (environment variables):
 #   CHECKLIST_REPO_MATCH   Case-insensitive extended regex matched against the
-#                          `--repo owner/name` argument. Required.
+#                          `--repo owner/name` (or `-R owner/name`) argument.
+#                          Required.
 #   CHECKLIST_PATH_MATCH   Glob matched against $PWD, used when the command has
-#                          no --repo. Optional; no PWD fallback if unset.
+#                          no --repo/-R. Optional; no PWD fallback if unset.
 #   CHECKLIST_CMD_MATCH    Extended regex selecting the commands to inspect.
 #                          Default: bare `gh pr create|edit`, anchored to
 #                          COMMAND POSITION — start of string or just after a
@@ -90,9 +91,19 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 # Only the PR-opening commands this project uses (see CHECKLIST_CMD_MATCH).
 echo "$COMMAND" | grep -qE "$CMD_MATCH" || exit 0
 
-# --repo wins when present, otherwise fall back to the working directory.
-if echo "$COMMAND" | grep -qE -- '--repo[= ]'; then
-    echo "$COMMAND" | grep -qiE -- "--repo[= ]+$REPO_MATCH" || exit 0
+# The target repo flag in every spelling gh accepts: `--repo x`, `--repo=x`,
+# `-R x`, `-R=x` and `-Rx`. `-R` must start a word, or it would also match
+# inside an unrelated argument.
+REPO_FLAG='(--repo[= ]+|(^|\s)-R[= ]*)'
+
+# Look for it only from the PR call onward: `-R` is a common flag of other
+# commands (`cp -R`, `grep -R`), and one chained before the PR call is not its
+# target repo. `|| true` for the same `set -e` reason as BODY_FILE below.
+PR_ARGS=$(echo "$COMMAND" | grep -oE -- "${CMD_MATCH}.*" | head -1 || true)
+
+# The repo flag wins when present, otherwise fall back to the working directory.
+if echo "$PR_ARGS" | grep -qE -- "${REPO_FLAG}[^ ]"; then
+    echo "$PR_ARGS" | grep -qiE -- "${REPO_FLAG}$REPO_MATCH" || exit 0
 else
     [ -z "$PATH_MATCH" ] && exit 0
     # shellcheck disable=SC2254  # glob match is intentional
