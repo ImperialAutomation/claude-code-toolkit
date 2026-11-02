@@ -143,6 +143,9 @@
   // block-foreign-worktree-git: blocks git checkout/restore/reset/clean/stash
   //   aimed via -C at a sibling worktree of the same repo, where it would
   //   silently discard another session's uncommitted work.
+  // block-toolkit-live-checkout: blocks git checkout/switch that takes the
+  //   toolkit checkout ~/.claude/bin points into off its base branch, where
+  //   every commit would be live in all sessions before review.
   "hooks": {
     "PreToolUse": [
       {
@@ -159,6 +162,10 @@
           {
             "type": "command",
             "command": "~/.claude/bin/hook-block-foreign-worktree-git.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-block-toolkit-live-checkout.sh"
           }
         ]
       }

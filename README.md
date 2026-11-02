@@ -31,6 +31,8 @@ This creates five symlinks and copies one file:
 
 The settings file is copied (not symlinked) because Claude Code writes to it when you approve permissions during a session. Restart Claude Code after installation.
 
+Because of those symlinks, the branch this checkout is on is live in every session. Build toolkit changes in a linked worktree, never here: see [CLAUDE.md](CLAUDE.md).
+
 Running `install.sh` again never overwrites an existing `~/.claude/settings.json`. It does run `settings-sync-hooks.sh`, which adds hooks the template gained since your first install (see [Global Settings](#global-settings-claude-mdsettings-globaljsonc)).
 
 `install.sh` also creates `~/.claude/toolkit.yaml`, the source list for `/sync-toolkit`, but only when it is missing; a re-run never updates it. Check that its `public` source points at this repo, and fix the `repo:` line by hand if it names an older location:
@@ -163,7 +165,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `git-find-base-branch` | `git-find-base-branch [--repo DIR \| repo-dir]` | Detect the base branch of the current branch, or of the given worktree |
-| `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches |
+| `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [--create SLUG] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches. `--create` never answers with the live toolkit checkout: it creates or reuses the sibling `../<repo>-<N>` instead, and is a no-op in every other repo ([why](CLAUDE.md)) |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, fast-forward it to its upstream, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
@@ -341,6 +343,7 @@ not.
 | `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare (`<wrapper> --help` alone runs nothing and is approved) |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
+| `hook-block-toolkit-live-checkout.sh` | PreToolUse hook in settings.json | Block `git checkout`/`git switch` that takes the live toolkit checkout (the one `~/.claude/bin` points into) off its base branch; the message names the worktree route ([why](CLAUDE.md)) |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
 | `hook-post-prune-branch-config.sh` | PostToolUse hook in settings.json | After a branch deletion, remove `[branch "<name>"]` config sections whose branch no longer exists. A sandboxed `git branch -d` cannot write `.git/config` and leaves them behind; the hook runs outside the sandbox and touches nothing else |
 
@@ -402,6 +405,9 @@ claude-code-toolkit/
 │   ├── test-hook-block-destructive.sh ← standalone tests for the above
 │   ├── hook-block-foreign-worktree-git.sh ← PreToolUse hook: block cross-worktree git destruction
 │   ├── test-hook-block-foreign-worktree-git.sh ← standalone tests for the above
+│   ├── hook-block-toolkit-live-checkout.sh ← PreToolUse hook: keep the live toolkit checkout on main
+│   ├── test-hook-block-toolkit-live-checkout.sh ← standalone tests for the above
+│   ├── lib/live-checkout.sh       ← which tree ~/.claude/bin makes live (shared by the two above)
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 │   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
 │   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
@@ -444,6 +450,7 @@ claude-code-toolkit/
 │   ├── settings-template.jsonc ← template for project-specific settings
 │   └── procedures/            ← shared procedure snippets (added through a toolkit issue)
 ├── install.sh                 ← creates symlinks + copies settings
+├── CLAUDE.md                  ← working on this repo: build in a worktree, not the live checkout
 └── README.md
 ```
 
@@ -473,7 +480,7 @@ Because it is a copy, later changes to the template do not reach it by themselve
 
 ### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
 
-The global settings include three `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
+The global settings include four `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, leading `VAR=value` env prefixes (except variables that make a command load or run code, such as `PATH`, `PAGER`, `PYTHONPATH` and the `LD_*`/`GIT_*`/`npm_config_*` families: those are never stripped, so the command prompts), and a model-typed `rtk` or `rtk proxy` prefix (so `rtk grep ...` is judged as `grep ...`), then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
@@ -493,6 +500,8 @@ The global settings include three `PreToolUse` hooks that run **in all permissio
    Destructive SQL is checked as a group rather than as a list of substrings, so the statements that drop a table, a database or a schema, the role-level drop, the truncate and an unqualified `DELETE` all get the same answer. That consistency is the point: when only the obvious phrasing was refused, the equivalent one became the workaround. A `DELETE` with a `WHERE` clause stays allowed, and a statement that merely appears as an argument to a read-only command (searching a file for one, or naming one in a commit message) is not treated as running it.
 
 3. **`hook-block-foreign-worktree-git.sh`** — Blocks a destructive git command (`checkout --`, `checkout -f`, `restore`, `reset`, `clean`, `stash`) that targets a *different* worktree via `-C`/`--git-dir`. Linked worktrees share one repository but hold independent uncommitted work, so restoring a sibling tree to HEAD silently destroys whatever another session was editing there. Only cross-worktree operations are blocked: inside your own tree these commands stay untouched, and unrelated checkouts (a different `.git`) are left alone. Read-only `git stash list`/`show` pass through. Set `WORKTREE_GUARD_HINT` from a small project wrapper to append a repo-specific alternative (e.g. an isolated test runner) to the block message.
+
+4. **`hook-block-toolkit-live-checkout.sh`**: Blocks `git checkout`/`git switch` that would take the live toolkit checkout off its base branch: new branches (`-b`/`-B`/`--orphan`, `-c`/`-C`), existing branches, detached commits and `switch -`. The target is the hook input's `cwd`, followed through an earlier `cd` in the chain, an `env -C` prefix and git's own `-C`; stuck and clustered short flags (`-bx`, `-qb x`) count too. Switching back to the base branch, path checkouts, linked worktrees and other repositories pass; with `~/.claude/bin` not a symlink the hook does nothing. The rule it enforces and why: [CLAUDE.md](CLAUDE.md).
 
 To use bypass-permissions mode with these safety nets:
 
