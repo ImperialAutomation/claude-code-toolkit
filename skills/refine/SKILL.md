@@ -106,7 +106,7 @@ Present the complete refined issue body with:
 
 Highlight what changed compared to the original.
 
-**Sub-issues.** Decide per detected sub-issue whether a decision applies to it, judged by its scope. Untouched sub-issues stay untouched. When in doubt, include it in the list below rather than dropping it silently. List the affected sub-issues and, per sub-issue, which decision IDs apply. Their proposed bodies are produced in Phase 4 and shown before they are written.
+**Sub-issues.** Decide per detected sub-issue whether a decision applies to it, judged by its scope (read its body; a task-list item has no body yet, so fetch it with `gh-save.sh` as in Phase 1). Untouched sub-issues stay untouched. When in doubt, include it in the list below rather than dropping it silently. List the affected sub-issues and, per sub-issue, which decision IDs apply. Their proposed bodies are produced in Phase 4 and shown before they are written.
 
 **Parent body when decisions move to sub-issues.** The full entries go into each sub-issue they apply to. The parent keeps entries for decisions that apply to the parent itself; for decisions that only apply to sub-issues, add a short summary (`D<n>: <question> → <choice>, see #M`) only when that adds value.
 
@@ -114,7 +114,7 @@ STOP HERE and ask for confirmation before updating. Auto mode does not stop.
 
 ## Phase 4: Update Issues
 
-After approval:
+After approval (in auto mode, directly):
 1. Write updated body to `/tmp/<project>-issue-body-<N>.md` using the Write tool
 2. Update: `gh issue edit <N> --body-file /tmp/<project>-issue-body-<N>.md`
 3. Update title if needed: `gh issue edit <N> --title "..."`
