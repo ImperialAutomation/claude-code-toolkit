@@ -9,7 +9,8 @@
 # an absolute path collects the right file but, resolved against $PWD, would run
 # it on another tree's interpreter and dependency set — with no signal at all.
 # Without a path argument there is nothing to derive a root from and $PWD decides,
-# exactly as before.
+# exactly as before. When the derived root differs from $PWD's the script says
+# so, and test paths from two different roots are refused.
 #
 # Usage: project-test.sh [pytest-args...]
 # Example: project-test.sh tests/unit/test_api/ -v --tb=short

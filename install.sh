@@ -1,6 +1,13 @@
 #!/bin/bash
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Set when the settings step fails. The remaining steps are independent of it,
+# so they still run; the exit status at the end reports the failure.
+SETTINGS_FAILED=0
+# Same for the MarkItDown step.
+MARKITDOWN_FAILED=0
+MARKITDOWN_SPEC='markitdown[all]'
+
 # Create ~/.claude if it doesn't exist
 mkdir -p ~/.claude
 
@@ -46,29 +53,22 @@ fi
 
 # Copy global settings (not symlink — Claude Code writes to this file)
 if [ -e ~/.claude/settings.json ]; then
-    echo "~/.claude/settings.json already exists. Remove it first if you want to reinstall."
+    # Not overwritten (it holds your own permissions and settings), but hooks
+    # added to the template since the first install are merged in.
+    "$REPO_DIR/bin/settings-sync-hooks.sh" || SETTINGS_FAILED=1
 else
-    # Strip JSONC comments to produce valid JSON, and expand __HOME__ into the
-    # real home directory. Values under "env" reach their subprocess as literal
-    # strings — nothing expands `~` or `${HOME}` for them — so the placeholder
-    # has to be resolved here, at install time, on the machine that has a $HOME.
-    sed 's|//.*||' "$REPO_DIR/claude-md/settings-global.jsonc" | python3 -c "
-import sys, json, os
-config = json.load(sys.stdin)
-
-def expand(value):
-    if isinstance(value, str):
-        return value.replace('__HOME__', os.path.expanduser('~'))
-    if isinstance(value, list):
-        return [expand(item) for item in value]
-    if isinstance(value, dict):
-        return {key: expand(item) for key, item in value.items()}
-    return value
-
-json.dump(expand(config), sys.stdout, indent=2)
-print()
-" > ~/.claude/settings.json
-    echo "Installed: ~/.claude/settings.json (copied from settings-global.jsonc)"
+    # Strips JSONC comments and expands __HOME__; see the helper for why.
+    # Written to a temp file in ~/.claude (same filesystem, so the mv is
+    # atomic): a failed load must not leave a settings.json behind, or the
+    # next run treats it as an existing file.
+    if TMP_SETTINGS=$(mktemp ~/.claude/settings.json.XXXXXX) \
+        && python3 "$REPO_DIR/bin/lib/settings_template.py" "$REPO_DIR/claude-md/settings-global.jsonc" > "$TMP_SETTINGS" \
+        && mv "$TMP_SETTINGS" ~/.claude/settings.json; then
+        echo "Installed: ~/.claude/settings.json (copied from settings-global.jsonc)"
+    else
+        rm -f "$TMP_SETTINGS"
+        SETTINGS_FAILED=1
+    fi
 fi
 
 # Create toolkit.yaml if it does not exist
@@ -78,7 +78,7 @@ if [ ! -f ~/.claude/toolkit.yaml ]; then
 # Run /sync-toolkit pull to update from source repos.
 sources:
   - name: public
-    repo: https://github.com/JanKeijzer/claude-code-toolkit.git
+    repo: https://github.com/ImperialAutomation/claude-code-toolkit.git
     branch: main
     install:
       skills: skills/
@@ -86,8 +86,8 @@ sources:
       claude-md: claude-md/global.md
 
   # Uncomment for private skills:
-  # - name: imperial
-  #   repo: git@github.com:imperial-automation/claude-toolkit-private.git
+  # - name: private
+  #   repo: git@github.com:<org>/<private-repo>.git
   #   branch: main
   #   install:
   #     skills: skills/
@@ -104,3 +104,22 @@ fi
 
 # Create knowledge directory (user-owned, not symlinked — for lessons learned, reference docs, etc.)
 mkdir -p ~/.claude/knowledge
+
+# Install the MarkItDown CLI (file-to-Markdown converter, see "Available
+# Utilities" in claude-md/global.md). uv skips an existing install; upgrade it
+# with `uv tool upgrade markitdown`. Optional: without uv this only warns.
+if command -v uv >/dev/null 2>&1; then
+    uv tool install "$MARKITDOWN_SPEC" || MARKITDOWN_FAILED=1
+else
+    echo "warning: uv not found, skipping MarkItDown. Install uv, then run: uv tool install '$MARKITDOWN_SPEC'" >&2
+fi
+
+if [ "$SETTINGS_FAILED" -ne 0 ]; then
+    echo "install.sh: the settings step failed, see the error above." >&2
+fi
+if [ "$MARKITDOWN_FAILED" -ne 0 ]; then
+    echo "install.sh: the MarkItDown step failed, see the error above." >&2
+fi
+if [ "$SETTINGS_FAILED" -ne 0 ] || [ "$MARKITDOWN_FAILED" -ne 0 ]; then
+    exit 1
+fi

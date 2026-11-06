@@ -4,8 +4,15 @@
 // Claude Code writes to this file when you approve permissions per-session,
 // so it must be a real file, not a symlink.
 //
-// After modifying this template, re-run install.sh or manually copy:
-//   cp ~/Projects/claude-code-toolkit/claude-md/settings-global.jsonc ~/.claude/settings.json
+// An existing ~/.claude/settings.json is never overwritten. Hooks added here
+// after the first install reach it through ~/.claude/bin/settings-sync-hooks.sh
+// (also run by install.sh): it adds every hook entry missing there, keyed by
+// (event, matcher, command), and leaves all other keys and your own hooks alone.
+// Use --dry-run to see what it would add. Other changes to this template
+// (permissions, env) are not synced; merge those by hand.
+//
+// Do not put "//" inside a string value: comments are stripped per line, and
+// that would cut the string.
 {
   "permissions": {
     "allow": [
@@ -29,6 +36,10 @@
       "Bash(sort *)",
       "Bash(echo *)",
       "Bash(printf *)",
+      // jq only reads JSON. The rtk form is listed too: the RTK hook rewrites
+      // jq to `rtk jq` without approving it, and `rtk` is not read-only.
+      "Bash(jq *)",
+      "Bash(rtk jq *)",
 
       // ── File management ───────────────────────────────────────
       // Creating directories and copying/moving files. Needed for
@@ -62,6 +73,15 @@
       "Bash(uv *)",
       "Bash(*/uv *)",
       "Bash(source *)",
+
+      // ── Document conversion ───────────────────────────────────
+      // MarkItDown CLI, installed by install.sh via uv tool. Reads the
+      // given file or URL and writes only to its -o path.
+      "Bash(markitdown *)",
+
+      // ── Linting ───────────────────────────────────────────────
+      // ShellCheck only reads the scripts it is given and reports.
+      "Bash(shellcheck *)",
 
       // ── Toolkit ───────────────────────────────────────────────
       // Helper scripts and hooks from the toolkit's bin/ directory.
@@ -131,6 +151,9 @@
   // block-foreign-worktree-git: blocks git checkout/restore/reset/clean/stash
   //   aimed via -C at a sibling worktree of the same repo, where it would
   //   silently discard another session's uncommitted work.
+  // block-toolkit-live-checkout: blocks git checkout/switch that takes the
+  //   toolkit checkout ~/.claude/bin points into off its base branch, where
+  //   every commit would be live in all sessions before review.
   "hooks": {
     "PreToolUse": [
       {
@@ -147,6 +170,10 @@
           {
             "type": "command",
             "command": "~/.claude/bin/hook-block-foreign-worktree-git.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-block-toolkit-live-checkout.sh"
           }
         ]
       }

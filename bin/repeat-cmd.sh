@@ -33,6 +33,10 @@ usage() {
     exit 2
 }
 
+case "${1:-}" in
+    -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
+esac
+
 [[ $# -ge 2 ]] || usage
 [[ "$1" =~ ^[1-9][0-9]*$ ]] || { echo "count must be a positive integer: '$1'" >&2; usage; }
 

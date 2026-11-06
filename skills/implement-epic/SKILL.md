@@ -18,7 +18,8 @@ This skill runs autonomously — no confirmation stops between sub-issues.
 ## Worktree
 
 The whole epic runs in ONE worktree, written here as `<worktree>`. Resolve it in
-Phase 0, before anything else, and pass it to every sub-agent.
+Phase 0, right after reading the parent issue and before anything else, and pass
+it to every sub-agent.
 
 **Why this is explicit rather than assumed:** your working directory resets
 between every Bash call, and so do exported variables. Nothing carries the target
@@ -31,8 +32,12 @@ land on another session's branch with that session's staged files, exit 0.
 ### Resolving it
 
 ```bash
-~/.claude/bin/git-resolve-worktree.sh --issue $ARGUMENTS <hint-if-given>
+~/.claude/bin/git-resolve-worktree.sh --issue <N> --create <slug> <hint-if-given>
 ```
+
+`<N>` is the parent issue number, the first word of `$ARGUMENTS`. `<slug>` is the
+short kebab-case summary of its title that the feature branch will carry
+(`issue-<N>-<slug>`), which is why the parent issue is read before this call.
 
 The hint is the second word of `$ARGUMENTS`, if given. It may be the exact name
 of a worktree (an exact name always wins over a longer sibling, so `<repo>` means
@@ -46,8 +51,15 @@ the script then reports the current worktree, exactly as with no arguments at
 all. Single-worktree projects therefore never notice this skill has a worktree
 concept.
 
+`--create` matters in one repository only: the toolkit checkout that
+`~/.claude/bin` points into, whose branch is live in every session. When the
+answer would be that tree, the script answers with the sibling worktree
+`../<repo>-<N>` instead, creating it on `issue-<N>-<slug>` from `origin/<base>`
+or reusing it when it exists. Everywhere else `--create` changes nothing.
+
 One absolute path on stdout and exit 0, or nothing on stdout and exit non-zero.
-Non-zero means the user's own hint was wrong or ambiguous. **Then stop and show
+Non-zero means the user's own hint was wrong or ambiguous, or `--create` could
+not make the sibling; either way its stderr says which. **Then stop and show
 them its stderr** — it lists the candidates with their branches. Never pick one
 yourself; an autonomous run is exactly where an unnoticed wrong guess does the
 most damage before anyone looks.
@@ -122,21 +134,23 @@ The main session NEVER implements code itself. It only:
 
 ## Phase 0: Setup
 
-### Step 0: Resolve the worktree
+### Step 0: Read parent issue
+
+```bash
+~/.claude/bin/gh-save.sh /tmp/<project>-epic-<N>.json issue view <N> --json title,body,labels
+```
+
+Use the Read tool to read `/tmp/<project>-epic-<N>.json`. The filename is
+per-project because parallel worktrees mean parallel sessions, and a shared
+`/tmp` name is overwritten by whichever writes last. Pick the feature branch
+`<slug>` from its title. `gh` finds the repository from any of its worktrees, so
+this is safe before `<worktree>` is known.
+
+### Step 1: Resolve the worktree
 
 Resolve `<worktree>` as described in the Worktree section above and report it to
 the user. Everything below assumes it is settled — do it before reading any
 source file or creating any branch.
-
-### Step 1: Read parent issue
-
-```bash
-~/.claude/bin/gh-save.sh /tmp/<project>-epic-$ARGUMENTS.json issue view $ARGUMENTS --json title,body,labels
-```
-
-Use the Read tool to read `/tmp/<project>-epic-$ARGUMENTS.json`. The filename is
-per-project because parallel worktrees mean parallel sessions, and a shared
-`/tmp` name is overwritten by whichever writes last.
 
 ### Step 2: Parse sub-issues and implementation order
 
@@ -181,11 +195,12 @@ git -C <worktree> branch -a --list "*issue-$ARGUMENTS*"
 
 If the feature branch exists, check it out. Otherwise create it:
 ```bash
-git -C <worktree> checkout -b issue-$ARGUMENTS-<description>
+git -C <worktree> checkout -b issue-<N>-<slug>
 ```
 
-If `<worktree>` was resolved via `--issue` it is already on that branch — confirm
-with `git -C <worktree> branch --show-current` first.
+If `<worktree>` was resolved via `--issue`, or created by `--create`, it is
+already on that branch: confirm with `git -C <worktree> branch --show-current`
+first.
 
 Store the feature branch name as `feature_branch`.
 

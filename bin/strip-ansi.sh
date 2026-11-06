@@ -29,6 +29,9 @@
 #   1  input missing or unreadable, or <outfile> is the input (nothing written)
 #   2  usage error (nothing written)
 #
+# When you make the capture yourself, `cmd-save.sh --strip-ansi <outfile> <cmd>`
+# writes it clean from the start and this second step is not needed.
+#
 # Examples:
 #   strip-ansi.sh /tmp/shop-vitest-42.txt          # -> /tmp/shop-vitest-42.txt.clean
 #   strip-ansi.sh /tmp/shop-pytest-42.log /tmp/shop-pytest-42.txt
@@ -39,6 +42,10 @@ usage() {
     echo "usage: $(basename "$0") <file> [<outfile>]" >&2
     exit 2
 }
+
+case "${1:-}" in
+    -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
+esac
 
 [[ $# -ge 1 && $# -le 2 ]] || usage
 

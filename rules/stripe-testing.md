@@ -1,5 +1,5 @@
 ---
-paths: "**/*stripe*, **/*payment*, **/*billing*, **/*checkout*, **/*subscription*"
+paths: "**/*stripe*, **/stripe/**"
 ---
 
 # Stripe Testing

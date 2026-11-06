@@ -35,6 +35,11 @@
 #
 #   Names match exactly, no globbing. Detached HEAD is always allowed (rebase,
 #   bisect, cherry-pick sequences).
+#
+#   Commit the .claude/protected-branches file. Untracked, it exists only in the
+#   tree where it was created, so a linked worktree sees no config and the guard
+#   never fires there, which is exactly where the mistake happens most. The git
+#   config route has no such gap: worktrees share .git/config.
 
 set -euo pipefail
 

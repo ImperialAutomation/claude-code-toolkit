@@ -16,7 +16,7 @@ Rules keep the global CLAUDE.md lean by moving context-specific instructions out
 ## Installation
 
 ```bash
-git clone https://github.com/JanKeijzer/claude-code-toolkit.git ~/Projects/claude-code-toolkit
+git clone https://github.com/ImperialAutomation/claude-code-toolkit.git ~/Projects/claude-code-toolkit
 cd ~/Projects/claude-code-toolkit
 ./install.sh
 ```
@@ -30,6 +30,18 @@ This creates five symlinks and copies one file:
 - `~/.claude/settings.json` ← copied from `claude-md/settings-global.jsonc` (global permissions)
 
 The settings file is copied (not symlinked) because Claude Code writes to it when you approve permissions during a session. Restart Claude Code after installation.
+
+Because of those symlinks, the branch this checkout is on is live in every session. Build toolkit changes in a linked worktree, never here: see [CLAUDE.md](CLAUDE.md).
+
+Running `install.sh` again never overwrites an existing `~/.claude/settings.json`. It does run `settings-sync-hooks.sh`, which adds hooks the template gained since your first install (see [Global Settings](#global-settings-claude-mdsettings-globaljsonc)).
+
+`install.sh` also creates `~/.claude/toolkit.yaml`, the source list for `/sync-toolkit`, but only when it is missing; a re-run never updates it. Check that its `public` source points at this repo, and fix the `repo:` line by hand if it names an older location:
+
+```yaml
+    repo: https://github.com/ImperialAutomation/claude-code-toolkit.git
+```
+
+Finally, it installs the [MarkItDown](https://github.com/microsoft/markitdown) CLI (`uv tool install 'markitdown[all]'`), which agents use to convert Office files, HTML and EPUB to Markdown. This needs [uv](https://docs.astral.sh/uv/); without it the step is skipped with a warning and the rest of the install still runs. An existing MarkItDown install is left as is (upgrade with `uv tool upgrade markitdown`). On an install whose `settings.json` predates this, add `"Bash(markitdown *)"` to `permissions.allow` by hand (or via `/permissions`): the sync only merges hooks.
 
 This repo is public, so it also ships a [pre-commit](https://pre-commit.com/) hook that scans staged changes for secrets with [gitleaks](https://github.com/gitleaks/gitleaks) before every commit. Install it once per clone:
 
@@ -108,6 +120,8 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 **Why?** Claude Code permissions match on the **first word** of a Bash command. An inline loop like `for issue in 15 16 17; do gh issue view $issue ...; done` gets blocked because the first word is `for`, not `gh`. By wrapping batch operations in scripts, permissions can match on the script path (`~/.claude/bin/*`).
 
+Global CLAUDE.md names each wrapper in one line and leaves the details to the script: `cmd-save.sh`, `strip-ansi.sh`, `repeat-cmd.sh`, `http-status.sh`, `wait-for-pattern.sh`, `docker-scratch.sh`, `venv-run.sh` and `doc-budget-check.sh` answer `--help` with their header comment (usage, exit codes, rules of use). `bin/tests/test-script-help.sh` pins that the help still carries what CLAUDE.md no longer says.
+
 ### Issue & PR management
 
 | Script | Usage | Description |
@@ -151,7 +165,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `git-find-base-branch` | `git-find-base-branch [--repo DIR \| repo-dir]` | Detect the base branch of the current branch, or of the given worktree |
-| `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches |
+| `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [--create SLUG] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches. `--create` never answers with the live toolkit checkout: it creates or reuses the sibling `../<repo>-<N>` instead, and is a no-op in every other repo ([why](CLAUDE.md)) |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, fast-forward it to its upstream, delete merged feature branch |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
@@ -314,6 +328,7 @@ not.
 | `venv-run.sh` | `venv-run.sh [--repo <dir>] <cmd> [args...]` | Run any venv binary (python, alembic, ruff) with auto-detection, falling back to PATH. `--repo` picks the project root when it is not the current directory. The auto-approve hook approves it only when `<cmd>` is approvable on its own, and otherwise denies it with a hint to run `<cmd>` bare, so `pip` gets the same permission flow as it does bare |
 | `docker-scratch.sh` | `docker-scratch.sh dir\|worktree\|clean [--repo D] <purpose> [<ref>]` | Scratch location a Docker container can mount: `~/.cache/claude-scratch/<project>/<purpose>/`. `dir` creates and prints it, `worktree` checks a ref out there as a detached base checkout, `clean <purpose>\|--all` removes it (worktrees through git) without a prompt |
 | `sync-toolkit.sh` | `sync-toolkit.sh <pull\|status\|drift>` | Sync toolkit from git sources (used by `/sync-toolkit` skill) |
+| `settings-sync-hooks.sh` | `settings-sync-hooks.sh [--dry-run] [--settings PATH] [--template PATH]` | Add hooks from `settings-global.jsonc` that are missing in `~/.claude/settings.json`; backs up to a new `settings.json.<timestamp>.bak`; run by `install.sh` |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
 | `release.sh` | `release.sh [major\|minor\|patch]` | Create a GitHub release for a WordPress plugin |
@@ -325,9 +340,10 @@ not.
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
-| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare |
+| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare (`<wrapper> --help` alone runs nothing and is approved) |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
+| `hook-block-toolkit-live-checkout.sh` | PreToolUse hook in settings.json | Block `git checkout`/`git switch` that takes the live toolkit checkout (the one `~/.claude/bin` points into) off its base branch; the message names the worktree route ([why](CLAUDE.md)) |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
 | `hook-post-prune-branch-config.sh` | PostToolUse hook in settings.json | After a branch deletion, remove `[branch "<name>"]` config sections whose branch no longer exists. A sandboxed `git branch -d` cannot write `.git/config` and leaves them behind; the hook runs outside the sandbox and touches nothing else |
 
@@ -338,6 +354,7 @@ All scripts are already allowed in the global settings (`~/.claude/settings.json
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json] [--rewrite-prefix CMD]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Chain friction is attributed to the segment that defeats matching, not the first token. Hook denies (including `cd <dir> && <cmd>` chains) are reported separately and excluded from the estimate. Used by `/retro`'s Permission Friction phase |
+| `doc-budget-check.sh` | `doc-budget-check.sh [--warn SIZE] [--fail SIZE] [--repo DIR] <doc-root>...` | Per-file byte budget for markdown docs: lists files over the warn size (default 15K), exits 1 for any over the fail size (default 25K). Skips `archive/` dirs; deliberate exceptions go in `<repo>/.claude/doc-budget-exceptions`, and an exception that is back under budget is reported as stale. Used by `/retro` before and after writing; works as a pre-commit or CI step (see `--help`) |
 
 ## Repository Structure
 
@@ -377,6 +394,7 @@ claude-code-toolkit/
 │   ├── cmd-save.sh                ← save any command's output to file
 │   ├── strip-ansi.sh              ← copy a file without ANSI escape codes
 │   ├── sync-toolkit.sh            ← sync toolkit from configured git sources
+│   ├── settings-sync-hooks.sh     ← add missing template hooks to settings.json
 │   ├── json-find-key.sh           ← search for keys in nested JSON files
 │   ├── odt2txt.sh                 ← convert ODT to plain text via pandoc
 │   ├── release.sh                 ← create GitHub release for WordPress plugin
@@ -387,8 +405,12 @@ claude-code-toolkit/
 │   ├── test-hook-block-destructive.sh ← standalone tests for the above
 │   ├── hook-block-foreign-worktree-git.sh ← PreToolUse hook: block cross-worktree git destruction
 │   ├── test-hook-block-foreign-worktree-git.sh ← standalone tests for the above
+│   ├── hook-block-toolkit-live-checkout.sh ← PreToolUse hook: keep the live toolkit checkout on main
+│   ├── test-hook-block-toolkit-live-checkout.sh ← standalone tests for the above
+│   ├── lib/live-checkout.sh       ← which tree ~/.claude/bin makes live (shared by the two above)
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 │   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
+│   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
 │   └── test-permission-friction.py ← standalone tests for the above
 ├── skills/                    ← skill definitions (procedures)
@@ -428,6 +450,7 @@ claude-code-toolkit/
 │   ├── settings-template.jsonc ← template for project-specific settings
 │   └── procedures/            ← shared procedure snippets (added through a toolkit issue)
 ├── install.sh                 ← creates symlinks + copies settings
+├── CLAUDE.md                  ← working on this repo: build in a worktree, not the live checkout
 └── README.md
 ```
 
@@ -448,19 +471,27 @@ Copied to `~/.claude/settings.json` by install.sh. Pre-configures permissions so
 
 This is a copy (not symlink) because Claude Code writes to it when you approve permissions during a session.
 
+Because it is a copy, later changes to the template do not reach it by themselves. For hooks, `settings-sync-hooks.sh` (also run by `install.sh` when the file exists) closes that gap:
+
+- A hook entry counts as present when the live file has the same event, matcher and command anywhere, in whichever group. Your grouping may differ from the template's.
+- A missing entry is added to the first live group with the same event and matcher, or in a new group.
+- It only adds. Your own hooks, hooks the template has dropped, permissions, env and all other keys stay as they are. Permission or env changes in the template have to be merged by hand.
+- It writes only when something is missing. It first saves the original to a new `settings.json.<YYYYmmdd-HHMMSS>.bak` (an existing backup is never overwritten), then replaces the file atomically (2-space JSON, key order kept). `--dry-run` shows what it would add.
+
 ### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
 
-The global settings include three `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
+The global settings include four `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, leading `VAR=value` env prefixes (except variables that make a command load or run code, such as `PATH`, `PAGER`, `PYTHONPATH` and the `LD_*`/`GIT_*`/`npm_config_*` families: those are never stripped, so the command prompts), and a model-typed `rtk` or `rtk proxy` prefix (so `rtk grep ...` is judged as `grep ...`), then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
-   The same hook also **denies** three shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
+   The same hook also **denies** four shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
 
    | Denied | Use instead |
    |---|---|
    | `sed -n 'X,Yp' <file>` | the Read tool with offset/limit |
    | inline Python (`-c` or a heredoc) that opens a file for reading | Read, Grep, or Edit |
-   | `until <file-condition>; do sleep N; done` | `wait-for-pattern.sh <file> <extended-regex> [timeout] [poll]` |
+   | `until <file-condition>; do sleep N; done` | `wait-for-pattern.sh [--newer-than <epoch>] <file> <extended-regex> [timeout] [poll]` |
+   | `cd <dir> && <cmd>` | `git -C`, `npm --prefix`, or `env -C <dir> <cmd>` (approved when `<dir>` is inside `~/Projects` and `<cmd>` is approvable on its own) |
 
    Each deny is deliberately narrow, so that work with no wrapper to point at keeps falling through to a normal prompt rather than being blocked: a real `sed` stream edit, Python doing calculation or writing a file, and wait loops polling anything other than a file (an HTTP status, a container state, a command's exit status) are all left alone. `while` loops are not matched either: `while [ -f X ]` waits for a file to *disappear*, which `wait-for-pattern.sh` cannot express.
 
@@ -469,6 +500,8 @@ The global settings include three `PreToolUse` hooks that run **in all permissio
    Destructive SQL is checked as a group rather than as a list of substrings, so the statements that drop a table, a database or a schema, the role-level drop, the truncate and an unqualified `DELETE` all get the same answer. That consistency is the point: when only the obvious phrasing was refused, the equivalent one became the workaround. A `DELETE` with a `WHERE` clause stays allowed, and a statement that merely appears as an argument to a read-only command (searching a file for one, or naming one in a commit message) is not treated as running it.
 
 3. **`hook-block-foreign-worktree-git.sh`** — Blocks a destructive git command (`checkout --`, `checkout -f`, `restore`, `reset`, `clean`, `stash`) that targets a *different* worktree via `-C`/`--git-dir`. Linked worktrees share one repository but hold independent uncommitted work, so restoring a sibling tree to HEAD silently destroys whatever another session was editing there. Only cross-worktree operations are blocked: inside your own tree these commands stay untouched, and unrelated checkouts (a different `.git`) are left alone. Read-only `git stash list`/`show` pass through. Set `WORKTREE_GUARD_HINT` from a small project wrapper to append a repo-specific alternative (e.g. an isolated test runner) to the block message.
+
+4. **`hook-block-toolkit-live-checkout.sh`**: Blocks `git checkout`/`git switch` that would take the live toolkit checkout off its base branch: new branches (`-b`/`-B`/`--orphan`, `-c`/`-C`), existing branches, detached commits and `switch -`. The target is the hook input's `cwd`, followed through an earlier `cd` in the chain, an `env -C` prefix and git's own `-C`; stuck and clustered short flags (`-bx`, `-qb x`) count too. Switching back to the base branch, path checkouts, linked worktrees and other repositories pass; with `~/.claude/bin` not a symlink the hook does nothing. The rule it enforces and why: [CLAUDE.md](CLAUDE.md).
 
 To use bypass-permissions mode with these safety nets:
 
@@ -501,7 +534,7 @@ Rules provide contextual policies that load based on frontmatter configuration. 
 | `code-review.md` | Always | No performative agreement, verify before implementing, push back when feedback is wrong |
 | `testing.md` | Test files, fakes and mocks | Real behavior over mocks, fakes validate like the real API, 5 test scenarios per feature, realistic fixtures |
 | `documentation.md` | .md files | Current purpose over history, usage guidance, no changelogs |
-| `stripe-testing.md` | Payment/billing/webhook files | Never real cards, no raw PANs in code, assert on decline codes, prove webhook idempotency |
+| `stripe-testing.md` | Stripe-named files and `stripe/` dirs (generic payment/billing files load `payments.md` only) | Never real cards, no raw PANs in code, assert on decline codes, prove webhook idempotency |
 
 ### Project Template (`claude-md/project-template.md`)
 
@@ -522,7 +555,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 
 | Skill | Syntax | Description |
 |-------|--------|-------------|
-| `/refine` | `/refine <issue>` | Refine a GitHub issue through interactive Q&A to sharpen scope and criteria |
+| `/refine` | `/refine <issue> [auto]` | Refine a GitHub issue through interactive Q&A to sharpen scope and criteria |
 | `/decompose` | `/decompose <issue>` | Break down a large issue into sub-issues with a tracking PR |
 | `/extend` | `/extend [issue]` or `/extend add #issue [to #parent]` | Add more sub-issues or link existing issues to a tracking PR |
 | `/implement` | `/implement <issue>` | Implement a GitHub issue with automated PR creation |
@@ -551,7 +584,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 
 | Skill | Syntax | When to Use |
 |-------|--------|-------------|
-| `/refine` | `/refine <issue>` | Sharpen scope & acceptance criteria (run on parent AND each sub-issue) |
+| `/refine` | `/refine <issue> [auto]` | Sharpen scope & acceptance criteria (run on parent AND each sub-issue) |
 | `/decompose` | `/decompose <issue>` | Start: break down large issue |
 | `/implement-epic` | `/implement-epic <parent-issue>` | Auto-implement all sub-issues |
 | `/extend` | `/extend [issue]` or `/extend add #issue` | Later: add more sub-issues or link existing |
@@ -649,14 +682,18 @@ Configuration lives in `~/.claude/toolkit.yaml`. Add private repos there for pro
 **When:** You have a rough issue that needs sharper scope and acceptance criteria. Use on the parent issue before `/decompose`, then on each sub-issue after. Every refine pass makes the issue more concrete and catches gaps early.
 
 **What it does:**
-1. Reads the existing issue and explores the codebase for context
-2. Asks focused questions in rounds of 2-4 to clarify scope, criteria, and dependencies
-3. Proposes an updated issue body with clear structure
-4. Updates the issue after confirmation
+1. Reads the existing issue, detects its sub-issues (native GitHub sub-issues and `- [ ] #N` task-list items) and explores the codebase for context
+2. Asks focused questions one at a time, each with options, trade-offs and a recommendation
+3. Records every decision in a `## Decisions` section of the issue: options, recommendation, choice and whether a human made it. Entries are append-only; a changed decision is marked `superseded by D<m>`, not overwritten
+4. Proposes an updated issue body with clear structure
+5. Updates the issue after confirmation, then carries the decisions into each affected sub-issue's scope, acceptance criteria and `## Decisions` section (each change shown first)
+
+With `auto`, the agent adopts its own recommendation for every decision, writes the parent and affected sub-issues without stopping, and ends with a summary of the decisions and the edited issues.
 
 **Syntax:**
 ```bash
 /refine 42
+/refine 42 auto
 ```
 
 **Example output:**

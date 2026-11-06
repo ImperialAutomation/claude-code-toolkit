@@ -155,10 +155,16 @@ different incident. "A test that was already green on the old code proves nothin
 "the fix was verified against a suite that never covered the path" are one mechanism
 and one document. Grep would have called them unrelated.
 
-**The default outcome when a mechanism already has a document is: append to it.** The
-finding goes in as a short example with its issue number, two or three lines under a
-heading like `## Seen again`. No new file, and crucially **no new index line**: the
-document is already indexed, so the lesson gets richer at zero recurring cost.
+**The default outcome when a mechanism already has a document is: fold into it.** No
+new file and **no new index line**. But folding in is not appending: every agent that
+follows the index link pays for the whole doc. Decide what the finding adds:
+
+- **A new detection, a new remedy, or a counterexample** (the documented advice was
+  wrong or incomplete): append it, two or three lines, with its issue/PR number.
+- **Anything else** (same mechanism, symptom and fix seen again): add the issue/PR
+  number to the entry's `Also:` line (or `Seen again` line), creating that one line if
+  missing. Nothing more; the incident detail stays in the PR the number points to.
+  Writing a recurrence out again is how a three-line entry grows to twenty-five.
 
 **A proposal for a new document must carry a justification.** State which candidates you
 examined and why none of them fit: a different mechanism, not merely a different
@@ -167,6 +173,37 @@ incident. A proposal without that justification is not ready; go back to the lis
 Above the threshold the report says so, and then consolidation is the expected
 answer. Adding an entry there needs the justification above *plus* a reason the index
 should grow despite already being over budget.
+
+### Byte budget per document
+
+The index budget says nothing about the docs behind it, so each doc has its own,
+checked before and after writing (`<memory-dir>` for memory topic files):
+
+```bash
+~/.claude/bin/doc-budget-check.sh docs/ [<memory-dir>]
+```
+
+Warn above ~15 KB, fail (exit 1) above ~25 KB, `archive/` skipped, deliberate
+exceptions in `<repo>/.claude/doc-budget-exceptions`; `--help` has the rest.
+
+**Over budget means split, not append.** If the target doc is over the warn size or
+would cross it, propose splitting it by theme (each part indexed on its own line, the
+old doc removed or reduced to a pointer). A doc over the fail size is not ready to
+commit. A new exception-list entry needs a stated reason, like a new document.
+
+### Parallel retro branches: check before writing
+
+Parallel retros that each append the same finding to the same doc leave three copies
+after merge. Before writing, list the open retro work:
+
+```bash
+~/.claude/bin/gh-save.sh /tmp/<project>-retro-prs.json pr list --search "head:retro-" --state open --json number,headRefName,files
+git branch -r --list 'origin/retro-*'
+```
+
+For a branch without a PR, `git diff --name-only origin/<base>...origin/<branch>`. If
+one already changes your target doc, read its version and join it (commit onto that
+branch, or base yours on it) instead of writing a parallel copy. Name it in the summary.
 
 ### For docs/development/ files (when directory exists)
 
@@ -195,7 +232,8 @@ doc turns out to be relevant. Entries must be:
   new line.
 
 If the explanation does not fit in the hint, it belongs in the doc. The doc is only read
-when relevant and can be as long as it needs to be; the index is read always.
+when relevant, so it may be longer than the hint, but it is not unbounded: it has the
+byte budget above, and past that it is split by theme. The index is read always.
 
 Before adding an entry, check the section for a doc that already covers the topic and
 update that entry instead of adding a near-duplicate. The consolidation gate above is
@@ -228,13 +266,15 @@ Write to the project's auto-memory directory (`~/.claude/projects/*/memory/`) wh
 
 `MEMORY.md` is always loaded into context, so it is the same index problem as the root
 CLAUDE.md and the consolidation gate applies here too: run the report, name the existing
-topic file that covers the mechanism, and append to it.
+topic file that covers the mechanism, and fold into it by the same rule (append only a
+new detection, remedy or counterexample; otherwise add the number to its `Also:` line).
+Topic files have the same byte budget.
 
 Steps:
 - Create topic-specific files for detailed findings (e.g. `auth-patterns.md`, `deployment-notes.md`, `debugging-db.md`)
 - Add a one-line link in `MEMORY.md` pointing to the topic file (e.g. `- See [auth-patterns.md](auth-patterns.md) for session auth flow`)
 - Keep `MEMORY.md` entries brief — it has a 200-line limit and is always loaded into context
-- If a relevant topic file already exists, append to it rather than creating a new one. That is the default outcome, not the exception
+- If a relevant topic file already exists, fold into it rather than creating a new one. That is the default outcome, not the exception
 
 ### For toolkit candidates
 
@@ -359,8 +399,11 @@ Group output into sections:
 ### Consolidation check
 - Always-loaded CLAUDE.md: <before> → <after> lines (net <+N / +0>), <N> index entries
 - Candidates examined: <doc-a>, <doc-b>, <doc-c> (<N> total in the report)
-- Folded into existing docs: <doc> ← <finding> (no new index line)
+- Folded into existing docs: <doc> ← <finding> (appended: new detection / remedy / counterexample | number added to `Also:`)
 - New documents proposed: <doc>; none of <candidates> fit because <reason>
+- Bytes per touched doc: <doc>: <before> → <after> (<+N>), ... ; total <+N> bytes
+- Over budget: <doc> (<size>) → split into <doc-x>, <doc-y> | none
+- Parallel retro branches touching the same docs: <branch / PR #N, joined> | none
 
 ### Project artefacts
 - CLAUDE.md: added/updated <section> with <description>
@@ -384,8 +427,12 @@ the retro found nothing. A retro that folded three findings into existing docume
 grew the always-loaded set by nothing captured exactly as much as one that added three
 files, and costs nothing in every future session.
 
-Get the before-number by running the report before making changes and the after-number
-by running it again afterwards. If "New documents proposed" is non-empty, each line must
+`net +0` counts bytes too: three recurrences as issue numbers on `Also:` lines are a few
+dozen bytes, written out as incidents they are kilobytes, and the file count calls both
+`+0`. Report the byte delta of every touched doc (`wc -c` before and after).
+
+Get the before-numbers by running the report (and `doc-budget-check.sh`) before making
+changes and the after-numbers by running them again afterwards. If "New documents proposed" is non-empty, each line must
 name the candidates that were examined and why they did not fit: a different mechanism,
 not just a different incident.
 
@@ -404,8 +451,9 @@ Artefacts:
 
 - Never store credentials or secrets. Always reference environment variables.
 - Prefer updating existing procedures over creating duplicates. Check CLAUDE.md and `docs/development/` first.
-- Run `~/.claude/bin/claude-md-index-report.sh` before proposing any new document, and name the candidates examined in the summary. Appending to the document that already describes the mechanism is the default; a new document needs a stated reason why none fit.
-- The always-loaded `CLAUDE.md` set is paid for in every session and every sub-agent. Report its net line growth in the summary; `+0` is a good retro, not an empty one.
+- Run `~/.claude/bin/claude-md-index-report.sh` before proposing any new document, and name the candidates examined in the summary. Folding into the document that already describes the mechanism is the default; a new document needs a stated reason why none fit.
+- Fold in via the `Also:` line; append only a new detection, remedy or counterexample. Over the byte budget (`doc-budget-check.sh`), split by theme. Join an open `retro-*` branch that touches the same doc.
+- The always-loaded `CLAUDE.md` set is paid for in every session and every sub-agent. Report its net line growth and the byte delta of every touched doc in the summary; `+0` is a good retro, not an empty one.
 - Keep procedures concise. Future sessions need to scan them quickly.
 - If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.

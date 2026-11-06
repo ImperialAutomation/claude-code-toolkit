@@ -41,6 +41,16 @@
 #   2  usage error, invalid <purpose>, or --repo is not a directory (worktree:
 #      not a git repository)
 #
+# Rules of use:
+#   - Only for what a container must mount. Everything else stays in the
+#     scratchpad or /tmp; ~/Downloads, ~ and the project tree stay off limits,
+#     also when a mount fails.
+#   - Paste the printed path literally into `docker run -v`, no $(...).
+#   - Run `clean` as soon as the container is done. It needs no prompt; a bare
+#     `rm -rf` does, and outside /tmp hook-block-destructive.sh refuses it.
+#   - `clean` exit 1 (root-owned files from a container): report it, and do not
+#     move the tree somewhere else.
+#
 # Examples:
 #   docker-scratch.sh dir --repo ~/Projects/Acme pytest-cache-42
 #   docker-scratch.sh worktree --repo ~/Projects/Acme base-42 origin/develop
@@ -62,6 +72,9 @@ usage() {
 die_usage() { echo "$1" >&2; exit 2; }
 
 [[ $# -ge 1 ]] || usage
+case "$1" in
+    -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
+esac
 SUBCOMMAND="$1"; shift
 
 REPO="$PWD"

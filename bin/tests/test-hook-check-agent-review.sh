@@ -168,6 +168,27 @@ run "gh pr create --repo someone/other --body x"           ALLOW "different repo
 run "gh pr create --body x"                                ALLOW "no --repo and no CHECKLIST_PATH_MATCH"
 
 echo
+echo "== short repo flag: -R names the target repo just like --repo =="
+# Without CHECKLIST_PATH_MATCH there is no cwd fallback, so these can only block
+# if the -R form itself was read as this repo.
+run "gh pr create -R ImperialAutomation/toolkit --body x"    BLOCK "-R <repo>, this repo"
+run "gh pr create -R=ImperialAutomation/toolkit --body x"    BLOCK "-R=<repo>, this repo"
+run "gh pr create -RImperialAutomation/toolkit --body x"     BLOCK "-R<repo> attached, this repo"
+# Issue #199: from a cwd that matches CHECKLIST_PATH_MATCH, `-R other/repo` was
+# not recognised, so the hook fell back to the cwd and demanded this project's
+# checklist for a PR in another repository. PATH_MATCH is set to the cwd here so
+# that fallback is live: an unrecognised -R form blocks instead of allowing.
+export CHECKLIST_PATH_MATCH="$PWD"
+run "gh pr create -R someone/other --body x"                 ALLOW "-R <repo>, other repo"
+run "gh pr create -R=someone/other --body x"                 ALLOW "-R=<repo>, other repo"
+run "gh pr create -Rsomeone/other --body x"                  ALLOW "-R<repo> attached, other repo"
+run "gh pr create --repo someone/other --body x"             ALLOW "--repo still wins over the cwd"
+# `-R` is a common flag of other commands. One chained before the PR call is
+# not its target repo; reading it as one would skip the cwd check entirely.
+run "cp -R a b && gh pr create --body x"                     BLOCK "-R of an earlier command is not the repo"
+unset CHECKLIST_PATH_MATCH
+
+echo
 echo "== checklist content: the rest of the pipeline still gates =="
 run "gh pr create $REPO --body-file $GOOD_BODY"            ALLOW "markers present, all ticked"
 run "gh pr create $REPO --body-file=$GOOD_BODY"            ALLOW "--body-file= spelling"
