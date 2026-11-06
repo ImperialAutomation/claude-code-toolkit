@@ -91,4 +91,4 @@ which the queue runner checks before a claim.
 
 The list is not fixed. A category the human always accepts drops off; a
 category whose agent decisions get reverted is added. The measurement script
-supplies the numbers.
+`bin/decision-metrics.py` supplies the numbers.
