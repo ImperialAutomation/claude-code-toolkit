@@ -1,0 +1,30 @@
+# Runs every toolkit test script (bin/run-tests.sh) on each PR and on main.
+# Locally the same set runs with: bin/run-tests.sh
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tests build throwaway repos and commit in them; a stock runner has
+      # no git identity. project-test.sh and venv-run.sh only run under
+      # ~/Projects, so their tests create their fixtures there.
+      - name: Prepare runner
+        run: |
+          git config --global user.name "toolkit-ci"
+          git config --global user.email "toolkit-ci@users.noreply.github.com"
+          mkdir -p "$HOME/Projects"
+
+      - name: Run test scripts
+        run: bin/run-tests.sh --ci

@@ -356,6 +356,21 @@ All scripts are already allowed in the global settings (`~/.claude/settings.json
 | `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json] [--rewrite-prefix CMD]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Chain friction is attributed to the segment that defeats matching, not the first token. Hook denies (including `cd <dir> && <cmd>` chains) are reported separately and excluded from the estimate. Used by `/retro`'s Permission Friction phase |
 | `doc-budget-check.sh` | `doc-budget-check.sh [--warn SIZE] [--fail SIZE] [--repo DIR] <doc-root>...` | Per-file byte budget for markdown docs: lists files over the warn size (default 15K), exits 1 for any over the fail size (default 25K). Skips `archive/` dirs; deliberate exceptions go in `<repo>/.claude/doc-budget-exceptions`, and an exception that is back under budget is reported as stale. Used by `/retro` before and after writing; works as a pre-commit or CI step (see `--help`) |
 
+### Tests
+
+Every script has standalone tests: `bin/test-*.sh`, `bin/test-*.py` and `bin/tests/test-*.sh`, each run on its own and exiting non-zero on failure. `bin/run-tests.sh` runs the whole set and is what CI runs, so the local run and the PR check cover the same scripts:
+
+```bash
+bin/run-tests.sh                        # all test scripts
+bin/run-tests.sh test-git-commit.sh     # only the named ones (basename or path)
+bin/run-tests.sh --list                 # what would run, and what is skipped
+bin/run-tests.sh --ci                   # as in CI: also apply the CI skip list
+```
+
+It prints one `PASS`/`FAIL` line per script, shows a failing script's full output framed by its name, and ends with a summary naming every failing script. It needs `git`, `python3`, `jq` and `curl` on PATH and stops before any test when one is missing. The tests are hermetic: they build their fixtures in temp dirs and derive `~/Projects` from `$HOME`, so they pass on a machine without the toolkit installed.
+
+The workflow `.github/workflows/tests.yml` runs `bin/run-tests.sh --ci` on every pull request and on pushes to `main`. A test that cannot run on a stock runner goes in the `CI_SKIP` table in `run-tests.sh` with its reason, which the job prints as `SKIP <script>: <reason>`; nothing is skipped silently. The table is empty: every test runs in CI.
+
 ## Repository Structure
 
 ```
@@ -412,7 +427,10 @@ claude-code-toolkit/
 │   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
 │   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
-│   └── test-permission-friction.py ← standalone tests for the above
+│   ├── test-permission-friction.py ← standalone tests for the above
+│   ├── run-tests.sh               ← run every test script (locally and in CI)
+│   └── tests/                     ← standalone tests for the other scripts
+├── .github/workflows/tests.yml ← CI: bin/run-tests.sh --ci on every PR
 ├── skills/                    ← skill definitions (procedures)
 │   ├── refine/
 │   ├── implement/
