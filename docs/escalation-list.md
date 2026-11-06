@@ -82,6 +82,11 @@ number, never the matched text, so the hit can be quoted in a public issue.
 | `approved:interface` | Human approved a category 3 hit on this issue |
 | `approved:global` | Human approved a category 4 hit on this issue |
 
+These are issue labels. The PR label `agent-authored` is separate: `/implement`
+puts it on every PR it opens (creating it when the repo lacks it), and
+`bin/agent-pr-wip.sh` counts the open ones against the agent PR WIP limit,
+which the queue runner checks before a claim.
+
 ## Recalibration
 
 The list is not fixed. A category the human always accepts drops off; a
