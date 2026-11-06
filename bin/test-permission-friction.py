@@ -106,6 +106,11 @@ check(
 _ALLOW = ["Bash(git *)", "Bash(~/.claude/bin/*)"]
 _DENY = []
 
+# A project dir under the running user's ~/Projects, which is where the hook
+# treats a leading cd as harmless. Derived from $HOME so the tests also hold on
+# a machine (or CI runner) with a different home directory.
+_PROJECT_X = os.path.expanduser("~/Projects/x")
+
 check(
     "classify_command: plain allowlisted command never prompts",
     pf.classify_command("git status", _ALLOW, _DENY) == (False, None, None),
@@ -194,7 +199,7 @@ check(
     "find_chain_culprit: a harmless leading cd is not reported as the culprit",
     pf.find_chain_culprit(
         pf._hook.split_segments(
-            "cd /home/jan/Projects/x && for i in 1 2; do echo $i; done"
+            f"cd {_PROJECT_X} && for i in 1 2; do echo $i; done"
         ),
         _HOOK_ALLOW,
     )
@@ -322,8 +327,8 @@ check(
 # absence is what makes the reason reachable.
 check(
     "classify_command: a single-segment cd prefix still reports CD_PREFIX",
-    pf.is_hook_denied("cd /home/jan/Projects/x jq .") is None
-    and pf.classify_command("cd /home/jan/Projects/x jq .", _ALLOW, _DENY)
+    pf.is_hook_denied(f"cd {_PROJECT_X} jq .") is None
+    and pf.classify_command(f"cd {_PROJECT_X} jq .", _ALLOW, _DENY)
     == (True, pf.REASON_CD_PREFIX, None),
 )
 
@@ -513,9 +518,9 @@ check(
 check(
     "_pattern_key: strips a cd prefix off the culprit so the real command is the key",
     pf._pattern_key(
-        "cd /home/jan/Projects/x rtk grep foo",
+        f"cd {_PROJECT_X} rtk grep foo",
         pf.REASON_CHAIN,
-        ["cd", "/home/jan/Projects/x", "rtk", "grep", "foo"],
+        ["cd", _PROJECT_X, "rtk", "grep", "foo"],
     )
     == f"rtk — {pf.REASON_CHAIN}",
 )
