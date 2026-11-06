@@ -171,6 +171,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
 | `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
 | `escalation-check.sh` | `escalation-check.sh [--repo DIR] [--base B]` | Check the branch diff against escalation categories 1 to 4 (`permissions`, `leakage`, `interface`, `global`); one `<key>  <file>  <reason>` line per hit, exit 1 on any hit. Categories, denylist and labels: [escalation list](docs/escalation-list.md) |
+| `agent-pr-wip.sh` | `agent-pr-wip.sh [--repo DIR]` | Count open `agent-authored` PRs against the agent PR WIP limit (3); prints `<open>/<limit>`, exit 0 below the limit, 1 at or above it, 2 when `gh` fails. The queue runner's gate before a claim; `/implement` does not call it |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed, matched to the pushed commit so a lagging PR head cannot be read as a verdict), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. A check that is red repo-wide for a cause unrelated to the diff (e.g. a dependency audit after a new advisory) is `--allow-failing-check <name>`, which keeps the rest of the gate on and records the bypass on the PASS line. `--allow-failing-check <name>=<regex>` narrows that bypass to one cause: the check's failed job log must match `<regex>`, so a *different* failure of the same check still blocks (it blocks too when the log cannot be read, or when the check is an external status with no job log). Creates the PR itself, so `gh pr create` hooks do not fire; the gate also cannot prove a check set is complete — see [failure modes](docs/git-script-failure-modes.md) |
 
 **`git-commit.sh` refuses to commit on a protected branch.** In repos where every
@@ -805,6 +806,15 @@ Create draft PR and sub-issues? (A/B/C)
 | PRs | One PR against base branch | One PR per sub-issue against feature branch |
 | Failure | Stops on failure | Creates bug issue, skips dependents, continues |
 | Verification | CLAUDE.md pattern-based (only when Docker files changed) | Always runs full verification |
+
+A PR opened by `/implement` carries a `## Decisions made` section: each active
+entry of the issue's `## Decisions` as one `D<n>: question → choice` line with
+its HIL marker, plus every choice the agent made itself that affects scope,
+acceptance criteria or approach as a full `/refine`-format entry marked
+`(no HIL: agent default)`; `None.` when there are none. The PR gets the
+`agent-authored` label, created when the repo lacks it. The whole issue goes
+into one PR unless a part is independently mergeable and verifiable, and the PR
+body names that reason.
 
 ---
 
