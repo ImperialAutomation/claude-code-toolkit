@@ -77,6 +77,7 @@ number, never the matched text, so the hit can be quoted in a public issue.
 | `agent-ready` | An agent may pick this up |
 | `agent-wip` | Claimed by a session; others skip it |
 | `needs-human` | Blocked on a decision; a comment holds the question, the options and the recommendation |
+| `agent-failed` | Agent run failed on this issue; a second failure adds needs-human. The queue runner claims it once more (one retry) |
 | `approved:permissions` | Human approved a category 1 hit on this issue |
 | `approved:leakage` | Human approved a category 2 hit on this issue |
 | `approved:interface` | Human approved a category 3 hit on this issue |

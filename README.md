@@ -172,6 +172,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
 | `escalation-check.sh` | `escalation-check.sh [--repo DIR] [--base B]` | Check the branch diff against escalation categories 1 to 4 (`permissions`, `leakage`, `interface`, `global`); one `<key>  <file>  <reason>` line per hit, exit 1 on any hit. Categories, denylist and labels: [escalation list](docs/escalation-list.md) |
 | `agent-pr-wip.sh` | `agent-pr-wip.sh [--repo DIR]` | Count open `agent-authored` PRs against the agent PR WIP limit (3); prints `<open>/<limit>`, exit 0 below the limit, 1 at or above it, 2 when `gh` fails. The queue runner's gate before a claim; `/implement` does not call it |
+| `queue-claim.sh` | `queue-claim.sh [--repo DIR] claim \| release <N> pr <url> \| release <N> escalated \| release <N> failed <file>` | Queue runner claims: `claim` adds `agent-wip` to the oldest open `agent-ready` issue without `agent-wip`, `needs-human` or `epic` and prints its number (nothing when empty); `release` drops `agent-wip` and comments. A first failure adds `agent-failed` (one retry), a second adds `needs-human` too |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed, matched to the pushed commit so a lagging PR head cannot be read as a verdict), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. A check that is red repo-wide for a cause unrelated to the diff (e.g. a dependency audit after a new advisory) is `--allow-failing-check <name>`, which keeps the rest of the gate on and records the bypass on the PASS line. `--allow-failing-check <name>=<regex>` narrows that bypass to one cause: the check's failed job log must match `<regex>`, so a *different* failure of the same check still blocks (it blocks too when the log cannot be read, or when the check is an external status with no job log). Creates the PR itself, so `gh pr create` hooks do not fire; the gate also cannot prove a check set is complete — see [failure modes](docs/git-script-failure-modes.md) |
 
 **`git-commit.sh` refuses to commit on a protected branch.** In repos where every
@@ -442,6 +443,7 @@ claude-code-toolkit/
 │   ├── refine/
 │   ├── implement/
 │   ├── implement-epic/
+│   ├── queue-run/
 │   ├── decompose/
 │   ├── bug/
 │   ├── cleanup/
@@ -587,6 +589,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 | `/extend` | `/extend [issue]` or `/extend add #issue [to #parent]` | Add more sub-issues or link existing issues to a tracking PR |
 | `/implement` | `/implement <issue>` | Implement a GitHub issue with automated PR creation |
 | `/implement-epic` | `/implement-epic <parent-issue>` | Implement all sub-issues of an epic in dependency order |
+| `/queue-run` | `/loop /queue-run` | Queue runner: one iteration claims the oldest `agent-ready` issue, refines and implements it to an open PR, releases it |
 | `/finish` | `/finish [issue] [base]` | Commit, close issue, merge to base branch, cleanup |
 | `/bug` | `/bug ["<title>"]` or `/bug add #issue [to #parent]` | Create a bug interactively or with a title, or add existing issues to tracking PR |
 | `/update-tracking` | `/update-tracking <pr>` | Update tracking PR with current sub-issue status |
@@ -817,6 +820,21 @@ acceptance criteria or approach as a full `/refine`-format entry marked
 `agent-authored` label, created when the repo lacks it. The whole issue goes
 into one PR unless a part is independently mergeable and verifiable, and the PR
 body names that reason.
+
+### Queue runner: `/loop /queue-run`
+
+**When:** issues labelled `agent-ready` should be worked without a human,
+locally, against your own `~/.claude` setup.
+
+Each iteration checks the agent PR WIP limit (`agent-pr-wip.sh`), claims the
+oldest claimable issue (`queue-claim.sh claim`), and spawns one sub-agent that
+runs `/refine <N> auto` and then `/implement <N>` in a linked worktree. The
+claim is released with the outcome: an open PR, an escalation (`needs-human`
+with the question as a comment), or a failure (`agent-failed`, one retry; a
+second failure adds `needs-human`). Epics are never claimed, and nothing is
+merged. An idle iteration (empty queue or WIP limit reached) schedules the next
+check after 30 minutes. Run one runner at a time, in auto mode; the skill lists
+the preconditions.
 
 ---
 
