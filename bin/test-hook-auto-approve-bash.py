@@ -2346,7 +2346,9 @@ finally:
 # command. The three commands below have the shape of real session commands.
 
 S = "/tmp/acme-session/scratchpad"
-ACME_DIR = "/home/jan/Projects/acme"
+# Under the running user's ~/Projects, as the hook resolves it: a hardcoded
+# home directory fails on any other machine (CI runs as a different user).
+ACME_DIR = os.path.expanduser("~/Projects/acme")
 EXAMPLE_1_SAVE = f"{SAVE} {S}/check.txt env -C {ACME_DIR} bash scripts/check.sh"
 EXAMPLE_1 = f"{EXAMPLE_1_SAVE}; rtk read {S}/check.txt --tail-lines 30"
 EXAMPLE_2 = (
