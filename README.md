@@ -715,7 +715,7 @@ Configuration lives in `~/.claude/toolkit.yaml`. Add private repos there for pro
 4. Proposes an updated issue body with clear structure
 5. Updates the issue after confirmation, then carries the decisions into each affected sub-issue's scope, acceptance criteria and `## Decisions` section (each change shown first)
 
-With `auto`, the agent adopts its own recommendation for every decision, writes the parent and affected sub-issues without stopping, and ends with a summary of the decisions and the edited issues.
+With `auto`, the agent adopts its own recommendation for every decision, writes the parent and affected sub-issues without stopping, and ends with a summary of the decisions and the edited issues. A decision point in one of the categories of [`docs/escalation-list.md`](docs/escalation-list.md), or one that would reverse a human `(HIL)` decision, is not adopted: the run posts one issue comment with the question, options and recommendation, adds `needs-human` and stops without editing any issue body. A re-run after the human answered records the answer as a `(HIL)` decision. In both modes the size recommendation is one PR unless the parts are independently mergeable and verifiable.
 
 **Syntax:**
 ```bash
