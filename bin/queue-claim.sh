@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# queue-claim.sh — claim and release issues of the agent queue (queue runner).
+# queue-claim.sh: claim and release issues of the agent queue (queue runner).
 #
 # Usage:
 #   queue-claim.sh [--repo <dir>] claim
