@@ -170,6 +170,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
 | `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
+| `escalation-check.sh` | `escalation-check.sh [--repo DIR] [--base B]` | Check the branch diff against escalation categories 1 to 4 (`permissions`, `leakage`, `interface`, `global`); one `<key>  <file>  <reason>` line per hit, exit 1 on any hit. Categories, denylist and labels: [escalation list](docs/escalation-list.md) |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed, matched to the pushed commit so a lagging PR head cannot be read as a verdict), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. A check that is red repo-wide for a cause unrelated to the diff (e.g. a dependency audit after a new advisory) is `--allow-failing-check <name>`, which keeps the rest of the gate on and records the bypass on the PASS line. `--allow-failing-check <name>=<regex>` narrows that bypass to one cause: the check's failed job log must match `<regex>`, so a *different* failure of the same check still blocks (it blocks too when the log cannot be read, or when the check is an external status with no job log). Creates the PR itself, so `gh pr create` hooks do not fire; the gate also cannot prove a check set is complete — see [failure modes](docs/git-script-failure-modes.md) |
 
 **`git-commit.sh` refuses to commit on a protected branch.** In repos where every
@@ -344,6 +345,7 @@ not.
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-block-toolkit-live-checkout.sh` | PreToolUse hook in settings.json | Block `git checkout`/`git switch` that takes the live toolkit checkout (the one `~/.claude/bin` points into) off its base branch; the message names the worktree route ([why](CLAUDE.md)) |
+| `hook-escalation-check.sh` | PreToolUse hook in settings.json | Deny opening a PR (`git-push-pr-merge.sh`, `gh pr create`) for an autonomous run (closed issue labeled `agent-wip`) whose diff hits an escalation category without its `approved:<key>` label; interactive sessions only get the hits on stderr ([escalation list](docs/escalation-list.md)) |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
 | `hook-post-prune-branch-config.sh` | PostToolUse hook in settings.json | After a branch deletion, remove `[branch "<name>"]` config sections whose branch no longer exists. A sandboxed `git branch -d` cannot write `.git/config` and leaves them behind; the hook runs outside the sandbox and touches nothing else |
 
@@ -423,6 +425,8 @@ claude-code-toolkit/
 │   ├── hook-block-toolkit-live-checkout.sh ← PreToolUse hook: keep the live toolkit checkout on main
 │   ├── test-hook-block-toolkit-live-checkout.sh ← standalone tests for the above
 │   ├── lib/live-checkout.sh       ← which tree ~/.claude/bin makes live (shared by the two above)
+│   ├── escalation-check.sh        ← flag a branch diff that hits an escalation category
+│   ├── hook-escalation-check.sh   ← PreToolUse hook: deny an autonomous PR with unapproved hits
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 │   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
 │   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
@@ -498,7 +502,7 @@ Because it is a copy, later changes to the template do not reach it by themselve
 
 ### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
 
-The global settings include four `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
+The global settings include five `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, leading `VAR=value` env prefixes (except variables that make a command load or run code, such as `PATH`, `PAGER`, `PYTHONPATH` and the `LD_*`/`GIT_*`/`npm_config_*` families: those are never stripped, so the command prompts), and a model-typed `rtk` or `rtk proxy` prefix (so `rtk grep ...` is judged as `grep ...`), then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
@@ -520,6 +524,8 @@ The global settings include four `PreToolUse` hooks that run **in all permission
 3. **`hook-block-foreign-worktree-git.sh`** — Blocks a destructive git command (`checkout --`, `checkout -f`, `restore`, `reset`, `clean`, `stash`) that targets a *different* worktree via `-C`/`--git-dir`. Linked worktrees share one repository but hold independent uncommitted work, so restoring a sibling tree to HEAD silently destroys whatever another session was editing there. Only cross-worktree operations are blocked: inside your own tree these commands stay untouched, and unrelated checkouts (a different `.git`) are left alone. Read-only `git stash list`/`show` pass through. Set `WORKTREE_GUARD_HINT` from a small project wrapper to append a repo-specific alternative (e.g. an isolated test runner) to the block message.
 
 4. **`hook-block-toolkit-live-checkout.sh`**: Blocks `git checkout`/`git switch` that would take the live toolkit checkout off its base branch: new branches (`-b`/`-B`/`--orphan`, `-c`/`-C`), existing branches, detached commits and `switch -`. The target is the hook input's `cwd`, followed through an earlier `cd` in the chain, an `env -C` prefix and git's own `-C`; stuck and clustered short flags (`-bx`, `-qb x`) count too. Switching back to the base branch, path checkouts, linked worktrees and other repositories pass; with `~/.claude/bin` not a symlink the hook does nothing. The rule it enforces and why: [CLAUDE.md](CLAUDE.md).
+
+5. **`hook-escalation-check.sh`**: When a PR is opened with `git-push-pr-merge.sh` or `gh pr create` (at command position only), reads the `Closes|Fixes|Resolves #N` issues from the PR body and fetches their labels. For an autonomous run (an issue labeled `agent-wip`) it runs `escalation-check.sh` and denies when a hit's category lacks the `approved:<key>` label, with the hint to post the question as an issue comment, add `needs-human` and stop. Interactive sessions get the hits on stderr and are never blocked. A missing body file or a failed label fetch denies. Details: [escalation list](docs/escalation-list.md).
 
 To use bypass-permissions mode with these safety nets:
 
