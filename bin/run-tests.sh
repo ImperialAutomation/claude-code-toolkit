@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run-tests.sh — run every toolkit test script; the same set locally and in CI.
 #
-# Discovers bin/test-*.sh, bin/test-*.py and bin/tests/test-*.sh, runs each one
+# Discovers bin/test-*.{sh,py} and bin/tests/test-*.{sh,py}, runs each one
 # on its own (bash for .sh, python3 for .py) and reports per script. A script
 # passes when it exits 0. The GitHub Actions workflow runs this with --ci, so
 # "CI is green" and "run-tests.sh is green" mean the same set of scripts.
@@ -69,7 +69,7 @@ done
 # All test scripts, as paths relative to the repo, in a stable order.
 discover() {
     local f
-    for f in "$BIN_DIR"/test-*.sh "$BIN_DIR"/test-*.py "$BIN_DIR"/tests/test-*.sh; do
+    for f in "$BIN_DIR"/test-*.sh "$BIN_DIR"/test-*.py "$BIN_DIR"/tests/test-*.sh "$BIN_DIR"/tests/test-*.py; do
         [[ -f "$f" ]] && echo "${f#"$REPO_DIR"/}"
     done | sort
 }
