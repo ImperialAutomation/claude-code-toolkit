@@ -357,11 +357,12 @@ All scripts are already allowed in the global settings (`~/.claude/settings.json
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json] [--rewrite-prefix CMD]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Chain friction is attributed to the segment that defeats matching, not the first token. Hook denies (including `cd <dir> && <cmd>` chains) are reported separately and excluded from the estimate. Used by `/retro`'s Permission Friction phase |
+| `decision-metrics.py` | `decision-metrics.py [--days N] [--project NAME\|PATH]... [--repo OWNER/NAME]... [--report all\|agreement\|reversals] [--output PATH]` | Numbers for recalibrating `docs/escalation-list.md`. Agreement: how `AskUserQuestion` answers with a `(Recommended)` option split into recommendation, other listed option and free text (listed with excerpts), the recommendation-listed-first share, per skill; all transcript projects, last 42 days by default. Reversals: no-HIL decision entries in issues and PR `## Decisions made` sections, exact (superseded, reverted `agent-authored` PR commit) and heuristic (follow-up fix within 14 days) in separate columns, by `Choice` kind and escalation category. `--output` is refused outside the temp dir or inside a git work tree |
 | `doc-budget-check.sh` | `doc-budget-check.sh [--warn SIZE] [--fail SIZE] [--repo DIR] <doc-root>...` | Per-file byte budget for markdown docs: lists files over the warn size (default 15K), exits 1 for any over the fail size (default 25K). Skips `archive/` dirs; deliberate exceptions go in `<repo>/.claude/doc-budget-exceptions`, and an exception that is back under budget is reported as stale. Used by `/retro` before and after writing; works as a pre-commit or CI step (see `--help`) |
 
 ### Tests
 
-Every script has standalone tests: `bin/test-*.sh`, `bin/test-*.py` and `bin/tests/test-*.sh`, each run on its own and exiting non-zero on failure. `bin/run-tests.sh` runs the whole set and is what CI runs, so the local run and the PR check cover the same scripts:
+Every script has standalone tests: `bin/test-*.sh`, `bin/test-*.py`, `bin/tests/test-*.sh` and `bin/tests/test-*.py`, each run on its own and exiting non-zero on failure. `bin/run-tests.sh` runs the whole set and is what CI runs, so the local run and the PR check cover the same scripts:
 
 ```bash
 bin/run-tests.sh                        # all test scripts
@@ -433,6 +434,7 @@ claude-code-toolkit/
 │   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
 │   ├── test-permission-friction.py ← standalone tests for the above
+│   ├── decision-metrics.py        ← agreement with recommendations, reversals of agent decisions
 │   ├── run-tests.sh               ← run every test script (locally and in CI)
 │   └── tests/                     ← standalone tests for the other scripts
 ├── .github/workflows/tests.yml ← CI: bin/run-tests.sh --ci on every PR
