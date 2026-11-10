@@ -172,6 +172,7 @@ OUT=$(bash "$QC" --help 2>/dev/null); RC=$?
 check "--help exits 0" "0" "$RC"
 check "--help prints usage" "yes" "$(contains "$OUT" "sage")"
 check "--help names agent-failed" "yes" "$(contains "$OUT" "agent-failed")"
+check "--help names agent-pr" "yes" "$(contains "$OUT" "agent-pr")"
 check "--help names --tokens" "yes" "$(contains "$OUT" "--tokens")"
 check "--help names QUEUE_RUNS_LOG" "yes" "$(contains "$OUT" "QUEUE_RUNS_LOG")"
 check "--help calls no gh" "no" "$([[ -e "$STUB/calls" ]] && echo yes || echo no)"
@@ -286,7 +287,7 @@ reset_stub
 issue 3 2026-01-01 agent-ready agent-wip
 run release 3 pr https://github.com/o/r/pull/77
 check "pr: exit 0" "0" "$RC"
-check "pr: agent-wip dropped" "agent-ready" "$(labels_of 3)"
+check "pr: agent-wip and agent-ready swapped for agent-pr" "agent-pr" "$(labels_of 3)"
 check "pr: comment links the PR" "yes" "$(contains "$(comments_of 3)" "https://github.com/o/r/pull/77")"
 check "pr without --tokens: comment says tokens: unknown" "yes" "$(contains "$(comments_of 3)" "tokens: unknown")"
 check "pr without --tokens: log header written" "$TSV_HEADER" "$(head -1 "$QUEUE_RUNS_LOG" 2>/dev/null)"
@@ -307,6 +308,16 @@ issue 4 2026-01-02 agent-ready agent-wip
 run --tokens "$TOK" release 4 pr https://github.com/o/r/pull/78
 check "second release: header only once, one row per release" "3" "$(log_lines)"
 check "second release: header is still the first line" "1" "$(grep -c "^date" "$QUEUE_RUNS_LOG")"
+run claim
+check "pr: no later iteration claims it (would open a second PR)" "" "$OUT"
+
+reset_stub
+# A human puts agent-ready back (PR closed unmerged) but leaves agent-pr.
+issue 3 2026-01-01 agent-ready agent-pr
+issue 4 2026-01-02 agent-ready
+run claim
+check "agent-pr is a skip label: claims the next issue" "4" "$OUT"
+check "agent-pr is a skip label: #3 untouched" "agent-pr agent-ready" "$(labels_of 3)"
 
 echo "== 8. release escalated =="
 reset_stub
@@ -367,7 +378,26 @@ run release 3 failed "$MSG"
 check "release failed, view fails: exit 1" "1" "$RC"
 check "release failed, view fails: claim kept" "yes" "$(has 3 agent-wip)"
 
-echo "== 12. usage errors =="
+echo "== 12. release: exit 0 and no temp file left, every outcome =="
+# The comment body is a mktemp file; its EXIT trap must still find it once
+# do_release's locals are gone (set -u turned that into a non-zero exit).
+export TMPDIR="$T/tmpdir"
+for outcome in pr escalated failed; do
+    reset_stub
+    rm -rf "$TMPDIR"; mkdir -p "$TMPDIR"
+    issue 3 2026-01-01 agent-ready agent-wip
+    case "$outcome" in
+        pr)        run release 3 pr https://github.com/o/r/pull/77 ;;
+        escalated) run release 3 escalated ;;
+        failed)    run release 3 failed "$MSG" ;;
+    esac
+    check "$outcome: exit 0" "0" "$RC"
+    check "$outcome: no 'unbound variable' on stderr" "no" "$(contains "$ERR" "unbound variable")"
+    check "$outcome: no temp file left" "" "$(ls -A "$TMPDIR")"
+done
+unset TMPDIR
+
+echo "== 13. usage errors =="
 reset_stub
 issue 3 2026-01-01 agent-ready agent-wip
 run
