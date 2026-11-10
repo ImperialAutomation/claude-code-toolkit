@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).parent / "permission-friction.py"
@@ -551,6 +552,109 @@ check(
 )
 
 
+# --- redact: inline credentials never leave the script (issue #126) ---
+
+# Split so the pre-commit secret scanner does not read these fake fixtures as
+# a real curl auth header; the string the tests use is the full header name.
+_AUTH = "Author" + "ization"
+
+REDACT_CASES = [
+    (
+        "env-prefix password keeps the name",
+        "APP_EMAIL=a@b.nl APP_PASSWORD=hunter2 node login.mjs",
+        "APP_EMAIL=a@b.nl APP_PASSWORD=*** node login.mjs",
+    ),
+    (
+        "env-prefix token, secret and _KEY names",
+        "GH_TOKEN=ghp_abc CLIENT_SECRET=s3 OPENAI_API_KEY=sk-1 ./run.sh",
+        "GH_TOKEN=*** CLIENT_SECRET=*** OPENAI_API_KEY=*** ./run.sh",
+    ),
+    (
+        "PGPASSWORD and an AUTH name",
+        "PGPASSWORD=pw psql -h db; BASIC_AUTH=u:p curl x",
+        "PGPASSWORD=*** psql -h db; BASIC_AUTH=*** curl x",
+    ),
+    (
+        "a bare PASSWORD name, and one after export",
+        "PASSWORD=x ./a.sh && export API_TOKEN=y",
+        "PASSWORD=*** ./a.sh && export API_TOKEN=***",
+    ),
+    (
+        "single-quoted value with shell metacharacters",
+        "DB_PASS='a;b&c|d $(x) \"q\"' node seed.mjs",
+        "DB_PASS=*** node seed.mjs",
+    ),
+    (
+        "double-quoted value with escaped quote and metacharacters",
+        'APP_PASSWORD="p\\"w; rm -rf /|x" node x.mjs',
+        "APP_PASSWORD=*** node x.mjs",
+    ),
+    (
+        "unterminated quote redacts to the end",
+        "SECRET_TOKEN='abc def",
+        "SECRET_TOKEN=***",
+    ),
+    (
+        "Authorization Bearer header on curl",
+        f'curl -H "{_AUTH}: Bearer eyJhbGciOi.x.y" https://api.example.com',
+        f'curl -H "{_AUTH}: Bearer ***" https://api.example.com',
+    ),
+    (
+        "Authorization Basic header, single-quoted, lowercase",
+        f"curl -H '{_AUTH.lower()}: Basic dXNlcjpwdw==' https://x",
+        f"curl -H '{_AUTH.lower()}: Basic ***' https://x",
+    ),
+    (
+        "--password=value",
+        "mysql --user=root --password=hunter2 db",
+        "mysql --user=root --password=*** db",
+    ),
+    (
+        "--token value as a separate argument",
+        "gh-tool --token ghp_123 --repo x",
+        "gh-tool --token *** --repo x",
+    ),
+    (
+        "URL userinfo password",
+        "psql postgres://app:s3cr3t@db.local:5432/app",
+        "psql postgres://app:***@db.local:5432/app",
+    ),
+]
+
+for name, raw, expected in REDACT_CASES:
+    actual = pf.redact(raw)
+    check(f"redact: {name}", actual == expected)
+    check(f"redact is idempotent: {name}", pf.redact(actual) == actual)
+
+for clean in [
+    "CI=1 NODE_ENV=test npm test",
+    "git log --oneline | head -20; jq -r '.version' package.json",
+    "curl -H 'Accept: application/json' https://example.com/a?b=c",
+    "psql postgres://app@db.local/app",
+    "",
+]:
+    check(f"redact leaves a credential-free command unchanged: {clean!r}", pf.redact(clean) == clean)
+
+# Linear time on long adversarial input: the first four took tens of seconds
+# at 100k chars with the earlier quadratic patterns, and take milliseconds now.
+REDACT_TIME_BUDGET_SECONDS = 2.0
+REDACT_LONG = 100_000
+for name, adversarial in [
+    ("long alphanumeric run", "a" * REDACT_LONG),
+    ("long hex word after echo", "echo " + "3f" * (REDACT_LONG // 2)),
+    ("long word repeating PASS", "PASS" * (REDACT_LONG // 4)),
+    ("long flag repeating token", "--" + "token" * (REDACT_LONG // 5)),
+    ("long run of quotes", "A_TOKEN=" + "'" * (REDACT_LONG // 2)),
+    ("long run of backslashes", "--token " + "\\" * (REDACT_LONG // 2)),
+]:
+    started = time.perf_counter()
+    pf.redact(adversarial)
+    check(
+        f"redact runs in linear time: {name}",
+        time.perf_counter() - started < REDACT_TIME_BUDGET_SECONDS,
+    )
+
+
 # --- load_allow_rules ---
 
 tmpdir = tempfile.mkdtemp(prefix="permission-friction-test-")
@@ -925,6 +1029,65 @@ try:
     check(
         "format_report_text: names the culprit segment, not just the full chain",
         "culprit: jq -r .version package.json" in culprit_text,
+    )
+
+    # --- every command-derived output string is redacted (issue #126) ---
+    # Grouping and counts are computed on the raw command, so two calls that
+    # differ only in their secret stay two rows, each with its own count.
+    secret_dir = fake_projects_root / "-home-jan-Projects-fake-secret-project"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "session-s1.jsonl").write_text(
+        "\n".join(
+            [
+                _bash_line("s1", "APP_PASSWORD=hunter2 node login.mjs"),
+                _bash_line("s2", "APP_PASSWORD=hunter2 node other.mjs"),
+                _bash_line("s3", "git status | head; GH_TOKEN=ghp_abc gh-tool x"),
+                _bash_line("s4", "PGPASSWORD=pw sed -n '1,5p' f.sql"),
+            ]
+        )
+    )
+    (secret_dir / "session-s2.jsonl").write_text(
+        "\n".join([_bash_line("s5", "APP_PASSWORD=hunter2 node login.mjs")])
+    )
+
+    pf.CLAUDE_HOME = fake_home
+    pf.PROJECTS_TRANSCRIPTS_DIR = fake_projects_root
+    try:
+        secret_report = pf.analyze_friction(
+            "/home/jan/Projects/fake-secret-project", days=30
+        )
+    finally:
+        pf.CLAUDE_HOME = original_claude_home
+        pf.PROJECTS_TRANSCRIPTS_DIR = original_transcripts_dir
+
+    secret_json = json.dumps(secret_report)
+    secret_text = pf.format_report_text(secret_report, days=30)
+    for secret in ("hunter2", "ghp_abc", "PGPASSWORD=pw"):
+        check(f"analyze_friction: JSON output never carries {secret!r}", secret not in secret_json)
+        check(f"format_report_text: never carries {secret!r}", secret not in secret_text)
+
+    check(
+        "analyze_friction: redacted rows keep the assignment name",
+        "APP_PASSWORD=***" in secret_text and "GH_TOKEN=***" in secret_text,
+    )
+    check(
+        "analyze_friction: grouping and counts are those of the raw command",
+        sorted((p["pattern"], p["count"], p["sessions"]) for p in secret_report["patterns"])
+        == sorted(
+            [
+                (f"APP_PASSWORD=*** — {pf.REASON_NO_RULE}", 3, 2),
+                (f"gh-tool — {pf.REASON_CHAIN}", 1, 1),
+            ]
+        ),
+    )
+    check(
+        "analyze_friction: culprit_example is redacted",
+        any(p.get("culprit_example") == "GH_TOKEN=*** gh-tool x" for p in secret_report["patterns"]),
+    )
+    check(
+        "analyze_friction: hook-denied example is redacted",
+        [d["example"] for d in secret_report["hook_denied"]]
+        == ["PGPASSWORD=*** sed -n '1,5p' f.sql"],
     )
 
     # graceful handling of a project with no transcripts at all (AC requirement)

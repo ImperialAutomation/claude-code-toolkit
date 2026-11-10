@@ -49,6 +49,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -110,6 +111,64 @@ HOOK_DENY_REASONS = (
     REASON_HOOK_DENY_WAIT_LOOP,
     REASON_HOOK_DENY_CD_CHAIN,
 )
+
+
+# --- credential redaction (issue #126) -----------------------------------------
+# Examples come verbatim from transcripts, so an inline credential would be
+# repeated into every report, and from there by /retro into a new transcript
+# and any issue or PR it writes. Every command-derived string a report row
+# carries goes through redact(); grouping and counts use the raw command.
+#
+# Regexes on the raw string rather than shlex tokens: re-joining tokens loses
+# the original quoting, and shlex raises on an unbalanced quote, while a regex
+# leaves everything that is not a credential byte-for-byte as it was.
+REDACTED = "***"
+
+# One shell word: quoted runs (an unterminated quote runs to the end of the
+# string), escaped characters and plain characters, in any order.
+_SHELL_WORD = r"""(?:'[^']*'?|"(?:\\.|[^"\\])*"?|\\.|[^\s'"\\;&|<>()])+"""
+
+# Assignment names that look secret: *PASS* (PASSWORD, PGPASSWORD, PASSWD),
+# *TOKEN*, *SECRET*, *AUTH*, and a _KEY suffix (API_KEY, SECRET_ACCESS_KEY).
+# The keyword search sits in a lookahead, which the engine never re-enters on
+# backtracking: a lazy `\w*?KEYWORD\w*` costs O(n^2) on one long word that
+# repeats the keyword and has no `=` after it.
+_SECRET_NAME = r"(?=[A-Za-z_])(?:(?=\w*?(?:PASS|TOKEN|SECRET|AUTH))\w*|\w*(?<=_KEY))"
+_SECRET_FLAG_NAME = r"--(?=[\w-]*?(?:password|passwd|token|secret|api[-_]?key))[\w-]*"
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    rf"(?<![^\s;&|(])(?P<name>{_SECRET_NAME})=(?P<value>{_SHELL_WORD})",
+    re.IGNORECASE,
+)
+_SECRET_FLAG_RE = re.compile(
+    rf"(?<![^\s;&|(])(?P<name>{_SECRET_FLAG_NAME})"
+    rf"(?P<sep>=|\s+)(?P<value>{_SHELL_WORD})",
+    re.IGNORECASE,
+)
+_AUTH_HEADER_RE = re.compile(
+    r"(?P<name>authorization:\s*(?:(?:bearer|basic|token)\s+)?)(?P<value>[^\s'\"]+)",
+    re.IGNORECASE,
+)
+# The lookbehind anchors the scheme at the start of its run; without it every
+# position inside a long alphanumeric word (a hex blob) is retried, O(n^2).
+_URL_USERINFO_RE = re.compile(
+    r"(?<![a-z0-9+.-])(?P<name>[a-z][a-z0-9+.-]*://[^\s/:@'\"]*):(?P<value>[^\s/@'\"]+)@",
+    re.IGNORECASE,
+)
+
+
+def redact(command):
+    """Return `command` with inline credential values replaced by `***`.
+
+    The name stays (`APP_PASSWORD=***`, `Authorization: Bearer ***`,
+    `--token ***`, `postgres://user:***@host`), so a row still shows which
+    construct caused the friction. Idempotent, and a command without
+    credentials comes back unchanged.
+    """
+    command = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m['name']}={REDACTED}", command)
+    command = _SECRET_FLAG_RE.sub(lambda m: f"{m['name']}{m['sep']}{REDACTED}", command)
+    command = _AUTH_HEADER_RE.sub(lambda m: f"{m['name']}{REDACTED}", command)
+    return _URL_USERINFO_RE.sub(lambda m: f"{m['name']}:{REDACTED}@", command)
 
 
 # --- rewriting PreToolUse hooks ------------------------------------------------
@@ -489,21 +548,23 @@ def analyze_friction(project_dir, days=30, rewrite_prefixes=DEFAULT_REWRITE_PREF
         if culprit is not None:
             pattern_culprits.setdefault(key, culprit)
 
+    # Grouping above runs on the raw command; only the strings a row displays
+    # are redacted, so counts and sessions are those of the raw command.
     patterns = []
     for key, count in pattern_counts.items():
         row = {
-            "pattern": key,
+            "pattern": redact(key),
             "count": count,
             "sessions": len(pattern_sessions[key]),
-            "example": pattern_examples[key],
+            "example": redact(pattern_examples[key]),
         }
         culprit_tokens = pattern_culprits.get(key)
         if culprit_tokens is not None:
             # Both halves are useful to a consumer: the token a remedy would
             # name, and the segment verbatim so the full `example` chain does
             # not have to be re-parsed to see what actually prompted.
-            row["culprit"] = _culprit_token(culprit_tokens)
-            row["culprit_example"] = " ".join(culprit_tokens)
+            row["culprit"] = redact(_culprit_token(culprit_tokens))
+            row["culprit_example"] = redact(" ".join(culprit_tokens))
         patterns.append(row)
     patterns.sort(key=lambda p: p["count"], reverse=True)
 
@@ -511,7 +572,7 @@ def analyze_friction(project_dir, days=30, rewrite_prefixes=DEFAULT_REWRITE_PREF
         {
             "reason": reason,
             "count": count,
-            "example": hook_denied_examples[reason],
+            "example": redact(hook_denied_examples[reason]),
         }
         for reason, count in hook_denied_counts.items()
     ]
