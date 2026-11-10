@@ -133,6 +133,20 @@ ran against.
    * Each step must be self-contained: one test + one piece of functionality + one commit
    * Steps must be ordered so each builds on the previous commit
 
+6. **One PR by default.** The whole issue goes into one PR. Split part of it off
+   into a follow-up only when that part is independently mergeable (the rest
+   merges and works without it) AND independently verifiable (it has its own
+   test or check). Size, effort or "cleaner history" is not a reason. When you
+   do split, the plan names the part and the reason, and Phase 4 puts both in
+   the PR body.
+7. **Collect your own decisions.** Read the issue's `## Decisions` section, if it
+   has one: active entries are settled, and the highest `D<n>` in it fixes the
+   next free ID. From here to Phase 4, every choice you make yourself that
+   affects scope, acceptance criteria or approach (a split under step 6 is one)
+   is noted in the refine entry format (`skills/refine/SKILL.md`, "Decision
+   entries"), for the `## Decisions made` section of the PR body. Choices that
+   affect none of the three get no entry.
+
 STOP HERE and ask for confirmation before proceeding to implementation.
 
 ## Phase 2: Branch & TDD Implementation
@@ -443,6 +457,10 @@ Before proceeding to PR creation:
    - `Closes #$ARGUMENTS`
    - Implementation summary
    - Test checklist (test counts from the verification sub-agent's TESTS line)
+   - A `## Decisions made` section, always (format below)
+   - If part of the issue was split off (Phase 1 step 6): a `## Split off`
+     section naming the follow-up and why it is independently mergeable and
+     verifiable
    - If the diff removed or renamed a public symbol and tests were deleted as a
      result (Phase 2 step 3): add a `## Removed Behaviour` section naming each
      behaviour that no longer exists and the test that covered it
@@ -452,7 +470,45 @@ Before proceeding to PR creation:
 3. Push + create PR in one command:
    `~/.claude/bin/git-push-pr-merge.sh --repo <worktree> --base <base-branch> --title "<concise description>" --body-file /tmp/<project>-pr-body-$ARGUMENTS.md --no-merge`
    `--no-merge` means the CI gate is skipped — the PR is left open for human review regardless of check status
-4. Return PR URL for review
+4. Label the PR `agent-authored` (`<PR>` is the script's `PR_NUMBER:` line). The
+   label marks every PR an agent opened, which is what `agent-pr-wip.sh` counts
+   against the agent PR WIP limit; review time is what that limit protects.
+   Create the label first when the repository lacks it:
+   ```bash
+   ~/.claude/bin/gh-save.sh /tmp/<project>-labels-$ARGUMENTS.json label list --search agent-authored --json name
+   # Read it; only when no entry has "name": "agent-authored":
+   env -C <worktree> gh label create agent-authored --color 5319e7 --description "Opened by an agent; counts toward the agent PR WIP limit"
+   env -C <worktree> gh pr edit <PR> --add-label agent-authored
+   ```
+   Never `gh label create --force`: a repo that already has the label (often
+   applied by a workflow) keeps its own colour and description. A failed label
+   call does not undo the PR; report it with the PR URL.
+5. Return PR URL for review
+
+`/implement` does not check the WIP limit itself: a human starting it is already
+deciding to add review load. `agent-pr-wip.sh` is the gate for unattended runs.
+
+### `## Decisions made`
+
+The reviewer sees every decision behind the PR in one place. Two shapes, in this
+order:
+
+1. **Issue decisions**, one line per active entry of the issue's `## Decisions`
+   section, keeping its ID and its HIL marker exactly as the `Choice` line has it.
+   Superseded entries are skipped. The full entries stay in the issue; do not copy
+   them.
+   ```markdown
+   - D2: Which decision-record format do the queue skills use? → A (no HIL: auto)
+   - D3: Which runs does the agent PR WIP limit apply to? → A (HIL)
+   ```
+2. **Your own decisions** (Phase 1 step 7), each as a full entry in the refine
+   format, numbered from the next free `D<n>` of the issue, with
+   `Origin: #$ARGUMENTS, <date>` and
+   `Choice: <option> (no HIL: agent default)`. These exist nowhere else, so they
+   carry their options and trade-offs in full. They are not written back to the
+   issue.
+
+When there is neither, the section reads `None.`
 
 ## Phase 5: Epic Tracking Update (automatic, if applicable)
 

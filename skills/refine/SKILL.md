@@ -53,7 +53,7 @@ An agent choice that affects none of scope, acceptance criteria or approach gets
 
 ## Phase 1: Understand Current State
 
-1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/<project>-issue-<N>.json issue view <N> --json title,body,labels,assignees`, then use the Read tool to read it.
+1. Fetch issue details: `~/.claude/bin/gh-save.sh /tmp/<project>-issue-<N>.json issue view <N> --json title,body,labels,assignees,comments`, then use the Read tool to read it. An open escalation from an earlier auto run is handled first: see [Re-run after an escalation](#re-run-after-an-escalation).
 2. If the body has a `## Decisions` section, read its entries: they are settled unless the user reopens them, and they fix the next free `D<n>`.
 3. Assess what's already defined and what's missing:
    - Action-oriented title?
@@ -79,7 +79,7 @@ Ask focused questions to fill the gaps. Cover:
 - **Acceptance criteria**: How do we verify this works? What edge cases matter?
 - **Technical approach**: Should this follow existing patterns? Any constraints?
 - **Dependencies**: Does this require other work to be done first?
-- **Size**: Is this one PR or should it be split?
+- **Size**: One PR by default. Recommend a split only when the parts are independently mergeable (each merges and works without the other) AND independently verifiable (each has its own test or check), and name that reason in the recommendation. Size, effort or "cleaner history" is not a reason. Same rule as `/implement` Phase 1.
 
 **Interaction style:**
 - Ask ONE question at a time; don't overwhelm with a wall of questions
@@ -142,7 +142,7 @@ Report what was changed in the parent and each sub-issue, and recommend the next
 `/refine <N> auto` runs the same phases without a human in the loop:
 
 - **Phase 1:** the detected sub-issue list is used as is.
-- **Phase 2:** no questions. For every decision point, adopt your own recommendation and record it with `Choice: <option> (no HIL: auto)`.
+- **Phase 2:** no questions. For every decision point, first run the [escalation check](#escalation-stop); if it does not escalate, adopt your own recommendation and record it with `Choice: <option> (no HIL: auto)`.
 - **Phases 3 and 4:** no confirmation stop. The parent and the affected sub-issues are written directly.
 - **End with a summary:**
 
@@ -153,3 +153,43 @@ Report what was changed in the parent and each sub-issue, and recommend the next
 
   Edited: #<N>, #<M>, ...
   ```
+
+  An escalating run replaces the `Edited:` line with `Escalated: <question> (category <k>), <comment URL>`, and its table holds no rows that were written, because nothing was.
+
+### Escalation stop
+
+Every auto run, whoever started it and whatever the labels on `<N>`, checks each decision point before adopting it. It escalates when:
+
+- the decision point falls in one of the categories of `docs/escalation-list.md` (the single source; read it there, it is not repeated here), or
+- adopting it would change an active entry whose `Choice` ends in `(HIL)`. Auto mode never supersedes a human decision; this is escalated as category 5, a conflict with an earlier explicit decision.
+
+On the first decision point that escalates, the run stops there:
+
+1. Write the comment to `/tmp/<project>-escalation-<N>.md` and post it with `gh issue comment <N> --body-file /tmp/<project>-escalation-<N>.md`. One comment per run, in this shape:
+
+   ```markdown
+   <!-- refine-escalation -->
+   ## Escalation: <decision point as a question>
+
+   **Category:** <k>: <category name from docs/escalation-list.md>
+
+   | Option | Pros | Cons |
+   |---|---|---|
+   | A: <option> | <pros> | <cons> |
+
+   **Recommendation:** <option>, because <rationale>
+
+   Answer with the option in a comment below, then re-run `/refine <N> auto` or `/refine <N>`.
+   ```
+
+   For a `(HIL)` conflict, name the entry (`D<n>`) and its current choice in the question.
+2. Add the label: `gh issue edit <N> --add-label needs-human`.
+3. Stop. Phases 3 and 4 do not run: the body and title of `<N>` and of every sub-issue stay exactly as they were. Decisions adopted earlier in this run are not written either; the next run derives them again.
+
+### Re-run after an escalation
+
+An escalation is open when `<N>` has the `needs-human` label and its comments hold a `<!-- refine-escalation -->` comment. The answer is any comment posted after the most recent one; take the option it names. A reply from which no option can be read counts as not answered.
+
+- **Answered:** record the decision as a new entry with the comment's question, options and recommendation and `Choice: <option> (HIL)`, with the next free `D<n>`; if the answer reverses a `(HIL)` entry, that entry's `Status` becomes `superseded by D<m>` (the human decided, not the agent). Remove the label with `gh issue edit <N> --remove-label needs-human` when the body is written in Phase 4, then continue the run as usual.
+- **Not answered** (auto mode): post nothing and change nothing. End with `Waiting: <question>, <comment URL>`.
+- An interactive run (`/refine <N>`) may instead put the open question to the user directly; the answer is recorded the same way, as `(HIL)`.

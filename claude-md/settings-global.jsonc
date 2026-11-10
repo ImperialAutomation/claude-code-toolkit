@@ -154,6 +154,10 @@
   // block-toolkit-live-checkout: blocks git checkout/switch that takes the
   //   toolkit checkout ~/.claude/bin points into off its base branch, where
   //   every commit would be live in all sessions before review.
+  // escalation-check: denies opening a PR (git-push-pr-merge.sh, gh pr create)
+  //   for an autonomous run (closed issue labeled agent-wip) whose diff hits an
+  //   escalation category without an approved:<category> label. Interactive
+  //   sessions only get the hits on stderr. See docs/escalation-list.md.
   "hooks": {
     "PreToolUse": [
       {
@@ -174,6 +178,10 @@
           {
             "type": "command",
             "command": "~/.claude/bin/hook-block-toolkit-live-checkout.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/bin/hook-escalation-check.sh"
           }
         ]
       }

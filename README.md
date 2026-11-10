@@ -170,6 +170,9 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
 | `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
+| `escalation-check.sh` | `escalation-check.sh [--repo DIR] [--base B]` | Check the branch diff against escalation categories 1 to 4 (`permissions`, `leakage`, `interface`, `global`); one `<key>  <file>  <reason>` line per hit, exit 1 on any hit. Categories, denylist and labels: [escalation list](docs/escalation-list.md) |
+| `agent-pr-wip.sh` | `agent-pr-wip.sh [--repo DIR]` | Count open `agent-authored` PRs against the agent PR WIP limit (3); prints `<open>/<limit>`, exit 0 below the limit, 1 at or above it, 2 when `gh` fails. The queue runner's gate before a claim; `/implement` does not call it |
+| `queue-claim.sh` | `queue-claim.sh [--repo DIR] claim \| release <N> pr <url> \| release <N> escalated \| release <N> failed <file>` | Queue runner claims: `claim` adds `agent-wip` to the oldest open `agent-ready` issue without `agent-wip`, `needs-human` or `epic` and prints its number (nothing when empty); `release` drops `agent-wip` and comments. A first failure adds `agent-failed` (one retry), a second adds `needs-human` too |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed, matched to the pushed commit so a lagging PR head cannot be read as a verdict), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. A check that is red repo-wide for a cause unrelated to the diff (e.g. a dependency audit after a new advisory) is `--allow-failing-check <name>`, which keeps the rest of the gate on and records the bypass on the PASS line. `--allow-failing-check <name>=<regex>` narrows that bypass to one cause: the check's failed job log must match `<regex>`, so a *different* failure of the same check still blocks (it blocks too when the log cannot be read, or when the check is an external status with no job log). Creates the PR itself, so `gh pr create` hooks do not fire; the gate also cannot prove a check set is complete — see [failure modes](docs/git-script-failure-modes.md) |
 
 **`git-commit.sh` refuses to commit on a protected branch.** In repos where every
@@ -344,6 +347,7 @@ not.
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-block-toolkit-live-checkout.sh` | PreToolUse hook in settings.json | Block `git checkout`/`git switch` that takes the live toolkit checkout (the one `~/.claude/bin` points into) off its base branch; the message names the worktree route ([why](CLAUDE.md)) |
+| `hook-escalation-check.sh` | PreToolUse hook in settings.json | Deny opening a PR (`git-push-pr-merge.sh`, `gh pr create`) for an autonomous run (closed issue labeled `agent-wip`) whose diff hits an escalation category without its `approved:<key>` label; interactive sessions only get the hits on stderr ([escalation list](docs/escalation-list.md)) |
 | `hook-post-edit-lint.sh` | PostToolUse hook in settings.json | Run ruff on Python files after Write/Edit (advisory, non-blocking) |
 | `hook-post-prune-branch-config.sh` | PostToolUse hook in settings.json | After a branch deletion, remove `[branch "<name>"]` config sections whose branch no longer exists. A sandboxed `git branch -d` cannot write `.git/config` and leaves them behind; the hook runs outside the sandbox and touches nothing else |
 
@@ -354,7 +358,23 @@ All scripts are already allowed in the global settings (`~/.claude/settings.json
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `permission-friction.py` | `permission-friction.py [project-dir] [--days N] [--json] [--rewrite-prefix CMD]` | Scan session transcripts for permission friction: estimated prompted calls, explicit denials, and top prompt-causing patterns. Chain friction is attributed to the segment that defeats matching, not the first token. Hook denies (including `cd <dir> && <cmd>` chains) are reported separately and excluded from the estimate. Used by `/retro`'s Permission Friction phase |
+| `decision-metrics.py` | `decision-metrics.py [--days N] [--project NAME\|PATH]... [--repo OWNER/NAME]... [--report all\|agreement\|reversals] [--output PATH]` | Numbers for recalibrating `docs/escalation-list.md`. Agreement: how `AskUserQuestion` answers with a `(Recommended)` option split into recommendation, other listed option and free text (listed with excerpts), the recommendation-listed-first share, per skill; all transcript projects, last 42 days by default. Reversals: no-HIL decision entries in issues and PR `## Decisions made` sections, exact (superseded, reverted `agent-authored` PR commit) and heuristic (follow-up fix within 14 days) in separate columns, by `Choice` kind and escalation category. `--output` is refused outside the temp dir or inside a git work tree |
 | `doc-budget-check.sh` | `doc-budget-check.sh [--warn SIZE] [--fail SIZE] [--repo DIR] <doc-root>...` | Per-file byte budget for markdown docs: lists files over the warn size (default 15K), exits 1 for any over the fail size (default 25K). Skips `archive/` dirs; deliberate exceptions go in `<repo>/.claude/doc-budget-exceptions`, and an exception that is back under budget is reported as stale. Used by `/retro` before and after writing; works as a pre-commit or CI step (see `--help`) |
+
+### Tests
+
+Every script has standalone tests: `bin/test-*.sh`, `bin/test-*.py`, `bin/tests/test-*.sh` and `bin/tests/test-*.py`, each run on its own and exiting non-zero on failure. `bin/run-tests.sh` runs the whole set and is what CI runs, so the local run and the PR check cover the same scripts:
+
+```bash
+bin/run-tests.sh                        # all test scripts
+bin/run-tests.sh test-git-commit.sh     # only the named ones (basename or path)
+bin/run-tests.sh --list                 # what would run, and what is skipped
+bin/run-tests.sh --ci                   # as in CI: also apply the CI skip list
+```
+
+It prints one `PASS`/`FAIL` line per script, shows a failing script's full output framed by its name, and ends with a summary naming every failing script. It needs `git`, `python3`, `jq` and `curl` on PATH and stops before any test when one is missing. The tests are hermetic: they build their fixtures in temp dirs and derive `~/Projects` from `$HOME`, so they pass on a machine without the toolkit installed.
+
+The workflow `.github/workflows/tests.yml` runs `bin/run-tests.sh --ci` on every pull request and on pushes to `main`. A test that cannot run on a stock runner goes in the `CI_SKIP` table in `run-tests.sh` with its reason, which the job prints as `SKIP <script>: <reason>`; nothing is skipped silently. The table is empty: every test runs in CI.
 
 ## Repository Structure
 
@@ -408,15 +428,22 @@ claude-code-toolkit/
 │   ├── hook-block-toolkit-live-checkout.sh ← PreToolUse hook: keep the live toolkit checkout on main
 │   ├── test-hook-block-toolkit-live-checkout.sh ← standalone tests for the above
 │   ├── lib/live-checkout.sh       ← which tree ~/.claude/bin makes live (shared by the two above)
+│   ├── escalation-check.sh        ← flag a branch diff that hits an escalation category
+│   ├── hook-escalation-check.sh   ← PreToolUse hook: deny an autonomous PR with unapproved hits
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 │   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
 │   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
-│   └── test-permission-friction.py ← standalone tests for the above
+│   ├── test-permission-friction.py ← standalone tests for the above
+│   ├── decision-metrics.py        ← agreement with recommendations, reversals of agent decisions
+│   ├── run-tests.sh               ← run every test script (locally and in CI)
+│   └── tests/                     ← standalone tests for the other scripts
+├── .github/workflows/tests.yml ← CI: bin/run-tests.sh --ci on every PR
 ├── skills/                    ← skill definitions (procedures)
 │   ├── refine/
 │   ├── implement/
 │   ├── implement-epic/
+│   ├── queue-run/
 │   ├── decompose/
 │   ├── bug/
 │   ├── cleanup/
@@ -480,7 +507,7 @@ Because it is a copy, later changes to the template do not reach it by themselve
 
 ### Hooks (`settings-global.jsonc` → `~/.claude/settings.json`)
 
-The global settings include four `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
+The global settings include five `PreToolUse` hooks that run **in all permission modes**, including bypass-permissions:
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, leading `VAR=value` env prefixes (except variables that make a command load or run code, such as `PATH`, `PAGER`, `PYTHONPATH` and the `LD_*`/`GIT_*`/`npm_config_*` families: those are never stripped, so the command prompts), and a model-typed `rtk` or `rtk proxy` prefix (so `rtk grep ...` is judged as `grep ...`), then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
@@ -502,6 +529,8 @@ The global settings include four `PreToolUse` hooks that run **in all permission
 3. **`hook-block-foreign-worktree-git.sh`** — Blocks a destructive git command (`checkout --`, `checkout -f`, `restore`, `reset`, `clean`, `stash`) that targets a *different* worktree via `-C`/`--git-dir`. Linked worktrees share one repository but hold independent uncommitted work, so restoring a sibling tree to HEAD silently destroys whatever another session was editing there. Only cross-worktree operations are blocked: inside your own tree these commands stay untouched, and unrelated checkouts (a different `.git`) are left alone. Read-only `git stash list`/`show` pass through. Set `WORKTREE_GUARD_HINT` from a small project wrapper to append a repo-specific alternative (e.g. an isolated test runner) to the block message.
 
 4. **`hook-block-toolkit-live-checkout.sh`**: Blocks `git checkout`/`git switch` that would take the live toolkit checkout off its base branch: new branches (`-b`/`-B`/`--orphan`, `-c`/`-C`), existing branches, detached commits and `switch -`. The target is the hook input's `cwd`, followed through an earlier `cd` in the chain, an `env -C` prefix and git's own `-C`; stuck and clustered short flags (`-bx`, `-qb x`) count too. Switching back to the base branch, path checkouts, linked worktrees and other repositories pass; with `~/.claude/bin` not a symlink the hook does nothing. The rule it enforces and why: [CLAUDE.md](CLAUDE.md).
+
+5. **`hook-escalation-check.sh`**: When a PR is opened with `git-push-pr-merge.sh` or `gh pr create` (at command position only), reads the `Closes|Fixes|Resolves #N` issues from the PR body and fetches their labels. For an autonomous run (an issue labeled `agent-wip`) it runs `escalation-check.sh` and denies when a hit's category lacks the `approved:<key>` label, with the hint to post the question as an issue comment, add `needs-human` and stop. Interactive sessions get the hits on stderr and are never blocked. A missing body file or a failed label fetch denies. Details: [escalation list](docs/escalation-list.md).
 
 To use bypass-permissions mode with these safety nets:
 
@@ -560,6 +589,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 | `/extend` | `/extend [issue]` or `/extend add #issue [to #parent]` | Add more sub-issues or link existing issues to a tracking PR |
 | `/implement` | `/implement <issue>` | Implement a GitHub issue with automated PR creation |
 | `/implement-epic` | `/implement-epic <parent-issue>` | Implement all sub-issues of an epic in dependency order |
+| `/queue-run` | `/loop /queue-run` | Queue runner: one iteration claims the oldest `agent-ready` issue, refines and implements it to an open PR, releases it |
 | `/finish` | `/finish [issue] [base]` | Commit, close issue, merge to base branch, cleanup |
 | `/bug` | `/bug ["<title>"]` or `/bug add #issue [to #parent]` | Create a bug interactively or with a title, or add existing issues to tracking PR |
 | `/update-tracking` | `/update-tracking <pr>` | Update tracking PR with current sub-issue status |
@@ -688,7 +718,7 @@ Configuration lives in `~/.claude/toolkit.yaml`. Add private repos there for pro
 4. Proposes an updated issue body with clear structure
 5. Updates the issue after confirmation, then carries the decisions into each affected sub-issue's scope, acceptance criteria and `## Decisions` section (each change shown first)
 
-With `auto`, the agent adopts its own recommendation for every decision, writes the parent and affected sub-issues without stopping, and ends with a summary of the decisions and the edited issues.
+With `auto`, the agent adopts its own recommendation for every decision, writes the parent and affected sub-issues without stopping, and ends with a summary of the decisions and the edited issues. A decision point in one of the categories of [`docs/escalation-list.md`](docs/escalation-list.md), or one that would reverse a human `(HIL)` decision, is not adopted: the run posts one issue comment with the question, options and recommendation, adds `needs-human` and stops without editing any issue body. A re-run after the human answered records the answer as a `(HIL)` decision. In both modes the size recommendation is one PR unless the parts are independently mergeable and verifiable.
 
 **Syntax:**
 ```bash
@@ -781,6 +811,30 @@ Create draft PR and sub-issues? (A/B/C)
 | PRs | One PR against base branch | One PR per sub-issue against feature branch |
 | Failure | Stops on failure | Creates bug issue, skips dependents, continues |
 | Verification | CLAUDE.md pattern-based (only when Docker files changed) | Always runs full verification |
+
+A PR opened by `/implement` carries a `## Decisions made` section: each active
+entry of the issue's `## Decisions` as one `D<n>: question → choice` line with
+its HIL marker, plus every choice the agent made itself that affects scope,
+acceptance criteria or approach as a full `/refine`-format entry marked
+`(no HIL: agent default)`; `None.` when there are none. The PR gets the
+`agent-authored` label, created when the repo lacks it. The whole issue goes
+into one PR unless a part is independently mergeable and verifiable, and the PR
+body names that reason.
+
+### Queue runner: `/loop /queue-run`
+
+**When:** issues labelled `agent-ready` should be worked without a human,
+locally, against your own `~/.claude` setup.
+
+Each iteration checks the agent PR WIP limit (`agent-pr-wip.sh`), claims the
+oldest claimable issue (`queue-claim.sh claim`), and spawns one sub-agent that
+runs `/refine <N> auto` and then `/implement <N>` in a linked worktree. The
+claim is released with the outcome: an open PR, an escalation (`needs-human`
+with the question as a comment), or a failure (`agent-failed`, one retry; a
+second failure adds `needs-human`). Epics are never claimed, and nothing is
+merged. An idle iteration (empty queue or WIP limit reached) schedules the next
+check after 30 minutes. Run one runner at a time, in auto mode; the skill lists
+the preconditions.
 
 ---
 
