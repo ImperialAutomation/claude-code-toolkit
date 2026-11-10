@@ -75,6 +75,7 @@ number, never the matched text, so the hit can be quoted in a public issue.
 | Label | Meaning |
 |---|---|
 | `agent-ready` | An agent may pick this up |
+| `agent-backlog` | Triaged as agent-doable, but not released to the queue: the runner ignores it. Release by swapping it for `agent-ready`; this is how the human meters the queue's token spend |
 | `agent-wip` | Claimed by a session; others skip it |
 | `needs-human` | Blocked on a decision; a comment holds the question, the options and the recommendation |
 | `agent-failed` | Agent run failed on this issue; a second failure adds needs-human. The queue runner claims it once more (one retry) |
