@@ -187,12 +187,21 @@ def detect_frontend_roots(project_root: Path) -> List[Path]:
 
     For a monorepo whose frontend lives in `frontend/`, `web/` and the like. Only
     one level down: deeper layouts are ambiguous enough to need an explicit root.
+    A subdirectory that cannot be read (a container volume such as `pgdata/`
+    owned by another user) is skipped instead of aborting the detection.
     """
-    return [
-        child
-        for child in sorted(project_root.iterdir())
-        if is_frontend_candidate_dir(child) and detect_locale_dir(child) is not None
-    ]
+    try:
+        children = sorted(project_root.iterdir())
+    except OSError:
+        return []
+    frontends = []
+    for child in children:
+        try:
+            if is_frontend_candidate_dir(child) and detect_locale_dir(child) is not None:
+                frontends.append(child)
+        except OSError:
+            continue
+    return frontends
 
 
 def detect_locale_structure(locale_dir: Path) -> str:

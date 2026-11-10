@@ -514,6 +514,24 @@ with tempfile.TemporaryDirectory() as tmp:
 
 with tempfile.TemporaryDirectory() as tmp:
     repo = Path(tmp).resolve()
+    frontend = write_frontend(repo, "frontend")
+    # A container volume owned by another user: unreadable, must be skipped.
+    # Python < 3.14 raises PermissionError from Path.is_dir/exists inside it.
+    pgdata = repo / "pgdata"
+    pgdata.mkdir()
+    pgdata.chmod(0)
+    try:
+        proc = run_on(repo, "--json")
+    finally:
+        pgdata.chmod(0o755)
+    config = json.loads(proc.stdout)["config"] if proc.stdout else {}
+    check(
+        "an unreadable subdirectory is skipped during frontend detection",
+        config.get("project") == str(frontend),
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    repo = Path(tmp).resolve()
     (repo / "locales").mkdir()
     (repo / "locales" / "en.json").write_text(
         json.dumps({"app": {"title": "App"}}), encoding="utf-8"
