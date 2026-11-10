@@ -188,7 +188,7 @@ On the first decision point that escalates, the run stops there:
 
 ### Re-run after an escalation
 
-An escalation is open when `<N>` has the `needs-human` label and its comments hold a `<!-- refine-escalation -->` comment. The answer is any comment posted after the most recent one; take the option it names. A reply from which no option can be read counts as not answered.
+An escalation is open when `<N>` has the `needs-human` label and its comments hold a `<!-- refine-escalation -->` comment. The answer is any comment posted after the most recent one; take the option it names. A comment carrying `<!-- queue-runner -->` is never an answer: the queue runner posts one when it releases the issue (with the run's token cost); skip it as if it were not there. A reply from which no option can be read counts as not answered.
 
 - **Answered:** record the decision as a new entry with the comment's question, options and recommendation and `Choice: <option> (HIL)`, with the next free `D<n>`; if the answer reverses a `(HIL)` entry, that entry's `Status` becomes `superseded by D<m>` (the human decided, not the agent). Remove the label with `gh issue edit <N> --remove-label needs-human` when the body is written in Phase 4, then continue the run as usual.
 - **Not answered** (auto mode): post nothing and change nothing. End with `Waiting: <question>, <comment URL>`.

@@ -39,8 +39,8 @@ Check these before starting a loop. They are not checked by the skill itself.
 
 ## One iteration
 
-The session running the loop stays thin: it calls two scripts, spawns one
-sub-agent and releases the claim. All issue work happens in the sub-agent.
+The session running the loop stays thin: it calls a few scripts, spawns one
+sub-agent, measures its tokens and releases the claim. All issue work happens in the sub-agent.
 
 `<project>` is the basename of `<repo>`, lowercase, non-alphanumerics as `-`.
 
@@ -161,6 +161,25 @@ LAST_ERROR_OUTPUT: <relevant output>
 WORKTREE: <worktree, if one was made>
 ```
 
+### Step 4b: Measure the tokens
+
+The Agent tool result of Step 4 contains `agentId: <id>`, the issue sub-agent's
+id. Measure that agent and every agent it spawned, whatever the outcome (a
+failed or escalated run costs just as much):
+
+```bash
+~/.claude/bin/cmd-save.sh /tmp/<project>-queue-tokens-<N>.json ~/.claude/bin/agent-tokens.py --agent <id> --json
+```
+
+- exit 0: `/tmp/<project>-queue-tokens-<N>.json` holds the totals; Read it for
+  its `summary` (Step 7) and pass it to the release in Step 5.
+- exit 1 (no transcript), exit 2 (ambiguous or unreadable), or no `agentId` in
+  the result: the measurement failed. That never fails the iteration: release
+  without `--tokens`, report `tokens: unknown`.
+
+The `subagent_tokens` of a completion notice is not this number: it is roughly
+the final context size.
+
 ### Step 5: Release
 
 Read the labels again yourself; the label, not the report, decides an
@@ -173,6 +192,11 @@ escalation:
 Then release in exactly one way. `agent-wip` is dropped only here, after the
 outcome exists: the escalation hook treats an issue with `agent-wip` as an
 autonomous run, so dropping it earlier would let a PR through unchecked.
+
+When Step 4b measured, every release below carries
+`--tokens /tmp/<project>-queue-tokens-<N>.json` right after `--repo <repo>`;
+when it failed, leave the option out. Each release comments with the totals
+(or `tokens: unknown`) and appends one row to `~/.claude/queue-runs.tsv`.
 
 | Situation | Release |
 |---|---|
@@ -204,11 +228,13 @@ one). Stop the loop and report it; do not switch it back yourself.
 
 ### Step 7: Report
 
-One line per iteration:
+One line per iteration. A worked issue ends with its token totals: the
+`summary` of Step 4b in parentheses, or `(tokens: unknown)` when the
+measurement failed.
 
-- `queue: #<N> -> PR <url>`
-- `queue: #<N> escalated (needs-human)`
-- `queue: #<N> failed (first failure, back in queue)` or `(second failure, needs-human)`
+- `queue: #<N> -> PR <url> (in 0.0k / cw 95k / cr 1.47M / out 15k, 3 agents)`
+- `queue: #<N> escalated (needs-human) (<summary>)`
+- `queue: #<N> failed (first failure, back in queue) (<summary>)` or `(second failure, needs-human) (<summary>)`
 - `queue: idle (empty queue)` or `queue: idle (WIP limit <open>/<limit>)`
 
 ## Pacing
