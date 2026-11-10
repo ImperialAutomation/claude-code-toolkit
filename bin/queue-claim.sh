@@ -22,8 +22,9 @@
 # warning, not a failed release.
 #
 # claim     Takes the oldest open `agent-ready` issue (by creation date) that
-#           has none of `agent-wip`, `needs-human` or `epic`, adds `agent-wip`
-#           and prints its number. Prints nothing when the queue is empty.
+#           has none of `agent-wip`, `needs-human`, `epic` or `agent-pr`, adds
+#           `agent-wip` and prints its number. Prints nothing when the queue is
+#           empty.
 #           Labels are not atomic, so each candidate is re-read right before
 #           and right after the claim: claimed by someone else in between,
 #           skip it; no longer claimable after our claim (closed, escalated,
@@ -31,7 +32,11 @@
 #           candidate is tried. An `agent-failed` issue is claimable: that is
 #           its one retry.
 # release   Ends a claim; every outcome drops `agent-wip`:
-#   pr <url>               comments with the PR link.
+#   pr <url>               comments with the PR link and swaps `agent-ready`
+#                          for `agent-pr`, so no later claim opens a second
+#                          PR. A PR closed unmerged needs a human to swap
+#                          them back. The `agent-pr` label must exist in the
+#                          repository.
 #   escalated              /refine or the escalation hook already posted the
 #                          question; adds `needs-human` only when it is missing
 #                          (with a warning), so the issue is never re-claimed.
@@ -55,8 +60,10 @@ WIP_LABEL="agent-wip"
 HUMAN_LABEL="needs-human"
 EPIC_LABEL="epic"
 FAILED_LABEL="agent-failed"
-# Labels that make an agent-ready issue unclaimable (#188, D7 for epic).
-SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL")
+PR_LABEL="agent-pr"
+# Labels that make an agent-ready issue unclaimable (#188, D7 for epic; #263
+# for agent-pr).
+SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL" "$PR_LABEL")
 # gh issue list returns 30 issues by default; the queue is never this long.
 GH_FETCH_LIMIT=200
 COMMENT_MARKER="<!-- queue-runner -->"
@@ -193,6 +200,7 @@ do_release() {
 
     case "$outcome" in
         pr)
+            edit_args+=(--remove-label "$READY_LABEL" --add-label "$PR_LABEL")
             printf '%s\nQueue runner opened %s for this issue.\n\n%s\n' \
                 "$COMMENT_MARKER" "$pr_url" "$tokens_line" > "$body"
             comment "$issue" "$body"
