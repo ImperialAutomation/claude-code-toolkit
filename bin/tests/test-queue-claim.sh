@@ -367,7 +367,26 @@ run release 3 failed "$MSG"
 check "release failed, view fails: exit 1" "1" "$RC"
 check "release failed, view fails: claim kept" "yes" "$(has 3 agent-wip)"
 
-echo "== 12. usage errors =="
+echo "== 12. release: exit 0 and no temp file left, every outcome =="
+# The comment body is a mktemp file; its EXIT trap must still find it once
+# do_release's locals are gone (set -u turned that into a non-zero exit).
+export TMPDIR="$T/tmpdir"
+for outcome in pr escalated failed; do
+    reset_stub
+    rm -rf "$TMPDIR"; mkdir -p "$TMPDIR"
+    issue 3 2026-01-01 agent-ready agent-wip
+    case "$outcome" in
+        pr)        run release 3 pr https://github.com/o/r/pull/77 ;;
+        escalated) run release 3 escalated ;;
+        failed)    run release 3 failed "$MSG" ;;
+    esac
+    check "$outcome: exit 0" "0" "$RC"
+    check "$outcome: no 'unbound variable' on stderr" "no" "$(contains "$ERR" "unbound variable")"
+    check "$outcome: no temp file left" "" "$(ls -A "$TMPDIR")"
+done
+unset TMPDIR
+
+echo "== 13. usage errors =="
 reset_stub
 issue 3 2026-01-01 agent-ready agent-wip
 run

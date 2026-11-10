@@ -187,7 +187,8 @@ comment() {
 do_release() {
     local body labels edit_args
     body=$(mktemp)
-    trap 'rm -f "$body"' EXIT
+    # Expanded now: the EXIT trap fires after this local is gone (set -u).
+    trap "rm -f '$body'" EXIT
     edit_args=(--remove-label "$WIP_LABEL")
 
     case "$outcome" in
