@@ -202,7 +202,7 @@ when it failed, leave the option out. Each release comments with the totals
 |---|---|
 | `needs-human` is on the issue (whatever the report says) | `queue-claim.sh --repo <repo> release <N> escalated` |
 | `ESCALATED` without `needs-human` | `queue-claim.sh --repo <repo> release <N> escalated` (it adds the label and warns) |
-| `PR_OPENED`, and `gh-save.sh /tmp/<project>-queue-pr-<N>.json pr view <url> --json state` reads `OPEN` | `queue-claim.sh --repo <repo> release <N> pr <url>` |
+| `PR_OPENED`, and `gh-save.sh /tmp/<project>-queue-pr-<N>.json pr view <url> --json state` reads `OPEN` | `queue-claim.sh --repo <repo> release <N> pr <url>` (it swaps `agent-ready` for `agent-pr`, so the issue is not claimed again) |
 | `FAILED`, no usable report, or a PR URL that does not resolve to an open PR | `queue-claim.sh --repo <repo> release <N> failed /tmp/<project>-queue-failure-<N>.md` |
 
 For a failure, first write `/tmp/<project>-queue-failure-<N>.md` with the
