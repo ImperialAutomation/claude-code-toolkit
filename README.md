@@ -130,7 +130,7 @@ Global CLAUDE.md names each wrapper in one line and leaves the details to the sc
 | `batch-issue-status.sh` | `batch-issue-status.sh <repo> <issues...>` | Fetch issue number/state/closed as JSON array |
 | `batch-issue-edit.sh` | `batch-issue-edit.sh [--dry-run] <repo> <plan.tsv>` | Apply label/milestone changes from a TSV plan (`<issue>\t<add>\t<remove>\t<milestone>`, `-` = no change) |
 | `batch-pr-for-issues.sh` | `batch-pr-for-issues.sh <repo> <issues...>` | Find merged/open PRs linked to issues |
-| `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue>` | Find the tracking PR for a parent issue |
+| `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue> [--exclude <pr>]...` | Find the open tracking PR for a parent issue (exact branch/closing-keyword match) |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
 | `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
 | `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Options go before `<output-file>`; everything after it is the command. Reports the command's own exit status and the byte count written. The auto-approve hook approves it only when `<command>` is approvable on its own, and otherwise denies it with a hint to run `<command>` bare |

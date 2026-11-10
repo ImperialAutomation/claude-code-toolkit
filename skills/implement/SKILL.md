@@ -526,8 +526,11 @@ If no parent reference found → skip this phase entirely (not a sub-issue).
 ### Step 2: Find Tracking PR
 
 ```bash
-~/.claude/bin/find-tracking-pr.sh <repo> $PARENT_ISSUE
+~/.claude/bin/find-tracking-pr.sh <repo> $PARENT_ISSUE --exclude [new-pr-number]
 ```
+
+`--exclude` keeps the PR you just opened out of the result: its body says
+`Part of #$PARENT_ISSUE`, and it must never be taken for the tracking PR.
 
 If no tracking PR exists → skip (inform user: "Note: no tracking PR found for parent #XXX").
 
