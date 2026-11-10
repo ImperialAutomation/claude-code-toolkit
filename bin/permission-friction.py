@@ -130,14 +130,18 @@ _SHELL_WORD = r"""(?:'[^']*'?|"(?:\\.|[^"\\])*"?|\\.|[^\s'"\\;&|<>()])+"""
 
 # Assignment names that look secret: *PASS* (PASSWORD, PGPASSWORD, PASSWD),
 # *TOKEN*, *SECRET*, *AUTH*, and a _KEY suffix (API_KEY, SECRET_ACCESS_KEY).
-_SECRET_NAME = r"(?=[A-Za-z_])(?:\w*?(?:PASS|TOKEN|SECRET|AUTH)\w*|\w*_KEY)"
+# The keyword search sits in a lookahead, which the engine never re-enters on
+# backtracking: a lazy `\w*?KEYWORD\w*` costs O(n^2) on one long word that
+# repeats the keyword and has no `=` after it.
+_SECRET_NAME = r"(?=[A-Za-z_])(?:(?=\w*?(?:PASS|TOKEN|SECRET|AUTH))\w*|\w*(?<=_KEY))"
+_SECRET_FLAG_NAME = r"--(?=[\w-]*?(?:password|passwd|token|secret|api[-_]?key))[\w-]*"
 
 _SECRET_ASSIGNMENT_RE = re.compile(
     rf"(?<![^\s;&|(])(?P<name>{_SECRET_NAME})=(?P<value>{_SHELL_WORD})",
     re.IGNORECASE,
 )
 _SECRET_FLAG_RE = re.compile(
-    rf"(?<![^\s;&|(])(?P<name>--[\w-]*(?:password|passwd|token|secret|api[-_]?key)[\w-]*)"
+    rf"(?<![^\s;&|(])(?P<name>{_SECRET_FLAG_NAME})"
     rf"(?P<sep>=|\s+)(?P<value>{_SHELL_WORD})",
     re.IGNORECASE,
 )
@@ -145,8 +149,10 @@ _AUTH_HEADER_RE = re.compile(
     r"(?P<name>authorization:\s*(?:(?:bearer|basic|token)\s+)?)(?P<value>[^\s'\"]+)",
     re.IGNORECASE,
 )
+# The lookbehind anchors the scheme at the start of its run; without it every
+# position inside a long alphanumeric word (a hex blob) is retried, O(n^2).
 _URL_USERINFO_RE = re.compile(
-    r"(?P<name>[a-z][a-z0-9+.-]*://[^\s/:@'\"]*):(?P<value>[^\s/@'\"]+)@",
+    r"(?<![a-z0-9+.-])(?P<name>[a-z][a-z0-9+.-]*://[^\s/:@'\"]*):(?P<value>[^\s/@'\"]+)@",
     re.IGNORECASE,
 )
 

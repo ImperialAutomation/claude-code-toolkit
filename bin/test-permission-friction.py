@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).parent / "permission-friction.py"
@@ -633,6 +634,25 @@ for clean in [
     "",
 ]:
     check(f"redact leaves a credential-free command unchanged: {clean!r}", pf.redact(clean) == clean)
+
+# Linear time on long adversarial input: the first four took tens of seconds
+# at 100k chars with the earlier quadratic patterns, and take milliseconds now.
+REDACT_TIME_BUDGET_SECONDS = 2.0
+REDACT_LONG = 100_000
+for name, adversarial in [
+    ("long alphanumeric run", "a" * REDACT_LONG),
+    ("long hex word after echo", "echo " + "3f" * (REDACT_LONG // 2)),
+    ("long word repeating PASS", "PASS" * (REDACT_LONG // 4)),
+    ("long flag repeating token", "--" + "token" * (REDACT_LONG // 5)),
+    ("long run of quotes", "A_TOKEN=" + "'" * (REDACT_LONG // 2)),
+    ("long run of backslashes", "--token " + "\\" * (REDACT_LONG // 2)),
+]:
+    started = time.perf_counter()
+    pf.redact(adversarial)
+    check(
+        f"redact runs in linear time: {name}",
+        time.perf_counter() - started < REDACT_TIME_BUDGET_SECONDS,
+    )
 
 
 # --- load_allow_rules ---
