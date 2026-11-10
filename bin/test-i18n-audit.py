@@ -384,6 +384,174 @@ check(
 )
 
 
+# --- frontend in a subdirectory: detect it one level below the root ---
+#
+# A monorepo keeps its frontend in `frontend/` next to a backend. Run from the
+# repo root, the audit must find that frontend and audit it exactly as if it
+# had been given `frontend` as the root: source scope included, so keys that
+# only occur in root-level e2e specs do not count as used.
+
+SUBDIR_LOCALE = {
+    "nav": {"home": "Home", "about": "Over"},
+    "e2e": {"onlyInSpec": "Alleen in de spec"},
+}
+
+SUBDIR_SOURCE = (
+    "import { useTranslation } from 'react-i18next';\n"
+    "export function Nav() {\n"
+    "  const { t } = useTranslation();\n"
+    "  return <a>{t('nav.home')}{t('nav.missing')}</a>;\n"
+    "}\n"
+)
+
+
+def write_frontend(root: Path, name: str, locale_rel: str = "src/i18n/locales"):
+    """A frontend with nl/en locales and one component under `<root>/<name>`."""
+    frontend = root / name
+    locale_dir = frontend / locale_rel
+    locale_dir.mkdir(parents=True)
+    for locale in ("nl", "en"):
+        (locale_dir / f"{locale}.json").write_text(
+            json.dumps(SUBDIR_LOCALE, ensure_ascii=False), encoding="utf-8"
+        )
+    src = frontend / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "Nav.tsx").write_text(SUBDIR_SOURCE, encoding="utf-8")
+    return frontend
+
+
+def run_on(root: Path, *extra_args):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), str(root), *extra_args],
+        capture_output=True,
+        text=True,
+    )
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    repo = Path(tmp).resolve()
+    frontend = write_frontend(repo, "frontend")
+    # A root-level script that references a key: out of the frontend's scope.
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / "nav.ts").write_text(
+        "const key = 'e2e.onlyInSpec';\n", encoding="utf-8"
+    )
+
+    from_root = run_on(repo, "--json")
+    from_frontend = run_on(frontend, "--json")
+
+    check(
+        "a frontend in a subdirectory is detected from the repo root",
+        from_root.returncode == from_frontend.returncode == 1
+        and "could not auto-detect" not in from_root.stderr,
+    )
+    check(
+        "the subdirectory run reports the same as the explicit-root run",
+        from_root.stdout == from_frontend.stdout,
+    )
+    root_report = json.loads(from_root.stdout) if from_root.stdout else {}
+    check(
+        "the detected subdirectory is the project in the report",
+        root_report.get("config", {}).get("project") == str(frontend)
+        and root_report.get("config", {}).get("source_dir") == "src",
+    )
+    check(
+        "a key used only outside the frontend stays unused",
+        [e["key"] for e in root_report.get("unused", [])] == ["e2e.onlyInSpec", "nav.about"],
+    )
+    text = run_on(repo).stdout
+    check(
+        "the text header names the detected subdirectory",
+        f"Project:          {frontend}\n" in text,
+    )
+
+    # An explicit --locale-dir keeps today's meaning: no descent, the given
+    # directory stays the project root.
+    explicit = run_on(repo, "--locale-dir", "frontend/src/i18n/locales", "--json")
+    explicit_config = json.loads(explicit.stdout)["config"] if explicit.stdout else {}
+    # A relative --source-dir means what the caller typed: relative to the
+    # directory they passed, not to the detected frontend.
+    with_source = run_on(repo, "--source-dir", "e2e", "--json")
+    source_report = json.loads(with_source.stdout) if with_source.stdout else {}
+    check(
+        "a relative --source-dir resolves against the given directory",
+        source_report.get("config", {}).get("source_dir") == "../e2e",
+    )
+
+    check(
+        "--locale-dir disables the subdirectory descent",
+        explicit_config.get("project") == str(repo)
+        and explicit_config.get("source_dir") == ".",
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    repo = Path(tmp).resolve()
+    write_frontend(repo, "web")
+    write_frontend(repo, "admin", locale_rel="public/locales")
+    proc = run_on(repo)
+    check(
+        "two frontends in subdirectories exit 2 and list both",
+        proc.returncode == 2
+        and "admin" in proc.stderr
+        and "web" in proc.stderr
+        and proc.stdout == "",
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    repo = Path(tmp).resolve()
+    frontend = write_frontend(repo, "frontend")
+    # Candidates in places that are never a frontend of this repo.
+    write_frontend(repo, ".cache")
+    write_frontend(repo, "node_modules")
+    venv = write_frontend(repo, "venv", locale_rel="locales")
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    proc = run_on(repo, "--json")
+    config = json.loads(proc.stdout)["config"] if proc.stdout else {}
+    check(
+        "hidden, node_modules and venv directories are not candidates",
+        config.get("project") == str(frontend),
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    repo = Path(tmp).resolve()
+    frontend = write_frontend(repo, "frontend")
+    # A container volume owned by another user: unreadable, must be skipped.
+    # Python < 3.14 raises PermissionError from Path.is_dir/exists inside it.
+    pgdata = repo / "pgdata"
+    pgdata.mkdir()
+    pgdata.chmod(0)
+    try:
+        proc = run_on(repo, "--json")
+    finally:
+        pgdata.chmod(0o755)
+    config = json.loads(proc.stdout)["config"] if proc.stdout else {}
+    check(
+        "an unreadable subdirectory is skipped during frontend detection",
+        config.get("project") == str(frontend),
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    repo = Path(tmp).resolve()
+    (repo / "locales").mkdir()
+    (repo / "locales" / "en.json").write_text(
+        json.dumps({"app": {"title": "App"}}), encoding="utf-8"
+    )
+    write_frontend(repo, "frontend")
+    proc = run_on(repo, "--json")
+    config = json.loads(proc.stdout)["config"] if proc.stdout else {}
+    check(
+        "a root-level locale directory wins over a subdirectory",
+        config.get("project") == str(repo) and config.get("locale_dir") == "locales",
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    proc = run_on(Path(tmp))
+    check(
+        "no candidate anywhere still exits 2 with the original error",
+        proc.returncode == 2 and "could not auto-detect" in proc.stderr,
+    )
+
+
 # --- summary ---
 
 print()

@@ -6,6 +6,11 @@ Finds missing keys (used in code but not in locale files), unused keys
 (defined in locale files but never referenced in code), and cross-locale
 inconsistencies (keys present in one locale but missing from another).
 
+Without --locale-dir, the locale directory is detected at the project root
+first. When none is found there, each direct subdirectory (not hidden, not a
+default exclude, not a virtualenv) is tried: exactly one match becomes the
+effective project root (a monorepo's `frontend/`), several exit 2 with a list.
+
 Usage:
   i18n-audit.py [options] [project-dir]
   i18n-audit.py --locale-dir src/i18n/locales --source-dir src
@@ -156,6 +161,47 @@ def detect_locale_dir(project_root: Path) -> Optional[Path]:
             if json_files or subdirs_with_json:
                 return path
     return None
+
+
+# A directory holding this file is a Python virtualenv, never a frontend.
+VENV_MARKER = "pyvenv.cfg"
+
+
+def is_frontend_candidate_dir(path: Path) -> bool:
+    """Whether a direct subdirectory of the root may hold a frontend.
+
+    Hidden directories, the default excludes (`node_modules`, build output) and
+    virtualenvs can contain locale-shaped directories of a dependency; picking
+    one of those would audit someone else's translations.
+    """
+    return (
+        path.is_dir()
+        and not path.name.startswith(".")
+        and path.name not in DEFAULT_EXCLUDE_DIRS
+        and not (path / VENV_MARKER).exists()
+    )
+
+
+def detect_frontend_roots(project_root: Path) -> List[Path]:
+    """Direct subdirectories of the root in which a locale directory is detected.
+
+    For a monorepo whose frontend lives in `frontend/`, `web/` and the like. Only
+    one level down: deeper layouts are ambiguous enough to need an explicit root.
+    A subdirectory that cannot be read (a container volume such as `pgdata/`
+    owned by another user) is skipped instead of aborting the detection.
+    """
+    try:
+        children = sorted(project_root.iterdir())
+    except OSError:
+        return []
+    frontends = []
+    for child in children:
+        try:
+            if is_frontend_candidate_dir(child) and detect_locale_dir(child) is not None:
+                frontends.append(child)
+        except OSError:
+            continue
+    return frontends
 
 
 def detect_locale_structure(locale_dir: Path) -> str:
@@ -684,6 +730,7 @@ def main():
 Examples:
   %(prog)s                              Auto-detect from current directory
   %(prog)s /path/to/project             Auto-detect from specified project
+  %(prog)s /path/to/monorepo            Detects a frontend one level down
   %(prog)s --locale-dir src/i18n/locales --source-dir src
   %(prog)s --check missing              Only report missing keys
   %(prog)s --json                       Output as JSON
@@ -742,6 +789,9 @@ Examples:
     if not project_root.is_dir():
         print(f"Error: project directory not found: {project_root}", file=sys.stderr)
         sys.exit(2)
+    # Explicit relative paths resolve against the directory the caller passed,
+    # even when the audit itself moves into a detected frontend subdirectory.
+    given_root = project_root
 
     # Resolve locale directory
     if args.locale_dir:
@@ -754,12 +804,27 @@ Examples:
     else:
         locale_dir = detect_locale_dir(project_root)
         if locale_dir is None:
-            print(
-                "Error: could not auto-detect locale directory. "
-                "Use --locale-dir to specify.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+            frontends = detect_frontend_roots(project_root)
+            if len(frontends) > 1:
+                print(
+                    "Error: locale directories found in several subdirectories. "
+                    "Pass one of them as the project directory:",
+                    file=sys.stderr,
+                )
+                for frontend in frontends:
+                    print(f"  {frontend.name}", file=sys.stderr)
+                sys.exit(2)
+            if not frontends:
+                print(
+                    "Error: could not auto-detect locale directory. "
+                    "Use --locale-dir to specify.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            # Exactly one frontend: audit it as if it had been passed as the
+            # root, so source and extension detection are scoped to it too.
+            project_root = frontends[0]
+            locale_dir = detect_locale_dir(project_root)
 
     # Detect structure and load locales
     structure = detect_locale_structure(locale_dir)
@@ -789,7 +854,7 @@ Examples:
     if args.source_dir:
         source_dir = Path(args.source_dir)
         if not source_dir.is_absolute():
-            source_dir = project_root / source_dir
+            source_dir = given_root / source_dir
         if not source_dir.is_dir():
             print(f"Error: source directory not found: {source_dir}", file=sys.stderr)
             sys.exit(2)
