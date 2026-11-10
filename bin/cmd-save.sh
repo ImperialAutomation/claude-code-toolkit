@@ -34,7 +34,12 @@
 #
 # Output: one line, "<output-file> (<bytes> bytes, exit <status>)". The byte
 # count makes an empty capture visible; a 0-byte file is otherwise unnoticed
-# until something downstream behaves strangely.
+# until something downstream behaves strangely. In separate mode, an empty
+# capture from a command that did write to stderr extends the line:
+#   "<output-file> (0 bytes, exit <status>; stderr: <n> bytes not captured,
+#   rerun with --stderr merge)"
+# The payload of a diagnostic command (docker logs, psql -f) often goes to
+# stderr; the note keeps a grep on the empty file from reading as a verdict.
 #
 # Exit codes:
 #   the command's own status, so a failed command is never read as a successful
@@ -87,10 +92,21 @@ mkdir -p "$(dirname "$OUTFILE")"
 # Run the command, then report. The status reported is the command's own, not
 # the redirect's: a failing command that still wrote a file would otherwise look
 # like a successful capture, and the caller would read an error message as data.
+#
+# In separate mode stderr runs through tee: it still reaches the caller live and
+# in order, and a copy lands in a scratch file so its size can be reported when
+# the capture itself came out empty. PIPESTATUS[0] is the command's status, not
+# tee's.
+STDERR_BYTES=0
 if [[ "$STDERR_MODE" == merge ]]; then
     if "$@" > "$OUTFILE" 2>&1; then STATUS=0; else STATUS=$?; fi
 else
-    if "$@" > "$OUTFILE"; then STATUS=0; else STATUS=$?; fi
+    ERRCOPY=$(mktemp)
+    trap 'rm -f "$ERRCOPY"' EXIT
+    "$@" 2>&1 > "$OUTFILE" | tee "$ERRCOPY" >&2
+    STATUS=${PIPESTATUS[0]}
+    STDERR_BYTES=$(wc -c < "$ERRCOPY" | tr -d ' ')
+    rm -f "$ERRCOPY"
 fi
 
 # Stripped after the fact rather than through a pipe, so $STATUS stays the
@@ -115,5 +131,13 @@ fi
 # until something downstream behaves strangely.
 BYTES=$(wc -c < "$OUTFILE" | tr -d ' ')
 
-printf '%s (%s bytes, exit %d)\n' "$OUTFILE" "$BYTES" "$STATUS"
+# An empty capture next to a non-empty stderr is the signature of a command
+# whose payload went to stderr (docker logs, psql -f). Without the note, a grep
+# on the empty file reads as "nothing matched".
+NOTE=""
+if [[ "$BYTES" -eq 0 && "$STDERR_BYTES" -gt 0 ]]; then
+    NOTE="; stderr: $STDERR_BYTES bytes not captured, rerun with --stderr merge"
+fi
+
+printf '%s (%s bytes, exit %d%s)\n' "$OUTFILE" "$BYTES" "$STATUS" "$NOTE"
 exit "$STATUS"

@@ -207,6 +207,47 @@ check "failed strip keeps a failing command's status" "6" \
 run "$T/raw.txt" sh -c "$COLOURED" >/dev/null 2>&1
 check "no stripping without the flag" "1" "$(grep -c $'\033' "$T/raw.txt")"
 
+echo "== 11. an empty capture with stderr output says where the payload went =="
+# Diagnostic commands (docker logs, psql -f, progress-printing CLIs) often write
+# their payload to stderr. In separate mode the file is then empty and a grep on
+# it reads as "nothing matched". The summary line names the uncaptured stderr.
+HINT="rerun with --stderr merge"
+check "hint when stdout empty and stderr not" \
+    "$T/err-only.txt (0 bytes, exit 0; stderr: 5 bytes not captured, $HINT)" \
+    "$(run "$T/err-only.txt" sh -c 'echo data >&2' 2>/dev/null)"
+check "file stays empty" "0" "$(wc -c < "$T/err-only.txt" | tr -d ' ')"
+check "exit 0 kept" "0" "$(run "$T/err-only.txt" sh -c 'echo data >&2' >/dev/null 2>&1; echo $?)"
+check "stderr still passes through intact" "data" \
+    "$(run "$T/err-only.txt" sh -c 'echo data >&2' 2>&1 >/dev/null)"
+check "no hint when only stdout" "$T/out-only.txt (5 bytes, exit 0)" \
+    "$(run "$T/out-only.txt" sh -c 'echo data' 2>/dev/null)"
+check "no hint when stdout non-empty" "$T/both.txt (4 bytes, exit 0)" \
+    "$(run "$T/both.txt" sh -c 'echo out; echo warn >&2' 2>/dev/null)"
+check "no hint when both streams empty" "$T/none.txt (0 bytes, exit 0)" \
+    "$(run "$T/none.txt" true 2>/dev/null)"
+check "no hint with --stderr merge" "$T/merge-hint.txt (5 bytes, exit 0)" \
+    "$(run --stderr merge "$T/merge-hint.txt" sh -c 'echo data >&2' 2>/dev/null)"
+check "merge file holds the payload" "data" "$(cat "$T/merge-hint.txt")"
+# The hint is an addition to the summary, never a change to the status.
+check "failing command keeps its status with the hint" \
+    "$T/err-fail.txt (0 bytes, exit 3; stderr: 5 bytes not captured, $HINT)" \
+    "$(run "$T/err-fail.txt" sh -c 'echo boom >&2; exit 3' 2>/dev/null)"
+check "failing command exit status" "3" \
+    "$(run "$T/err-fail.txt" sh -c 'echo boom >&2; exit 3' >/dev/null 2>&1; echo $?)"
+check "missing command still exits 127" "127" \
+    "$(run "$T/nope2.txt" this-command-does-not-exist-xyz >/dev/null 2>&1; echo $?)"
+# Counting stderr needs a scratch file; it must not stay behind next to the capture.
+mkdir -p "$T/clean"
+run "$T/clean/out.txt" sh -c 'echo data >&2' >/dev/null 2>&1
+check "no temp file next to the capture" "out.txt" "$(cd "$T/clean" && echo *)"
+mkdir -p "$T/tmpdir"
+TMPDIR="$T/tmpdir" bash "$SCRIPT" "$T/clean/out.txt" sh -c 'echo data >&2' >/dev/null 2>&1
+check "no scratch file left in TMPDIR" "0" "$(find "$T/tmpdir" -mindepth 1 | wc -l | tr -d ' ')"
+# With --strip-ansi the 0-byte test is on the cleaned file.
+check "hint combines with --strip-ansi" \
+    "$T/strip-hint.txt (0 bytes, exit 0; stderr: 5 bytes not captured, $HINT)" \
+    "$(run --strip-ansi "$T/strip-hint.txt" sh -c 'echo data >&2' 2>/dev/null)"
+
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
