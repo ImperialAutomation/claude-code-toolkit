@@ -294,8 +294,9 @@ next one runs (#188, D6).
   iteration right away; the queue may hold more.
 - **Sub-agent running** (Step 4 launched, no completion notification yet):
   schedule a fallback wakeup after 60 minutes, in case no notification
-  arrives. A wakeup that finds the sub-agent still running claims nothing and
-  schedules the next fallback.
+  arrives. A wakeup that finds the sub-agent still running claims nothing,
+  skips Step 0 (a stop file or a used-up budget never interrupts a running
+  issue; the next iteration's Step 0 sees it) and schedules the next fallback.
 - **Idle** (empty queue, WIP limit reached, or WIP count unknown): run
   `~/.claude/bin/queue-budget.sh idle <max-idle>`. Exit 0: schedule the next
   iteration after 30 minutes; the queue and the review backlog change slowly.

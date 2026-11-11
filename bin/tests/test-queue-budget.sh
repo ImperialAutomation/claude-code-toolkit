@@ -49,8 +49,8 @@ reset() { rm -rf "$QUEUE_RUNS_LOG" "$QUEUE_STOP_FILE" "$QUEUE_IDLE_DIR"; }
 row() { printf '2026-11-11T00:00:00Z\t%s\t%s\t\tunknown\tunknown\tunknown\tunknown\tunknown\t%s\n' "$1" "$2" "$3" >> "$QUEUE_RUNS_LOG"; }
 new_log() { printf '%s\n' "$HEADER" > "$QUEUE_RUNS_LOG"; }
 
-OUT=""; RC=0; ERR=""
-run() { OUT=$(bash "$QB" "$@" 2>"$T/stderr"); RC=$?; ERR=$(cat "$T/stderr"); }
+OUT=""; RC=0
+run() { OUT=$(bash "$QB" "$@" 2>/dev/null); RC=$?; }
 
 echo "== 0. --help =="
 run --help
