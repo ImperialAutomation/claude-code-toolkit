@@ -22,6 +22,7 @@
 #   5. base tracks a second remote (not origin)          -> fetches that remote
 #   6-9.  --help, unknown options, conflicting flags     -> answered without git
 #   10-14. stdin is not a terminal                       -> no prompt, safe default
+#   15.   --repo after the positional arguments          -> still honoured
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -356,6 +357,14 @@ OUT=$(run_notty_yes "$R" issue-14-sync develop); RC=$?
 check "exit one" 1 "$RC"
 check "feature branch survives" yes "$(branch_exists "$R" issue-14-sync)"
 contains "prints force-delete command" "git branch -D issue-14-sync" "$OUT"
+
+echo "== 15. --repo after the branch arguments still selects the repository =="
+R=$(merged_with_remote r15 issue-15-export)
+OUT=$(env -C "$T" bash "$SCRIPT" issue-15-export develop --keep-remote --repo "$R" </dev/null 2>&1); RC=$?
+check "exit zero" 0 "$RC"
+check "local branch deleted" no "$(branch_exists "$R" issue-15-export)"
+check "on base branch" develop "$(git_q "$R" branch --show-current)"
+check "remote branch kept" yes "$(remote_branch_exists "$R" issue-15-export)"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
