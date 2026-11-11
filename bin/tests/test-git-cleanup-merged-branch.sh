@@ -20,6 +20,9 @@
 #   3. base has no upstream                              -> actionable refusal
 #   4. base diverged from its upstream                   -> refuses, no merge
 #   5. base tracks a second remote (not origin)          -> fetches that remote
+#   6-9.  --help, unknown options, conflicting flags     -> answered without git
+#   10-14. stdin is not a terminal                       -> no prompt, safe default
+#   15.   --repo after the positional arguments          -> still honoured
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -222,6 +225,146 @@ OUT=$(run "$R" issue-5-audit develop); RC=$?
 check "exit zero" 0 "$RC"
 check "feature branch deleted" no "$(branch_exists "$R" issue-5-audit)"
 check "base advanced to fork tip" "$FORK_TIP" "$(git_q "$R" rev-parse develop)"
+
+# --- Argument parsing (#207) -------------------------------------------------
+#
+# A stub `git` on PATH records every call. Parsing errors and --help must be
+# answered before the script touches any repository, so the log stays empty.
+STUB="$T/stub-bin"
+mkdir -p "$STUB"
+GIT_LOG="$T/git-calls.log"
+printf '#!/bin/bash\necho "$*" >> "%s"\nexit 0\n' "$GIT_LOG" > "$STUB/git"
+chmod +x "$STUB/git"
+
+run_stubbed() { # args...  -> output in $OUT, status in $RC
+    : > "$GIT_LOG"
+    OUT=$(env -C "$T" PATH="$STUB:$PATH" bash "$SCRIPT" "$@" </dev/null 2>&1); RC=$?
+}
+
+for flag in --help -h; do
+    echo "== 6. $flag prints usage and runs no git =="
+    run_stubbed "$flag"
+    check "$flag exits 0" 0 "$RC"
+    contains "$flag prints usage" "Usage" "$OUT"
+    lacks "$flag is not a branch name" "Feature branch:" "$OUT"
+    check "$flag runs no git" 0 "$(wc -l < "$GIT_LOG" | tr -d ' ')"
+done
+
+echo "== 7. --help wins even after other arguments =="
+run_stubbed --repo "$T" some-branch --help
+check "exits 0" 0 "$RC"
+check "runs no git" 0 "$(wc -l < "$GIT_LOG" | tr -d ' ')"
+
+echo "== 8. unknown option exits 2 with no git =="
+run_stubbed --foo
+check "exits 2" 2 "$RC"
+contains "names the option" "--foo" "$OUT"
+check "runs no git" 0 "$(wc -l < "$GIT_LOG" | tr -d ' ')"
+
+echo "== 9. --delete-remote with --keep-remote exits 2 with no git =="
+run_stubbed --delete-remote --keep-remote
+check "exits 2" 2 "$RC"
+check "runs no git" 0 "$(wc -l < "$GIT_LOG" | tr -d ' ')"
+
+# --- No terminal (#207) --------------------------------------------------------
+#
+# stdin is /dev/null, as in an agent session. No prompt may be read: each one
+# takes its safe default and says what to run instead.
+#
+# bash's `read -p` prints its prompt only on a terminal, so "no prompt text in
+# the output" cannot tell "did not prompt" from "prompted silently". Cases that
+# must prove no answer was read therefore use run_notty_yes: a pipe full of "y"
+# that the old script would have taken as consent.
+run_notty() { # repodir [args...]
+    bash "$SCRIPT" --repo "$@" </dev/null 2>&1
+}
+
+run_notty_yes() { # repodir [args...]
+    printf 'y\ny\ny\ny\n' | bash "$SCRIPT" --repo "$@" 2>&1
+}
+
+remote_branch_exists() { # repodir branch
+    if git -C "$1" ls-remote --exit-code --heads origin "$2" >/dev/null 2>&1; then echo yes; else echo no; fi
+}
+
+# A merged feature whose branch is also published, as after a forge merge.
+merged_with_remote() { # name feature
+    local d
+    d=$(newremote "$1" develop)
+    add_merged_feature "$d" develop "$2" >/dev/null
+    git -C "$d" push -q origin "$2"
+    echo "$d"
+}
+
+echo "== 10. no TTY, no flag: remote kept, delete command printed, exit 0 =="
+R=$(merged_with_remote r10 issue-10-notify)
+OUT=$(run_notty "$R" issue-10-notify develop); RC=$?
+check "exit zero" 0 "$RC"
+check "local branch deleted" no "$(branch_exists "$R" issue-10-notify)"
+check "remote branch kept" yes "$(remote_branch_exists "$R" issue-10-notify)"
+contains "prints delete command" "git push origin --delete issue-10-notify" "$OUT"
+
+echo "== 11. no TTY, --delete-remote: remote deleted =="
+R=$(merged_with_remote r11 issue-11-billing)
+OUT=$(run_notty "$R" --delete-remote issue-11-billing develop); RC=$?
+check "exit zero" 0 "$RC"
+check "local branch deleted" no "$(branch_exists "$R" issue-11-billing)"
+check "remote branch deleted" no "$(remote_branch_exists "$R" issue-11-billing)"
+
+echo "== 12. no TTY, --keep-remote: remote kept, no prompt =="
+R=$(merged_with_remote r12 issue-12-search)
+OUT=$(run_notty "$R" issue-12-search develop --keep-remote); RC=$?
+check "exit zero" 0 "$RC"
+check "remote branch kept" yes "$(remote_branch_exists "$R" issue-12-search)"
+lacks "no delete hint either" "git push origin --delete" "$OUT"
+
+echo "== 12b. piped 'y' without --delete-remote does not delete the remote =="
+R=$(merged_with_remote r12b issue-12b-search)
+OUT=$(run_notty_yes "$R" issue-12b-search develop); RC=$?
+check "exit zero" 0 "$RC"
+check "remote branch kept" yes "$(remote_branch_exists "$R" issue-12b-search)"
+R=$(merged_with_remote r12c issue-12c-search)
+OUT=$(run_notty_yes "$R" --keep-remote issue-12c-search develop); RC=$?
+check "--keep-remote with piped 'y' keeps it" yes "$(remote_branch_exists "$R" issue-12c-search)"
+
+echo "== 13. no TTY, uncommitted changes: stops before checkout =="
+R=$(newremote r13 develop)
+add_merged_feature "$R" develop issue-13-upload
+git_q "$R" checkout -q issue-13-upload
+printf 'unsaved edit\n' >> "$R/README.md"
+OUT=$(run_notty_yes "$R" issue-13-upload develop); RC=$?
+check "exit one" 1 "$RC"
+check "still on feature branch" issue-13-upload "$(git_q "$R" branch --show-current)"
+check "feature branch survives" yes "$(branch_exists "$R" issue-13-upload)"
+contains "names the missing terminal" "no terminal" "$OUT"
+
+echo "== 14. no TTY, force-delete path: branch kept, command printed =="
+# The content landed on the remote base as a cherry-pick, so the feature tip is
+# not an ancestor of the base but the trees are identical.
+R=$(newremote r14 develop)
+TIP=$(git_q "$R" rev-parse develop)
+git_q "$R" checkout -q -b issue-14-sync
+printf 'sync work\n' > "$R/sync.md"
+git_q "$R" add -A
+git_q "$R" commit -qm "Add sync notes"
+git_q "$R" checkout -q -b pick develop
+git_q "$R" cherry-pick -x issue-14-sync >/dev/null
+git_q "$R" push -q origin pick:develop
+git_q "$R" checkout -q develop
+git_q "$R" branch -q -D pick
+git_q "$R" reset -q --hard "$TIP"
+OUT=$(run_notty_yes "$R" issue-14-sync develop); RC=$?
+check "exit one" 1 "$RC"
+check "feature branch survives" yes "$(branch_exists "$R" issue-14-sync)"
+contains "prints force-delete command" "git branch -D issue-14-sync" "$OUT"
+
+echo "== 15. --repo after the branch arguments still selects the repository =="
+R=$(merged_with_remote r15 issue-15-export)
+OUT=$(env -C "$T" bash "$SCRIPT" issue-15-export develop --keep-remote --repo "$R" </dev/null 2>&1); RC=$?
+check "exit zero" 0 "$RC"
+check "local branch deleted" no "$(branch_exists "$R" issue-15-export)"
+check "on base branch" develop "$(git_q "$R" branch --show-current)"
+check "remote branch kept" yes "$(remote_branch_exists "$R" issue-15-export)"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
