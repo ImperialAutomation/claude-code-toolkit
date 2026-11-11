@@ -27,14 +27,17 @@ The script will:
 3. Checkout the base branch
 4. Fetch the remote holding the base branch's upstream, then fast-forward to it
 5. Delete the merged feature branch (with safety checks)
-6. Optionally delete the remote branch
+6. Optionally delete the remote branch (`--delete-remote` / `--keep-remote`)
 
 ## Important
 
 - Only run this AFTER merging the PR in GitHub
 - The script uses `git branch -d` (safe delete) - will warn if branch isn't fully merged
-- Will prompt before deleting remote branches
-- Checks for uncommitted changes and warns you
+- On a terminal it prompts before deleting remote branches. Without one (an agent
+  session) it never prompts: the remote branch is kept, the delete command is
+  printed, and it exits 0. Pass `--delete-remote` to delete it instead
+- Checks for uncommitted changes and warns you; without a terminal it stops there
+- `--help` prints the full usage, including the other no-terminal defaults
 - The base branch must have an upstream; the script stops with the `git branch -u`
   remedy if it has none. It follows that upstream rather than assuming
   `origin/<base-name>`, so a linked worktree parked on its own branch works
@@ -52,4 +55,7 @@ The script will:
 
 # Specify both branches
 ~/.claude/bin/git-cleanup-merged-branch.sh issue-123-my-feature develop
+
+# Also delete the remote branch, without a prompt
+~/.claude/bin/git-cleanup-merged-branch.sh --delete-remote
 ```

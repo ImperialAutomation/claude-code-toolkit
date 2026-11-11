@@ -166,7 +166,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 |--------|-------|-------------|
 | `git-find-base-branch` | `git-find-base-branch [--repo DIR \| repo-dir]` | Detect the base branch of the current branch, or of the given worktree |
 | `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [--create SLUG] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches. `--create` never answers with the live toolkit checkout: it creates or reuses the sibling `../<repo>-<N>` instead, and is a no-op in every other repo ([why](CLAUDE.md)) |
-| `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [feature] [base]` | Checkout base, fast-forward it to its upstream, delete merged feature branch |
+| `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [--delete-remote\|--keep-remote] [feature] [base]` | Checkout base, fast-forward it to its upstream, delete merged feature branch; never prompts without a terminal (`--help` for the defaults) |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
 | `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
 | `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |

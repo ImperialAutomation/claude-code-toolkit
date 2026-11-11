@@ -1,9 +1,25 @@
 #!/bin/bash
 # Git cleanup script - checkout base branch, pull latest, delete merged feature branch
-# Usage: git-cleanup-merged-branch.sh [--repo DIR] [feature-branch] [base-branch]
-#   If no branches specified, uses current branch as feature and finds its base
-#   --repo DIR  Run git in repository DIR (avoids a leading `cd`, which would
-#               break the Bash(~/.claude/bin/*) permission match)
+#
+# Usage: git-cleanup-merged-branch.sh [options] [feature-branch] [base-branch]
+#   If no branches specified, uses current branch as feature and finds its base.
+#
+# Options (anywhere on the command line):
+#   --repo DIR       Run git in repository DIR (avoids a leading `cd`, which
+#                    would break the Bash(~/.claude/bin/*) permission match)
+#   --delete-remote  Delete the remote feature branch without asking
+#   --keep-remote    Keep the remote feature branch without asking
+#   -h, --help       Show this help and exit
+#
+# Without a terminal on stdin (an agent session), nothing is prompted and every
+# question takes its safe default:
+#   - remote branch still exists: kept; the delete command is printed, exit 0
+#     (pass --delete-remote to delete it instead)
+#   - uncommitted changes: stops before touching anything, exit 1
+#   - branch not fully merged but nothing would be lost: kept; the
+#     `git branch -D` command is printed, exit 1
+#
+# Exit codes: 0 cleaned up, 1 refused or failed, 2 usage error.
 
 set -e  # Exit on error
 
@@ -12,16 +28,93 @@ set -e  # Exit on error
 # shellcheck source=bin/lib/strip-sandbox-noise.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
 
-# Parse an optional --repo flag from the front of the argument list, then cd in
-# BEFORE any git command (including the `git branch --show-current` default).
-if [ "${1:-}" = "--repo" ]; then
-    REPO_DIR="$2"
-    shift 2
+readonly EXIT_USAGE=2
+
+usage() {
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+}
+
+usage_error() { # message
+    echo "Error: $1" >&2
+    echo "Run '$(basename "$0") --help' for usage." >&2
+    exit "$EXIT_USAGE"
+}
+
+# --help is answered first, wherever it appears: an earlier argument must never
+# be acted on (or a later one taken as a branch name) before help is shown.
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) usage; exit 0 ;;
+    esac
+done
+
+# All options are parsed before any git command, so a mistyped flag can never
+# become a branch name and is refused before the repository is touched.
+REPO_DIR=""
+REMOTE_ACTION=""   # delete | keep | "" (ask on a terminal, keep otherwise)
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo)
+            [ $# -ge 2 ] || usage_error "--repo needs a directory"
+            REPO_DIR="$2"
+            shift 2
+            ;;
+        --delete-remote|--keep-remote)
+            action="${1#--}"; action="${action%-remote}"
+            if [ -n "$REMOTE_ACTION" ] && [ "$REMOTE_ACTION" != "$action" ]; then
+                usage_error "--delete-remote and --keep-remote exclude each other"
+            fi
+            REMOTE_ACTION="$action"
+            shift
+            ;;
+        -*) usage_error "unknown option '$1'" ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
+[ ${#POSITIONAL[@]} -le 2 ] || usage_error "too many arguments: ${POSITIONAL[*]}"
+
+# cd in BEFORE any git command (including the `git branch --show-current` default).
+if [ -n "$REPO_DIR" ]; then
     cd "$REPO_DIR" || { echo "Error: cannot cd into repo '$REPO_DIR'" >&2; exit 1; }
 fi
 
-FEATURE_BRANCH="${1:-$(git_filtered branch --show-current)}"
-BASE_BRANCH="${2:-}"
+FEATURE_BRANCH="${POSITIONAL[0]:-$(git_filtered branch --show-current)}"
+BASE_BRANCH="${POSITIONAL[1]:-}"
+
+# A prompt is only asked on a terminal. Without one, `read` hits EOF and, under
+# set -e, ends the script mid-cleanup; the callers take the safe default instead.
+has_tty() { [ -t 0 ]; }
+
+confirm() { # prompt -> 0 on y/Y
+    read -p "$1 (y/N) " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]]
+}
+
+# Called after the local branch is gone. Keeping the remote branch is never a
+# failure: the local cleanup succeeded, so the caller still exits 0.
+handle_remote_branch() {
+    git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" &>/dev/null || return 0
+
+    echo -e "\n${YELLOW}Remote branch 'origin/$FEATURE_BRANCH' still exists${NC}"
+    local action="$REMOTE_ACTION"
+    if [ -z "$action" ]; then
+        if has_tty; then
+            if confirm "Delete remote branch?"; then action=delete; else action=keep; fi
+        else
+            action=keep
+            echo "No terminal to confirm, so it was kept (pass --delete-remote to delete)."
+        fi
+    fi
+
+    if [ "$action" = delete ]; then
+        git_filtered push origin --delete "$FEATURE_BRANCH"
+        echo -e "${GREEN}✓ Deleted remote branch 'origin/$FEATURE_BRANCH'${NC}"
+    elif [ -z "$REMOTE_ACTION" ]; then
+        echo "To delete it: git push origin --delete $FEATURE_BRANCH"
+    fi
+}
 
 # Color output
 RED='\033[0;31m'
@@ -81,11 +174,11 @@ fi
 # Warn if there are uncommitted changes
 if ! git_filtered diff-index --quiet HEAD --; then
     echo -e "${YELLOW}Warning: You have uncommitted changes${NC}"
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if ! has_tty; then
+        echo "Stopped: no terminal to confirm continuing. Commit or stash, then re-run."
         exit 1
     fi
+    confirm "Continue anyway?" || exit 1
 fi
 
 # Step 1: Checkout base branch
@@ -128,17 +221,7 @@ echo -e "\n${GREEN}Step 4: Deleting merged feature branch $FEATURE_BRANCH${NC}"
 if git_filtered branch --merged "$BASE_BRANCH" | grep -q "^[* ]*$FEATURE_BRANCH$"; then
     git_filtered branch -d "$FEATURE_BRANCH"
     echo -e "${GREEN}✓ Successfully deleted local branch '$FEATURE_BRANCH'${NC}"
-
-    # Try to delete remote branch if it exists
-    if git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" &>/dev/null; then
-        echo -e "\n${YELLOW}Remote branch 'origin/$FEATURE_BRANCH' still exists${NC}"
-        read -p "Delete remote branch? (y/N) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            git_filtered push origin --delete "$FEATURE_BRANCH"
-            echo -e "${GREEN}✓ Successfully deleted remote branch 'origin/$FEATURE_BRANCH'${NC}"
-        fi
-    fi
+    handle_remote_branch
 else
     # "Not fully merged" means the branch tip is not an ancestor of the base --
     # a reachability fact, not a content fact. The two diverge whenever history
@@ -179,21 +262,15 @@ else
 
     if [ "$SAFE_TO_FORCE" = "1" ]; then
         echo
-        read -p "Force-delete '$FEATURE_BRANCH'? (y/N) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if ! has_tty; then
+            echo "Left '$FEATURE_BRANCH' in place: no terminal to confirm a force-delete."
+            echo "To delete it: git branch -D $FEATURE_BRANCH"
+            exit 1
+        fi
+        if confirm "Force-delete '$FEATURE_BRANCH'?"; then
             git_filtered branch -D "$FEATURE_BRANCH"
             echo -e "${GREEN}✓ Deleted local branch '$FEATURE_BRANCH'${NC}"
-
-            if git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" &>/dev/null; then
-                echo -e "\n${YELLOW}Remote branch 'origin/$FEATURE_BRANCH' still exists${NC}"
-                read -p "Delete remote branch? (y/N) " -n 1 -r
-                echo
-                if [[ $REPLY =~ ^[Yy]$ ]]; then
-                    git_filtered push origin --delete "$FEATURE_BRANCH"
-                    echo -e "${GREEN}✓ Deleted remote branch 'origin/$FEATURE_BRANCH'${NC}"
-                fi
-            fi
+            handle_remote_branch
         else
             echo "Left '$FEATURE_BRANCH' in place."
             exit 1
