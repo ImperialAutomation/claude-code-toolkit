@@ -37,6 +37,15 @@ The user provides: `$ARGUMENTS`
 
 **Step 1:** Get current branch name using `git branch --show-current`
 
+**Toolkit repository: do not use `/finish`.** When the main worktree of this
+repository is the live toolkit checkout (`git worktree list --porcelain`, first
+`worktree` line, equals `dirname "$(readlink -f ~/.claude/bin)"`), stop here and
+tell the user: toolkit changes go live only through a reviewed PR to `main`, so
+open a PR (`/implement` does) and run `/cleanup` after the merge; that
+fast-forwards the live checkout and removes the linked worktree. Steps 9 to 12
+below would merge locally, and from a linked worktree `git checkout main` fails
+because the live checkout holds `main`.
+
 **Step 2:** Determine issue number:
 - If issue_number parameter is provided (not 'auto'), use that value
 - If issue_number parameter is empty/omitted OR 'auto':

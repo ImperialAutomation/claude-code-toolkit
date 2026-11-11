@@ -29,6 +29,25 @@ The script will:
 5. Delete the merged feature branch (with safety checks)
 6. Optionally delete the remote branch (`--delete-remote` / `--keep-remote`)
 
+## Toolkit repository
+
+When the repository's main worktree is the live toolkit checkout (the one
+`~/.claude/bin` points into), the script takes the toolkit route instead. Work
+there is built in a linked worktree `../claude-code-toolkit-<N>`, and going live
+means fast-forwarding the live checkout. Run `/cleanup` from either tree:
+
+- **From the linked worktree:** cleans up that worktree's branch.
+- **From the live checkout:** cleans up the branch you pass, or, without one, the
+  single linked worktree on an `issue-*` branch merged into `origin/main`. With
+  several merged worktrees it lists them and asks for the branch.
+
+It checks everything first (live checkout clean and on `main`, fast-forward
+possible, branch merged into `origin/main`, its worktree clean and unlocked) and
+changes nothing when a check fails. Then it fast-forwards the live checkout to
+`origin/main`, removes the worktree with `git worktree remove`, deletes the
+branch with `git branch -d`, and handles the remote branch as below. A
+squash-merged branch is refused; delete it by hand.
+
 ## Important
 
 - Only run this AFTER merging the PR in GitHub
