@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# Collect everything needed to write a develop -> master release PR body.
+# Collect everything needed to write a develop -> release-branch PR body.
 #
-# Emits a single report to stdout: current version, what the batch contains,
-# and the facts that decide the semver bump and the operator/migration notes.
+# Emits a single report to stdout: the branches compared, which release
+# machinery the repo has, current version, what the batch contains, and the
+# facts that decide the semver bump and the operator/migration notes.
 # Read-only: fetches and inspects, never writes a ref.
 #
-# Usage: collect.sh [--repo OWNER/NAME] [--base master] [--head develop]
+# Usage: collect.sh [--repo OWNER/NAME] [--base <release-branch>] [--head develop]
+#
+# --base defaults to the repo's GitHub default branch. When that is the head
+# itself (git-flow repos often default to develop), it falls back to the first
+# existing origin/master, origin/main. No candidate is an error: pass --base.
+#
+# Exit codes: 0 report printed; 1 a branch is missing, base equals head, or a
+# git comparison failed (the report stops there, never on a false OK);
+# 2 usage error.
 
 set -uo pipefail
 
 REPO=""
-BASE="master"
+BASE=""
 HEAD="develop"
+FALLBACK_BASES="master main"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,6 +33,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+die() { echo "!! $*" >&2; exit 1; }
+
+remote_has() { git rev-parse --verify --quiet "refs/remotes/origin/$1" >/dev/null; }
+
+remote_branches() {
+  git for-each-ref --format='  %(refname:short)' refs/remotes/origin \
+    | grep -v '^  origin/HEAD$' >&2
+}
+
 if [ -z "$REPO" ]; then
   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner) || {
     echo "Cannot determine repo. Pass --repo OWNER/NAME." >&2; exit 1; }
@@ -31,6 +50,32 @@ fi
 # git may warn about sandbox-masked .gitmodules; harmless, keep stderr quiet.
 git fetch origin --tags --quiet 2>/dev/null
 
+if [ -z "$BASE" ]; then
+  BASE=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)
+  if [ -z "$BASE" ] || [ "$BASE" = "$HEAD" ]; then
+    BASE=""
+    for candidate in $FALLBACK_BASES; do
+      remote_has "$candidate" && { BASE="$candidate"; break; }
+    done
+  fi
+  if [ -z "$BASE" ]; then
+    echo "!! cannot pick a release branch: the default branch is $HEAD or unknown," >&2
+    echo "   and none of $FALLBACK_BASES exists on origin. Pass --base <branch>. Remote branches:" >&2
+    remote_branches
+    exit 1
+  fi
+fi
+
+[ "$BASE" = "$HEAD" ] && die "base and head are the same branch ($BASE); pass --base <release-branch>."
+
+for ref in "$BASE" "$HEAD"; do
+  if ! remote_has "$ref"; then
+    echo "!! origin/$ref does not exist. Remote branches:" >&2
+    remote_branches
+    exit 1
+  fi
+done
+
 RANGE_AHEAD="origin/$BASE..origin/$HEAD"
 RANGE_DIFF="origin/$BASE...origin/$HEAD"
 
@@ -38,29 +83,65 @@ echo "=== REPO ==="
 echo "$REPO  ($HEAD -> $BASE)"
 
 echo
+echo "=== RELEASE MACHINERY ==="
+LABELS=$(gh label list --repo "$REPO" --search "release:" --limit 100 --json name -q '.[].name' 2>/dev/null)
+LABELS_RC=$?
+RELEASE_LABELS=$(printf '%s\n' "$LABELS" | grep '^release:' | sort | tr '\n' ' ' | sed 's/ $//')
+if [ "$LABELS_RC" -ne 0 ]; then
+  echo "release labels: unknown (gh label list failed)"
+else
+  echo "release labels: ${RELEASE_LABELS:-none}"
+fi
+WORKFLOWS=$(git ls-tree --name-only "origin/$BASE" .github/workflows/ 2>/dev/null)
+SEMVER_WF=$(printf '%s\n' "$WORKFLOWS" | grep -E '/semver-tag\.ya?ml$' | head -n 1)
+echo "semver-tag workflow: ${SEMVER_WF:-none}"
+echo "workflows on $BASE: $(printf '%s\n' "$WORKFLOWS" | sed 's|.*/||' | tr '\n' ' ' | sed 's/ *$//')"
+TEMPLATE=".github/PULL_REQUEST_TEMPLATE.md"
+if git show "origin/$BASE:$TEMPLATE" 2>/dev/null | grep -q 'AGENT-REVIEW:START'; then
+  echo "AGENT-REVIEW template: $TEMPLATE"
+else
+  echo "AGENT-REVIEW template: none"
+fi
+if [ "$LABELS_RC" -ne 0 ]; then
+  echo "semver: unknown -- check the release:* labels by hand before labelling"
+elif [ -n "$RELEASE_LABELS" ] && [ -n "$SEMVER_WF" ]; then
+  echo "semver: present -- label the PR, the workflow tags the merge"
+else
+  echo "semver: absent -- skip the release label and tag steps"
+fi
+
+echo
 echo "=== CURRENT VERSION ==="
 LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
-[ -z "$LATEST" ] && LATEST="v0.0.0"
-echo "latest tag: $LATEST"
+if [ -z "$LATEST" ]; then
+  LATEST="v0.0.0"
+  echo "latest tag: none (v0.0.0 assumed)"
+else
+  echo "latest tag: $LATEST"
+fi
 V=${LATEST#v}
 MAJOR=${V%%.*}; REST=${V#*.}; MINOR=${REST%%.*}; PATCH=${REST#*.}
 echo "next: major=v$((MAJOR+1)).0.0  minor=v$MAJOR.$((MINOR+1)).0  patch=v$MAJOR.$MINOR.$((PATCH+1))"
 
 echo
 echo "=== SIZE ==="
-PRS=$(git rev-list --count --first-parent "$RANGE_AHEAD")
-COMMITS=$(git rev-list --count "$RANGE_AHEAD")
+PRS=$(git rev-list --count --first-parent "$RANGE_AHEAD") || die "SIZE: git rev-list $RANGE_AHEAD failed"
+COMMITS=$(git rev-list --count "$RANGE_AHEAD") || die "SIZE: git rev-list $RANGE_AHEAD failed"
 echo "merges (PRs): $PRS"
 echo "commits: $COMMITS"
-git diff --shortstat "$RANGE_DIFF"
+git diff --shortstat "$RANGE_DIFF" || die "SIZE: git diff $RANGE_DIFF failed"
 
 echo
 echo "=== BEHIND CHECK (commits on $BASE not in $HEAD) ==="
-BEHIND=$(git rev-list --count "origin/$HEAD..origin/$BASE")
+# A failed comparison stops the report: this check is a release gate and must
+# never print OK on an error.
+BEHIND=$(git rev-list --count "origin/$HEAD..origin/$BASE") \
+  || die "BEHIND CHECK: git rev-list origin/$HEAD..origin/$BASE failed"
 echo "count: $BEHIND  (merge commits from past releases are expected and harmless)"
 # Only NON-merge commits matter: they are work that exists on $BASE and nowhere
 # else, and a release would silently carry them along unreviewed.
-NONMERGE=$(git rev-list --no-merges "origin/$HEAD..origin/$BASE")
+NONMERGE=$(git rev-list --no-merges "origin/$HEAD..origin/$BASE") \
+  || die "BEHIND CHECK: git rev-list --no-merges origin/$HEAD..origin/$BASE failed"
 if [ -n "$NONMERGE" ]; then
   echo
   echo "!! non-merge commits present on $BASE only:"
