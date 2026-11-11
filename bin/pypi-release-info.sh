@@ -118,7 +118,7 @@ def line:
   end
 '
 
-if ! jq -r --argjson limit "$LIMIT" "$JQ_PROGRAM" "$BODY" --args "${VERSIONS[@]}"; then
+if ! jq -r --argjson limit "$LIMIT" "$JQ_PROGRAM" "$BODY" --args ${VERSIONS[@]+"${VERSIONS[@]}"}; then
   echo "PyPI answered with something other than the release JSON for $PACKAGE" >&2
   exit 1
 fi
