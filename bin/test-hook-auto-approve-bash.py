@@ -683,11 +683,91 @@ check("sed-read: denied inside a chain", not approved and reason is not None)
 approved, reason, _ = run_hook("git status")
 check("sed-read: unrelated allowed command still approved", approved)
 
-approved, reason, _ = run_hook("sed -i 's/a/b/' /tmp/x.py")
+approved, reason, _ = run_hook("sed 's/a/b/' /tmp/x.py")
 check(
     "sed-read: a real stream edit falls through to a prompt, not a deny",
     not approved and reason is None,
 )
+
+# --- sed as a file editor: deny with a hint pointing at Edit (#210) ---
+# `sed -i` rewrites a file in place, which Edit does natively with a diff and
+# no prompt. Every GNU spelling of the in-place flag counts; sed without it
+# (stdin to stdout) is a data transformation and stays untouched.
+
+for tokens in (
+    ["sed", "-i", "s/a/b/", "f"],
+    ["sed", "-i.bak", "s/a/b/", "f"],
+    ["sed", "--in-place", "s/a/b/", "f"],
+    ["sed", "--in-place=.bak", "s/a/b/", "f"],
+    ["sed", "-ni", "s/a/b/p", "f"],
+    ["sed", "-Ei", "s/a+/b/", "f"],
+    ["sed", "-n", "-i", "1,5p", "f"],
+    ["sed", "-e", "s/a/b/", "-i", "f"],
+    ["sed", "-i", "-e", "s/a/b/", "f"],
+    ["sed", "-f", "script.sed", "-i", "f"],
+    ["sed", "-i", "s/a/b/", "f", "g"],
+):
+    check(
+        f"sed-edit: {shlex.join(tokens)} is an in-place edit",
+        hook.is_sed_in_place_edit(tokens),
+    )
+
+for tokens in (
+    ["sed", "s/a/b/"],
+    ["sed", "s/a/b/", "f"],
+    ["sed", "-n", "1,5p", "f"],
+    ["sed", "-i", "s/a/b/"],
+    ["sed", "-i", "-e", "s/a/b/"],
+    # In a short cluster the letters after e/f/l are that flag's argument.
+    ["sed", "-ei", "f"],
+    ["sed", "-l", "5", "s/a/b/", "f"],
+    # After `--` nothing is an option any more.
+    ["sed", "s/a/b/", "--", "-i"],
+    ["grep", "-i", "foo", "f"],
+    [],
+):
+    check(
+        f"sed-edit: {shlex.join(tokens) or '<empty>'} is NOT an in-place edit",
+        not hook.is_sed_in_place_edit(tokens),
+    )
+
+approved, reason, rc = run_hook("sed -i 's/a/b/' /tmp/x.md")
+check("sed-edit: hook does not approve it", not approved)
+check(
+    "sed-edit: hook denies with an Edit hint",
+    reason is not None and "Edit" in reason and "sed -i" in reason,
+)
+check("sed-edit: hook still exits 0", rc == 0)
+
+for command in (
+    "sed -i.bak 's/a/b/' f",
+    "sed --in-place 's/a/b/' f",
+    "sed -ni 's/a/b/p' f",
+    "sed -i 's/a/b/' f; gh issue comment 1 --body-file f",
+    "git status && sed -i 's/a/b/' f",
+    "env -C ~/Projects/x sed -i 's/a/b/' f",
+    "FOO=1 sed -i 's/a/b/' f",
+):
+    _, reason, _ = run_hook(command)
+    check(
+        f"sed-edit: hook denies {command!r}",
+        reason is not None and "sed -i" in reason,
+    )
+
+# D1: a command that both matches the read shape and edits in place is a
+# write; it gets the Edit hint, not the Read hint.
+_, reason, _ = run_hook("sed -n -i '1,5p' f")
+check(
+    "sed-edit: -n -i with a line range gets the Edit hint, not the Read hint",
+    reason is not None and "sed -i" in reason,
+)
+
+for command in ("printf x | sed 's/a/b/'", "git log | sed -n '1,5p'", "sed -i 's/a/b/'"):
+    _, reason, _ = run_hook(command)
+    check(
+        f"sed-edit: {command!r} is not denied by the in-place rule",
+        reason is None or "sed -i" not in reason,
+    )
 
 # --- inline Python as a file reader: deny with a hint pointing at Read ---
 # Same reasoning as the sed guard above. CLAUDE.md forbids `python3 -c` for file

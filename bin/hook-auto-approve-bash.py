@@ -901,9 +901,10 @@ def is_sed_file_read(tokens):
     """True for `sed -n 'X,Yp' <file>` and friends — sed used as a plain file
     reader, which is Read with offset/limit written as a shell command.
 
-    Deliberately narrow. A real stream edit (-i, a substitution, reading from a
-    pipe) is NOT matched: those are legitimate shell work and must keep falling
-    through to a normal prompt rather than being denied."""
+    Deliberately narrow. A real stream edit (a substitution, reading from a
+    pipe) is NOT matched: that is legitimate shell work and must keep falling
+    through to a normal prompt rather than being denied. In-place editing is
+    is_sed_in_place_edit's concern, checked before this one."""
     if not tokens or tokens[0] != "sed":
         return False
     if "-n" not in tokens and "--quiet" not in tokens and "--silent" not in tokens:
@@ -919,6 +920,67 @@ def is_sed_file_read(tokens):
     # N,$ p — optionally with the whole thing wrapped in braces.
     script = operands[0].strip("{} ")
     return bool(re.fullmatch(r"\d+(,(\d+|\$))?\s*p", script))
+
+
+# GNU sed: the short in-place flag, the long one, the short options that take
+# an argument (glued to the flag or as the next token), and the two of those
+# that supply the script, after which every operand is a file.
+SED_IN_PLACE_SHORT = "i"
+SED_IN_PLACE_LONG = "--in-place"
+SED_SHORT_WITH_ARGUMENT = "efl"
+SED_SCRIPT_OPTIONS = "ef"
+SED_LONG_SCRIPT_OPTIONS = ("--expression", "--file")
+SED_LONG_WITH_ARGUMENT = SED_LONG_SCRIPT_OPTIONS + ("--line-length",)
+
+
+def is_sed_in_place_edit(tokens):
+    """True for `sed -i ... <file>` in any GNU spelling (`-i`, `-i<SUFFIX>`,
+    `--in-place[=<SUFFIX>]`, a short cluster such as `-ni`) with at least one
+    file operand: sed used as a file editor, which is Edit as a shell command.
+
+    Without a file operand sed reads stdin, so there is nothing for Edit to
+    open and the segment is left alone. In a short cluster the letters after
+    an argument-taking flag (`e`, `f`, `l`) are its argument, so `-ei` is a
+    script `i`, not in-place editing."""
+    if not tokens or tokens[0] != "sed":
+        return False
+
+    in_place = False
+    script_given = False
+    operands = []
+    args = tokens[1:]
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--":
+            operands.extend(args[index:])
+            break
+        if arg.startswith("--"):
+            name = arg.split("=", 1)[0]
+            if name == SED_IN_PLACE_LONG:
+                in_place = True
+            elif name in SED_LONG_WITH_ARGUMENT:
+                script_given = script_given or name in SED_LONG_SCRIPT_OPTIONS
+                if "=" not in arg:
+                    index += 1
+            continue
+        if arg.startswith("-") and len(arg) > 1:
+            for position, letter in enumerate(arg[1:], start=1):
+                if letter == SED_IN_PLACE_SHORT:
+                    # The rest of the cluster is the backup suffix.
+                    in_place = True
+                    break
+                if letter in SED_SHORT_WITH_ARGUMENT:
+                    script_given = script_given or letter in SED_SCRIPT_OPTIONS
+                    if position == len(arg) - 1:
+                        index += 1
+                    break
+            continue
+        operands.append(arg)
+
+    files = operands if script_given else operands[1:]
+    return in_place and bool(files)
 
 
 # --- Python used as a file reader -------------------------------------------
@@ -1196,6 +1258,20 @@ def command_has_sed_file_read(command):
     )
 
 
+def command_has_sed_in_place_edit(command):
+    """True if any segment of `command` edits a file in place through sed.
+    False (never raises) on unparseable input — the caller falls through."""
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    return any(
+        is_sed_in_place_edit(strip_command_prefixes(segment)[1])
+        for segment in segments
+    )
+
+
 def is_command_safe(command, rules=NO_BASH_RULES):
     """True if every segment of `command` is safe under the settings `rules`.
     False (never raises) on unparseable input — the caller falls through to
@@ -1220,7 +1296,24 @@ def main():
         return 0
 
     # Deny wins over allow: a chain that is otherwise fully allowlisted is
-    # still denied when one of its segments reads a file through sed.
+    # still denied when one of its segments edits or reads a file through sed.
+    # The edit check runs first: `sed -n -i '1,5p' f` matches the read shape
+    # too, but it rewrites the file, so the Edit hint is the right one.
+    if command_has_sed_in_place_edit(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: `sed -i` edits a file. Use Edit (exact string "
+                    "replacement; allowlisted, no prompt). For a multi-line "
+                    "rewrite, Read then Write."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
     if command_has_sed_file_read(command):
         output = {
             "hookSpecificOutput": {
