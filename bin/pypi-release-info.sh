@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pypi-release-info.sh — release dates and requires_python from the PyPI JSON API.
+# pypi-release-info.sh: release dates and requires_python from the PyPI JSON API.
 #
 # Replaces the inline `python3 -c "import json,urllib.request ..."` scripts used
 # for release cooldowns and Python-compatibility checks before a dependency

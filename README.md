@@ -120,7 +120,7 @@ The `bin/` directory contains reusable shell scripts that skills call instead of
 
 **Why?** Claude Code permissions match on the **first word** of a Bash command. An inline loop like `for issue in 15 16 17; do gh issue view $issue ...; done` gets blocked because the first word is `for`, not `gh`. By wrapping batch operations in scripts, permissions can match on the script path (`~/.claude/bin/*`).
 
-Global CLAUDE.md names each wrapper in one line and leaves the details to the script: `cmd-save.sh`, `strip-ansi.sh`, `repeat-cmd.sh`, `http-status.sh`, `wait-for-pattern.sh`, `docker-scratch.sh`, `venv-run.sh` and `doc-budget-check.sh` answer `--help` with their header comment (usage, exit codes, rules of use). `bin/tests/test-script-help.sh` pins that the help still carries what CLAUDE.md no longer says.
+Global CLAUDE.md names each wrapper in one line and leaves the details to the script: `cmd-save.sh`, `strip-ansi.sh`, `repeat-cmd.sh`, `http-status.sh`, `pypi-release-info.sh`, `wait-for-pattern.sh`, `docker-scratch.sh`, `venv-run.sh` and `doc-budget-check.sh` answer `--help` with their header comment (usage, exit codes, rules of use). `bin/tests/test-script-help.sh` pins that the help still carries what CLAUDE.md no longer says.
 
 ### Issue & PR management
 
@@ -296,6 +296,7 @@ misdescribe the argument.
 | `docker-health-check.sh` | `docker-health-check.sh [project-dir] [--timeout S] [--filter PREFIX] [--project NAME]` | Runtime Docker container health verification (status, restarts, error logs). `--filter` names the container set directly and needs no compose file; without it the set comes from a compose file in the project root, queried under the project named by `--project`, by `COMPOSE_PROJECT_NAME`, or discovered from container labels. Exit 3 means the Docker daemon could not be reached |
 | `smoke-test.sh` | `smoke-test.sh [base-url] [--health-token TOKEN]` | API endpoint smoke testing with auto-discovery |
 | `http-status.sh` | `http-status.sh [--body] [--max-time SECS] <url> [url...]` | HTTP status per URL as a single command. One URL prints the bare code; several print `<status>  <url>`. 4xx/5xx exit 0 (a valid answer); transport failures print `ERR` and exit 1 |
+| `pypi-release-info.sh` | `pypi-release-info.sh [--limit N] <package> [<version>...]` | Release dates and `requires_python` from the PyPI JSON API as a single command, instead of inline `python3`. No versions: the latest N releases (default 6), newest first. Per line `<version>  <earliest-upload>  <requires_python>`, `yanked` appended when every file is yanked; an unknown version prints `not found` and the run continues. Exit 1 only for an unknown package or unreachable PyPI |
 | `wait-for-pattern.sh` | `wait-for-pattern.sh [--newer-than EPOCH] <file> <extended-regex> [timeout] [poll]` | Block until a regex appears in a file. Exit 0 prints the matching line(s); exit 1 dumps the file's current contents for diagnosis. A missing file is a normal starting state, not an error. `--newer-than` ignores the file until its mtime passes the given epoch |
 | `wait-for-healthy.sh` | `wait-for-healthy.sh <container> [--timeout SECS] [--interval SECS]` | Block until a Docker container reports healthy. Exit 1 on timeout |
 | `repeat-cmd.sh` | `repeat-cmd.sh <count> <command> [args...]` | Run a command N times for warm/cold timing, replacing `for i in ...; do <cmd>; done`. Output is discarded; stops at the first failing run and reports its number, exit status and stderr. Prints runs, total and per-run time. The auto-approve hook approves it only when `<command>` is approvable on its own, and otherwise denies it with a hint to run `<command>` bare |
@@ -405,6 +406,7 @@ claude-code-toolkit/
 │   ├── docker-health-check.sh     ← runtime Docker container health verification
 │   ├── smoke-test.sh              ← API endpoint smoke testing with auto-discovery
 │   ├── http-status.sh             ← HTTP status for one or more URLs (single command)
+│   ├── pypi-release-info.sh       ← PyPI release dates and requires_python per version
 │   ├── project-test.sh            ← run pytest with automatic venv detection
 │   ├── venv-run.sh                ← run any venv binary (python, alembic, ruff)
 │   ├── secret-scan.sh             ← scan for hardcoded secrets and API keys
