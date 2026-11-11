@@ -26,6 +26,11 @@
 #   16-19. toolkit route: sibling, live auto-detect, live with branch,
 #          several merged                                -> cleans, or lists
 #   20-24. toolkit route refusals                        -> nothing changed
+#   25-30. toolkit: locked, directory gone, untracked live file in the way,
+#          commitless branch (named, from inside), no candidate -> refuse
+#   31-32. toolkit: ignored files listed; --delete-remote -> cleans
+#   33-34. toolkit: a step fails after the checks        -> says what was done,
+#                                                           a re-run finishes
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -444,6 +449,11 @@ tk_merge_on_remote "$L" issue-16-widget
 OUT=$(run_tk "$L" "$L-16"); RC=$?
 check "exit zero" 0 "$RC"
 check_cleaned "$L" "$L-16" issue-16-widget
+# The caller's cwd was the removed sibling: tell it where to go on (F4).
+contains "names the live checkout to continue in" "Continue in the live checkout: $L" "$OUT"
+# No terminal and no flag: the remote branch is kept, as in other repos (F9).
+check "remote branch kept by default" yes "$(remote_branch_exists "$L" issue-16-widget)"
+contains "prints the delete command" "git push origin --delete issue-16-widget" "$OUT"
 
 echo "== 17. toolkit: run from the live checkout, merged worktree auto-detected =="
 L=$(tk_fixture tk17)
@@ -521,6 +531,151 @@ echo "== 23. toolkit: feature branch not merged -> refuses, changes nothing =="
 tk_refusal tk23 23 feature_unmerged "not merged"
 echo "== 24. toolkit: dirty feature worktree -> refuses, changes nothing =="
 tk_refusal tk24 24 dirty_worktree "uncommitted or untracked"
+
+# --- Toolkit route, review round 2 (PR #287) ------------------------------------
+
+lock_worktree() { git -C "$1" worktree lock "$2"; }
+# Registered, but the directory is gone: `rm -rf` instead of `worktree remove`.
+remove_dir() { rm -rf "$2"; }
+# An untracked file in live at a path the merged PR adds.
+untracked_in_live() { printf 'draft\n' > "$1/feature-${2##*-}.md"; }
+
+echo "== 25. toolkit: locked feature worktree -> refuses, changes nothing (F9) =="
+tk_refusal tk25 25 lock_worktree "is locked"
+
+echo "== 26. toolkit: worktree directory gone -> refuses with prune hint (F1) =="
+# Run from the live checkout (the sibling no longer exists to run from), both
+# auto-detected and with the branch named.
+L=$(tk_fixture tk26)
+tk_worktree "$L" 26 widget
+tk_merge_on_remote "$L" issue-26-widget
+remove_dir "$L" "$L-26"
+BEFORE=$(tk_state "$L" "$L-26" issue-26-widget)
+for args in "" issue-26-widget; do
+    # shellcheck disable=SC2086  # $args is empty or one word on purpose
+    OUT=$(run_tk "$L" "$L" $args); RC=$?
+    check "exit one (${args:-auto-detect})" 1 "$RC"
+    contains "gives the prune hint" "git -C $L worktree prune" "$OUT"
+    check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-26" issue-26-widget)"
+done
+check "worktree still registered" yes \
+    "$(git -C "$L" worktree list | grep -q "^$L-26 " && echo yes || echo no)"
+
+echo "== 27. toolkit: untracked live file the fast-forward writes -> refuses (F5) =="
+# Run from the live checkout: the refusal names the file before any change.
+L=$(tk_fixture tk27)
+tk_worktree "$L" 27 widget
+tk_merge_on_remote "$L" issue-27-widget
+untracked_in_live "$L" "$L-27"
+BEFORE=$(tk_state "$L" "$L-27" issue-27-widget)
+OUT=$(run_tk "$L" "$L" issue-27-widget); RC=$?
+check "exit one" 1 "$RC"
+contains "explains" "would be overwritten" "$OUT"
+contains "names the file" "feature-27.md" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-27" issue-27-widget)"
+
+# A branch without commits of its own, as `git-resolve-worktree.sh --create`
+# leaves it for a session that has just started (F2, D7). Every path refuses.
+tk_fresh() { # live n
+    git -C "$1" worktree add -q --no-track -b "issue-$2-fresh" "$1-$2" origin/main
+}
+
+echo "== 28. toolkit: commitless branch named from live -> refuses (F2) =="
+L=$(tk_fixture tk28)
+tk_fresh "$L" 28
+BEFORE=$(tk_state "$L" "$L-28" issue-28-fresh)
+OUT=$(run_tk "$L" "$L" issue-28-fresh); RC=$?
+check "exit one" 1 "$RC"
+contains "explains" "no commits of its own" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-28" issue-28-fresh)"
+
+echo "== 29. toolkit: run from inside a commitless sibling -> refuses (F2) =="
+L=$(tk_fixture tk29)
+tk_fresh "$L" 29
+BEFORE=$(tk_state "$L" "$L-29" issue-29-fresh)
+OUT=$(run_tk "$L" "$L-29"); RC=$?
+check "exit one" 1 "$RC"
+contains "explains" "no commits of its own" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-29" issue-29-fresh)"
+
+echo "== 30. toolkit: auto-detect with no merged candidate -> refuses (F9) =="
+L=$(tk_fixture tk30)
+tk_fresh "$L" 30
+tk_worktree "$L" 300 unmerged
+BEFORE=$(tk_state "$L" "$L-30" issue-30-fresh)
+OUT=$(run_tk "$L" "$L"); RC=$?
+check "exit one" 1 "$RC"
+contains "explains" "no linked worktree on an issue-* branch is merged" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-30" issue-30-fresh)"
+check "unmerged worktree kept" yes "$([[ -d "$L-300" ]] && echo yes || echo no)"
+
+echo "== 31. toolkit: gitignored files in the sibling are listed, then removed (F3) =="
+L=$(tk_fixture tk31)
+tk_worktree "$L" 31 widget
+tk_merge_on_remote "$L" issue-31-widget
+# info/exclude is shared by all worktrees of the repository.
+# $L is the main worktree, so its .git is the common directory (an absolute
+# path: `rev-parse --git-common-dir` answers relative to the caller's cwd).
+mkdir -p "$L/.git/info"
+printf '.env\n' >> "$L/.git/info/exclude"
+printf 'SECRET=1\n' > "$L-31/.env"
+OUT=$(run_tk "$L" "$L-31"); RC=$?
+check "exit zero" 0 "$RC"
+contains "warns about ignored files" "gitignored files are deleted with the worktree" "$OUT"
+contains "lists the file" ".env" "$OUT"
+check_cleaned "$L" "$L-31" issue-31-widget
+
+echo "== 32. toolkit: --delete-remote deletes the remote branch (F9) =="
+L=$(tk_fixture tk32)
+tk_worktree "$L" 32 widget
+tk_merge_on_remote "$L" issue-32-widget
+OUT=$(run_tk "$L" "$L-32" --delete-remote); RC=$?
+check "exit zero" 0 "$RC"
+check_cleaned "$L" "$L-32" issue-32-widget
+check "remote branch deleted" no "$(remote_branch_exists "$L" issue-32-widget)"
+
+# A step after the checks fails (F6). A stub git fails one subcommand and
+# passes everything else to the real git; a re-run without it must finish.
+REAL_GIT=$(command -v git)
+fail_git_on() { # dir "sub1 sub2"
+    mkdir -p "$1"
+    # shellcheck disable=SC2016  # $1, $2 and $@ belong to the stub, not here
+    printf '#!/bin/bash\nif [ "$1 $2" = "%s" ]; then echo "fatal: simulated failure" >&2; exit 1; fi\nexec "%s" "$@"\n' \
+        "$2" "$REAL_GIT" > "$1/git"
+    chmod +x "$1/git"
+}
+
+echo "== 33. toolkit: worktree removal fails -> nothing done, re-run finishes (F6) =="
+L=$(tk_fixture tk33)
+tk_worktree "$L" 33 widget
+tk_merge_on_remote "$L" issue-33-widget
+fail_git_on "$T/stub33" "worktree remove"
+BEFORE=$(tk_state "$L" "$L-33" issue-33-widget)
+OUT=$(PATH="$T/stub33:$PATH" run_tk "$L" "$L-33"); RC=$?
+check "exit one" 1 "$RC"
+contains "names the step" "Step 1 (git worktree remove) failed" "$OUT"
+contains "says what was done" "Already done: nothing." "$OUT"
+contains "gives the re-run command" "--repo $L issue-33-widget main" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-33" issue-33-widget)"
+OUT=$(run_tk "$L" "$L" issue-33-widget main); RC=$?
+check "re-run exits zero" 0 "$RC"
+check_cleaned "$L" "$L-33" issue-33-widget
+
+echo "== 34. toolkit: branch deletion fails -> says what was done, re-run finishes (F6) =="
+L=$(tk_fixture tk34)
+tk_worktree "$L" 34 widget
+tk_merge_on_remote "$L" issue-34-widget
+fail_git_on "$T/stub34" "branch -d"
+OUT=$(PATH="$T/stub34:$PATH" run_tk "$L" "$L-34"); RC=$?
+check "exit one" 1 "$RC"
+contains "names the step" "Step 3 (git branch -d) failed" "$OUT"
+contains "says the worktree is gone" "worktree $L-34 removed" "$OUT"
+contains "says live went forward" "live checkout fast-forwarded to origin/main" "$OUT"
+check "live already at origin/main" "$(git -C "$L.git" rev-parse main)" "$(git -C "$L" rev-parse HEAD)"
+check "branch still there" yes "$(branch_exists "$L" issue-34-widget)"
+OUT=$(run_tk "$L" "$L" issue-34-widget main); RC=$?
+check "re-run exits zero" 0 "$RC"
+check_cleaned "$L" "$L-34" issue-34-widget
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
