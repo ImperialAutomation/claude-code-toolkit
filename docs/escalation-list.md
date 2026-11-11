@@ -88,7 +88,10 @@ number, never the matched text, so the hit can be quoted in a public issue.
 These are issue labels. The PR label `agent-authored` is separate: `/implement`
 puts it on every PR it opens (creating it when the repo lacks it), and
 `bin/agent-pr-wip.sh` counts the open ones against the agent PR WIP limit,
-which the queue runner checks before a claim.
+which the queue runner checks before a claim. The limit is 3, or the
+`--max-prs N` of `/queue-run` (passed as `agent-pr-wip.sh --limit N`). It is a
+separate brake from the loop's issue budget (`--budget`): the WIP limit
+protects review time, the budget protects tokens (#251, D6).
 
 ## Recalibration
 

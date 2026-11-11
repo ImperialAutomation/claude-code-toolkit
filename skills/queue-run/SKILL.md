@@ -1,7 +1,7 @@
 ---
 name: queue-run
 description: One iteration of the local queue runner - claim the oldest agent-ready issue, refine and implement it in a sub-agent, release it. Driven by /loop
-argument-hint: ""
+argument-hint: "[--budget N] [--max-prs N] [--max-idle N] [--model <model>]"
 user-invocable: true
 ---
 
@@ -13,11 +13,28 @@ unless the issue hits the escalation list. Repeat it with `/loop`, self-paced:
 
 ```
 /loop /queue-run
+/loop /queue-run --budget 5 --max-prs 4 --model sonnet
 ```
 
 The labels and the escalation categories are described in
 `docs/escalation-list.md` (the single source). This skill only detects an
 escalation; `/refine` and the escalation hook raise it.
+
+## Arguments
+
+`/loop` passes the same arguments to every iteration.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--budget N` | 10 | Releases (pr, escalated, failed) this loop may make; then it stops. Idle iterations do not count (#251, D1, D3) |
+| `--max-prs N` | 3 | Agent PR WIP limit, passed to `agent-pr-wip.sh --limit` (D6). A separate brake: review backlog, not tokens |
+| `--max-idle N` | 16 | Consecutive idle iterations (8 hours at 30 minutes) before the loop stops (D4, D5) |
+| `--model <model>` | the session's | Model of the issue sub-agent in Step 4 (D3) |
+
+A value that is not a positive integer (or, for `--model`, empty) or an
+unknown argument: claim nothing, stop the loop and report the usage.
+
+`<budget>`, `<max-prs>`, `<max-idle>` and `<model>` below are these values.
 
 ## Preconditions
 
@@ -44,10 +61,29 @@ sub-agent, measures its tokens and releases the claim. All issue work happens in
 
 `<project>` is the basename of `<repo>`, lowercase, non-alphanumerics as `-`.
 
+### Step 0: Gate
+
+```bash
+~/.claude/bin/queue-budget.sh gate <budget>
+```
+
+It checks, between issues only, the three conditions that end the loop:
+
+- the stop file `~/.claude/queue-stop` exists. Create it (`touch`) to stop a
+  running loop after its current issue. The loop never deletes it: remove it
+  yourself before starting a new loop (D7);
+- `CLAUDE_CODE_SESSION_ID` is missing: the budget cannot be counted, so the
+  loop fails closed (D8);
+- this session's releases in `~/.claude/queue-runs.tsv` reached `<budget>`.
+
+- exit 0: prints `budget <used>/<budget>`; note `<used>` for Step 7, continue.
+- exit 1: claim nothing, stop the loop (see "Pacing") and report the printed
+  line.
+
 ### Step 1: Capacity
 
 ```bash
-~/.claude/bin/agent-pr-wip.sh --repo <repo>
+~/.claude/bin/agent-pr-wip.sh --repo <repo> --limit <max-prs>
 ```
 
 - exit 0: below the agent PR WIP limit, continue.
@@ -79,7 +115,8 @@ Read it for the title. Pick `<slug>`: a short kebab-case summary of the title.
 
 ### Step 4: Spawn the issue sub-agent
 
-Use the Agent tool, `subagent_type: "general-purpose"`. It runs in the
+Use the Agent tool, `subagent_type: "general-purpose"`, and with `--model`
+also `model: "<model>"`; without it, pass no `model` (the session's model). It runs in the
 background; the launch result holds its `agentId: <id>` (note it for Step 4b),
 and its completion notification is the wake signal for Step 4b. Until that
 notification arrives, release nothing, claim nothing and do not end the
@@ -219,6 +256,12 @@ in place: a retry reuses them, and a human may want to look.
 A non-zero exit from `queue-claim.sh release` leaves labels half-changed:
 report its stderr and stop the loop.
 
+After a release, reset the idle count:
+
+```bash
+~/.claude/bin/queue-budget.sh worked
+```
+
 ### Step 6: Live checkout check
 
 ```bash
@@ -231,14 +274,16 @@ one). Stop the loop and report it; do not switch it back yourself.
 
 ### Step 7: Report
 
-One line per iteration. A worked issue ends with its token totals: the
+One line per iteration. A worked issue ends with its token totals (the
 `summary` of Step 4b in parentheses, or `(tokens: unknown)` when the
-measurement failed.
+measurement failed) and the budget used, `<used>` of Step 0 plus this release.
+An idle line ends with the `queue-budget.sh idle` output.
 
-- `queue: #<N> -> PR <url> (in 0.0k / cw 95k / cr 1.47M / out 15k, 3 agents)`
-- `queue: #<N> escalated (needs-human) (<summary>)`
-- `queue: #<N> failed (first failure, back in queue) (<summary>)` or `(second failure, needs-human) (<summary>)`
-- `queue: idle (empty queue)` or `queue: idle (WIP limit <open>/<limit>)`
+- `queue: #<N> -> PR <url> (in 0.0k / cw 95k / cr 1.47M / out 15k, 3 agents) [budget 3/10]`
+- `queue: #<N> escalated (needs-human) (<summary>) [budget 3/10]`
+- `queue: #<N> failed (first failure, back in queue) (<summary>) [budget 3/10]` or `(second failure, needs-human) (<summary>) [budget 3/10]`
+- `queue: idle (empty queue) [idle 2/16]` or `queue: idle (WIP limit <open>/<limit>) [idle 2/16]`
+- `queue: stopped (<the line of queue-budget.sh>)`, e.g. `queue: stopped (stop: budget used up (10/10))`
 
 ## Pacing
 
@@ -251,12 +296,17 @@ next one runs (#188, D6).
   schedule a fallback wakeup after 60 minutes, in case no notification
   arrives. A wakeup that finds the sub-agent still running claims nothing and
   schedules the next fallback.
-- **Idle** (empty queue, WIP limit reached, or WIP count unknown): schedule the
-  next iteration after 30 minutes. The queue and the review backlog change
-  slowly.
-- **Stop the loop** (schedule nothing, report why) when `queue-claim.sh` exits
-  1, or Step 6 finds the starting checkout on another branch. Both need a
-  human before the next claim.
+- **Idle** (empty queue, WIP limit reached, or WIP count unknown): run
+  `~/.claude/bin/queue-budget.sh idle <max-idle>`. Exit 0: schedule the next
+  iteration after 30 minutes; the queue and the review backlog change slowly.
+  Exit 1 (the limit is reached) or 2: stop the loop.
+- **Stop the loop** (schedule nothing, report why) when:
+  - Step 0 exits 1: the stop file exists, the session id is missing, or the
+    budget is used up;
+  - `queue-budget.sh idle` reaches `<max-idle>`;
+  - the arguments are invalid;
+  - `queue-claim.sh` exits 1, or Step 6 finds the starting checkout on another
+    branch. These need a human before the next claim.
 
 ## What this skill does not do
 
