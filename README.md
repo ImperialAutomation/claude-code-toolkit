@@ -513,16 +513,17 @@ The global settings include five `PreToolUse` hooks that run **in all permission
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, leading `VAR=value` env prefixes (except variables that make a command load or run code, such as `PATH`, `PAGER`, `PYTHONPATH` and the `LD_*`/`GIT_*`/`npm_config_*` families: those are never stripped, so the command prompts), and a model-typed `rtk` or `rtk proxy` prefix (so `rtk grep ...` is judged as `grep ...`), then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
-   The same hook also **denies** four shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
+   The same hook also **denies** five shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
 
    | Denied | Use instead |
    |---|---|
+   | `sed -i ... <file>` (also `-i.bak`, `--in-place`, `-ni`) | Edit; for a multi-line rewrite, Read then Write |
    | `sed -n 'X,Yp' <file>` | the Read tool with offset/limit |
    | inline Python (`-c` or a heredoc) that opens a file for reading | Read, Grep, or Edit |
    | `until <file-condition>; do sleep N; done` | `wait-for-pattern.sh [--newer-than <epoch>] <file> <extended-regex> [timeout] [poll]` |
    | `cd <dir> && <cmd>` | `git -C`, `npm --prefix`, or `env -C <dir> <cmd>` (approved when `<dir>` is inside `~/Projects` and `<cmd>` is approvable on its own) |
 
-   Each deny is deliberately narrow, so that work with no wrapper to point at keeps falling through to a normal prompt rather than being blocked: a real `sed` stream edit, Python doing calculation or writing a file, and wait loops polling anything other than a file (an HTTP status, a container state, a command's exit status) are all left alone. `while` loops are not matched either: `while [ -f X ]` waits for a file to *disappear*, which `wait-for-pattern.sh` cannot express.
+   Each deny is deliberately narrow, so that work with no wrapper to point at keeps falling through to a normal prompt rather than being blocked: a `sed` stream edit from stdin to stdout, Python doing calculation or writing a file, and wait loops polling anything other than a file (an HTTP status, a container state, a command's exit status) are all left alone. `while` loops are not matched either: `while [ -f X ]` waits for a file to *disappear*, which `wait-for-pattern.sh` cannot express.
 
 2. **`hook-block-destructive.sh`** — Blocks destructive patterns: `rm -rf /`, `git push --force`, `git reset --hard`, `git clean -f`, `dd if=... of=/dev/`, and more. When blocked, Claude sees the reason and adjusts its approach.
 

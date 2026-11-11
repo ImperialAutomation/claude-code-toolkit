@@ -262,7 +262,7 @@ check(
 
 check(
     "classify_command: a real sed stream edit still prompts, not a hook deny",
-    pf.classify_command("sed -i 's/a/b/' f", _HOOK_ALLOW, _DENY)[1] == pf.REASON_NO_RULE,
+    pf.classify_command("sed 's/a/b/' f", _HOOK_ALLOW, _DENY)[1] == pf.REASON_NO_RULE,
 )
 
 # CLAUDE.md explicitly permits python -c for calculation. It must never land in
@@ -318,6 +318,39 @@ check(
 check(
     "is_hook_denied: an earlier hook branch outranks the cd-chain deny",
     pf.is_hook_denied("cd backend && sed -n '1,5p' f") == pf.REASON_HOOK_DENY_SED_READ,
+)
+
+
+# --- the sed in-place edit deny (issue #210) ---
+# sed -i is denied with an Edit hint. It is a hook deny, not friction, and it
+# outranks the sed-read deny because main() checks it first.
+
+check(
+    "is_hook_denied: sed -i is the sed-edit deny",
+    pf.is_hook_denied("sed -i 's/a/b/' f") == pf.REASON_HOOK_DENY_SED_EDIT,
+)
+
+check(
+    "is_hook_denied: the sed-edit deny is registered in HOOK_DENY_REASONS",
+    pf.REASON_HOOK_DENY_SED_EDIT in pf.HOOK_DENY_REASONS,
+)
+
+check(
+    "classify_command: a sed -i chain is reported as a hook deny",
+    pf.classify_command(
+        "sed -i 's/a/b/' f; gh issue comment 1 --body-file f", _HOOK_ALLOW, _DENY
+    )
+    == (False, pf.REASON_HOOK_DENY_SED_EDIT, None),
+)
+
+check(
+    "is_hook_denied: sed -n -i with a line range is the edit deny, not the read deny",
+    pf.is_hook_denied("sed -n -i '1,5p' f") == pf.REASON_HOOK_DENY_SED_EDIT,
+)
+
+check(
+    "is_hook_denied: a sed read is still the read deny",
+    pf.is_hook_denied("sed -n '1,5p' f") == pf.REASON_HOOK_DENY_SED_READ,
 )
 
 # REASON_CD_PREFIX survives the chain deny rather than being dead code: this is
