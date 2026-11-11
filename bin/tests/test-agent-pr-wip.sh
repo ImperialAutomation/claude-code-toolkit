@@ -144,6 +144,33 @@ check "unknown option: exit 2" "2" "$RC"
 run --repo
 check "--repo without a value: exit 2" "2" "$RC"
 
+echo "== 7. --limit =="
+reset_stub
+open_prs 4
+run --repo "$R" --limit 5
+check "--limit 5, 4 open: exit 0" "0" "$RC"
+check "--limit 5, 4 open: prints 4/5" "4/5" "$OUT"
+
+reset_stub
+open_prs 5
+run --repo "$R" --limit=5
+check "--limit=5, 5 open: exit 1" "1" "$RC"
+check "--limit=5, 5 open: prints 5/5" "5/5" "$OUT"
+
+reset_stub
+open_prs 1
+run --repo "$R" --limit 1
+check "--limit 1, 1 open: exit 1" "1" "$RC"
+
+reset_stub
+run --repo "$R" --limit 0
+check "--limit 0: exit 2" "2" "$RC"
+run --repo "$R" --limit abc
+check "--limit abc: exit 2" "2" "$RC"
+run --repo "$R" --limit
+check "--limit without a value: exit 2" "2" "$RC"
+check "bad --limit calls no gh" "no" "$([[ -e "$STUB/calls" ]] && echo yes || echo no)"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

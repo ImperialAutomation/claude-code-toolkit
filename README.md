@@ -171,8 +171,9 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | `git-commit.sh` | `git-commit.sh [--repo DIR] [--allow-protected] <message>` | Commit via temp file (avoids heredoc issues in sub-agents). Refuses to commit on a branch the repo marks protected (see below). Can print `ok N files changed` without committing — see [failure modes](docs/git-script-failure-modes.md) |
 | `git-verify.sh` | `git-verify.sh [--repo DIR \| repo-dir] [--base B] [--alembic]` | Read-only status snapshot (branch, uncommitted, recent commits, vs upstream, stashes, worktrees) in one call |
 | `escalation-check.sh` | `escalation-check.sh [--repo DIR] [--base B]` | Check the branch diff against escalation categories 1 to 4 (`permissions`, `leakage`, `interface`, `global`); one `<key>  <file>  <reason>` line per hit, exit 1 on any hit. Categories, denylist and labels: [escalation list](docs/escalation-list.md) |
-| `agent-pr-wip.sh` | `agent-pr-wip.sh [--repo DIR]` | Count open `agent-authored` PRs against the agent PR WIP limit (3); prints `<open>/<limit>`, exit 0 below the limit, 1 at or above it, 2 when `gh` fails. The queue runner's gate before a claim; `/implement` does not call it |
-| `queue-claim.sh` | `queue-claim.sh [--repo DIR] claim \| [--tokens FILE] release <N> pr <url> \| ... release <N> escalated \| ... release <N> failed <file>` | Queue runner claims: `claim` adds `agent-wip` to the oldest open `agent-ready` issue without `agent-wip`, `needs-human`, `epic` or `agent-pr` and prints its number (nothing when empty); `release` drops `agent-wip` and comments with the token totals from `--tokens` (`agent-tokens.py --json`), or `tokens: unknown`. A PR swaps `agent-ready` for `agent-pr`, so the issue is not claimed again. A first failure adds `agent-failed` (one retry), a second adds `needs-human` too. Every release appends a row to `~/.claude/queue-runs.tsv` (`QUEUE_RUNS_LOG` overrides) |
+| `agent-pr-wip.sh` | `agent-pr-wip.sh [--repo DIR] [--limit N]` | Count open `agent-authored` PRs against the agent PR WIP limit (`--limit`, default 3); prints `<open>/<limit>`, exit 0 below the limit, 1 at or above it, 2 when `gh` fails. The queue runner's gate before a claim; `/implement` does not call it |
+| `queue-claim.sh` | `queue-claim.sh [--repo DIR] claim \| [--tokens FILE] release <N> pr <url> \| ... release <N> escalated \| ... release <N> failed <file>` | Queue runner claims: `claim` adds `agent-wip` to the oldest open `agent-ready` issue without `agent-wip`, `needs-human`, `epic` or `agent-pr` and prints its number (nothing when empty); `release` drops `agent-wip` and comments with the token totals from `--tokens` (`agent-tokens.py --json`), or `tokens: unknown`. A PR swaps `agent-ready` for `agent-pr`, so the issue is not claimed again. A first failure adds `agent-failed` (one retry), a second adds `needs-human` too. Every release appends a row to `~/.claude/queue-runs.tsv` (`QUEUE_RUNS_LOG` overrides), its last column the session id |
+| `queue-budget.sh` | `queue-budget.sh gate <budget> \| idle <max> \| worked` | Stop conditions of one `/loop /queue-run`: `gate` exits 1 when `~/.claude/queue-stop` exists, `CLAUDE_CODE_SESSION_ID` is missing, or this session's releases in `queue-runs.tsv` reached the budget; `idle` counts consecutive idle iterations per session in `~/.claude/queue-idle/` and exits 1 at the limit; `worked` resets that count |
 | `agent-tokens.py` | `agent-tokens.py --agent <id> [--json]` | Token usage of a sub-agent and every agent it spawned, from the transcripts: input, cache write, cache read and output totals (deduplicated on `message.id`), agent count, models. Exit 1 when the id has no transcript, 2 when it is ambiguous or a transcript is unreadable. The queue runner's cost measurement per issue |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed, matched to the pushed commit so a lagging PR head cannot be read as a verdict), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. A check that is red repo-wide for a cause unrelated to the diff (e.g. a dependency audit after a new advisory) is `--allow-failing-check <name>`, which keeps the rest of the gate on and records the bypass on the PASS line. `--allow-failing-check <name>=<regex>` narrows that bypass to one cause: the check's failed job log must match `<regex>`, so a *different* failure of the same check still blocks (it blocks too when the log cannot be read, or when the check is an external status with no job log). Creates the PR itself, so `gh pr create` hooks do not fire; the gate also cannot prove a check set is complete — see [failure modes](docs/git-script-failure-modes.md) |
 
@@ -844,6 +845,17 @@ iteration's report line and one row of `~/.claude/queue-runs.tsv`. Epics are
 never claimed, and nothing is merged. An idle iteration (empty queue or WIP limit reached) schedules the next
 check after 30 minutes. Run one runner at a time, in auto mode; the skill lists
 the preconditions.
+
+The loop stops itself (`queue-budget.sh`) when its issue budget is used up
+(`--budget N`, default 10 releases per session), after `--max-idle N`
+consecutive idle iterations (default 16), or when `~/.claude/queue-stop`
+exists; the stop file is checked between issues and left in place.
+`--max-prs N` sets the WIP limit (default 3) and `--model <model>` the issue
+sub-agent's model (default: the session's):
+
+```
+/loop /queue-run --budget 5 --max-prs 4 --model sonnet
+```
 
 ---
 

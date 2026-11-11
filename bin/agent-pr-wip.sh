@@ -2,11 +2,12 @@
 # agent-pr-wip.sh — count open agent PRs against the agent PR WIP limit.
 #
 # Usage:
-#   agent-pr-wip.sh [--repo <dir>]
+#   agent-pr-wip.sh [--repo <dir>] [--limit <N>]
 #
 # Counts the open PRs labelled `agent-authored` in the GitHub repository of
 # <dir> (default: the current directory) and prints `<open>/<limit>`, e.g.
-# `2/3`. The limit is AGENT_PR_WIP_LIMIT below.
+# `2/3`. The limit is --limit, a positive integer (default AGENT_PR_WIP_LIMIT
+# below, 3). /queue-run passes its --max-prs here (#251, D6).
 #
 # The label is applied by /implement to every PR it opens, so the count is
 # every agent PR still waiting for human review: review time is the scarce
@@ -28,19 +29,24 @@ AGENT_PR_LABEL="agent-authored"
 GH_FETCH_LIMIT=200
 
 usage() {
-    echo "usage: $(basename "$0") [--repo <dir>]" >&2
+    echo "usage: $(basename "$0") [--repo <dir>] [--limit <N>]" >&2
     exit 2
 }
 
 repo=""
+limit="$AGENT_PR_WIP_LIMIT"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
         --repo) [[ $# -ge 2 ]] || usage; repo="$2"; shift 2 ;;
         --repo=*) repo="${1#*=}"; shift ;;
+        --limit) [[ $# -ge 2 ]] || usage; limit="$2"; shift 2 ;;
+        --limit=*) limit="${1#*=}"; shift ;;
         *) echo "unknown argument: $1" >&2; usage ;;
     esac
 done
+
+[[ "$limit" =~ ^[1-9][0-9]*$ ]] || { echo "error: --limit must be a positive integer: '$limit'" >&2; usage; }
 
 if [[ -n "$repo" ]]; then
     cd "$repo" 2>/dev/null || { echo "error: cannot cd into '$repo'" >&2; exit 2; }
@@ -56,5 +62,5 @@ if [[ ! "$open" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 
-echo "$open/$AGENT_PR_WIP_LIMIT"
-(( open < AGENT_PR_WIP_LIMIT ))
+echo "$open/$limit"
+(( open < limit ))

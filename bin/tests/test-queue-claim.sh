@@ -133,6 +133,7 @@ export STUB
 export PATH="$STUB/bin:$PATH"
 
 export QUEUE_RUNS_LOG="$T/queue-runs.tsv"
+export CLAUDE_CODE_SESSION_ID="sess-1"
 reset_stub() { rm -rf "$STUB/issues" "$STUB/comments" "$STUB"/after-* "$STUB"/fail-* "$STUB/calls" "$QUEUE_RUNS_LOG"; mkdir -p "$STUB/issues"; }
 # issue <N> <created-date> [label...]
 issue() {
@@ -159,7 +160,7 @@ cat > "$TOK" <<'EOF'
 {"agent_id": "a1", "totals": {"input_tokens": 42, "cache_creation_input_tokens": 94872, "cache_read_input_tokens": 1470008, "output_tokens": 14878}, "agents": 3, "models": ["claude-opus-5-5"], "summary": "in 0.0k / cw 95k / cr 1.47M / out 15k, 3 agents"}
 EOF
 TOK_LINE="tokens: in 0.0k / cw 95k / cr 1.47M / out 15k, 3 agents"
-TSV_HEADER=$'date\tissue\toutcome\tpr_url\tinput_tokens\tcache_creation_input_tokens\tcache_read_input_tokens\toutput_tokens\tagents'
+TSV_HEADER=$'date\tissue\toutcome\tpr_url\tinput_tokens\tcache_creation_input_tokens\tcache_read_input_tokens\toutput_tokens\tagents\tsession'
 log_rows() { tail -n +2 "$QUEUE_RUNS_LOG" 2>/dev/null | cut -f2-; }
 log_lines() { wc -l < "$QUEUE_RUNS_LOG" 2>/dev/null | tr -d ' ' || echo 0; }
 
@@ -292,7 +293,7 @@ check "pr: comment links the PR" "yes" "$(contains "$(comments_of 3)" "https://g
 check "pr without --tokens: comment says tokens: unknown" "yes" "$(contains "$(comments_of 3)" "tokens: unknown")"
 check "pr without --tokens: log header written" "$TSV_HEADER" "$(head -1 "$QUEUE_RUNS_LOG" 2>/dev/null)"
 check "pr without --tokens: one row, unknown totals" \
-    $'3\tpr\thttps://github.com/o/r/pull/77\tunknown\tunknown\tunknown\tunknown\tunknown' "$(log_rows)"
+    $'3\tpr\thttps://github.com/o/r/pull/77\tunknown\tunknown\tunknown\tunknown\tunknown\tsess-1' "$(log_rows)"
 check "log row starts with an ISO date" "yes" \
     "$(tail -1 "$QUEUE_RUNS_LOG" | cut -f1 | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' && echo yes || echo no)"
 
@@ -303,7 +304,7 @@ check "pr with --tokens: exit 0" "0" "$RC"
 check "pr with --tokens: comment carries the totals" "yes" "$(contains "$(comments_of 3)" "$TOK_LINE")"
 check "pr with --tokens: no 'unknown' in the comment" "no" "$(contains "$(comments_of 3)" "tokens: unknown")"
 check "pr with --tokens: one row with the totals" \
-    $'3\tpr\thttps://github.com/o/r/pull/77\t42\t94872\t1470008\t14878\t3' "$(log_rows)"
+    $'3\tpr\thttps://github.com/o/r/pull/77\t42\t94872\t1470008\t14878\t3\tsess-1' "$(log_rows)"
 issue 4 2026-01-02 agent-ready agent-wip
 run --tokens "$TOK" release 4 pr https://github.com/o/r/pull/78
 check "second release: header only once, one row per release" "3" "$(log_lines)"
@@ -328,7 +329,7 @@ check "escalated: agent-wip dropped, needs-human kept" "agent-ready needs-human"
 check "escalated: one queue-runner comment" "1" "$(grep -c '^<!-- queue-runner -->$' "$STUB/comments/3" 2>/dev/null || echo 0)"
 check "escalated: comment carries the totals" "yes" "$(contains "$(comments_of 3)" "$TOK_LINE")"
 check "escalated: one row, empty PR column" \
-    $'3\tescalated\t\t42\t94872\t1470008\t14878\t3' "$(log_rows)"
+    $'3\tescalated\t\t42\t94872\t1470008\t14878\t3\tsess-1' "$(log_rows)"
 run claim
 check "escalated: not claimed again" "" "$OUT"
 
@@ -350,7 +351,7 @@ check "first failure: no needs-human" "no" "$(has 3 needs-human)"
 check "first failure: comment holds the error" "yes" "$(contains "$(comments_of 3)" "CI red on test-foo.sh")"
 check "first failure: comment holds what was tried" "yes" "$(contains "$(comments_of 3)" "Tried: two fixes")"
 check "first failure without --tokens: tokens: unknown" "yes" "$(contains "$(comments_of 3)" "tokens: unknown")"
-check "first failure: one row" $'3\tfailed\t\tunknown\tunknown\tunknown\tunknown\tunknown' "$(log_rows)"
+check "first failure: one row" $'3\tfailed\t\tunknown\tunknown\tunknown\tunknown\tunknown\tsess-1' "$(log_rows)"
 run claim
 check "first failure: the next iteration claims it again" "3" "$OUT"
 
@@ -377,6 +378,23 @@ touch "$STUB/fail-view"
 run release 3 failed "$MSG"
 check "release failed, view fails: exit 1" "1" "$RC"
 check "release failed, view fails: claim kept" "yes" "$(has 3 agent-wip)"
+
+echo "== 11b. session column =="
+reset_stub
+issue 3 2026-01-01 agent-ready agent-wip
+OUT=$(env -u CLAUDE_CODE_SESSION_ID bash "$QC" --repo "$R" release 3 escalated 2>/dev/null); RC=$?
+check "no session id: release still exits 0" "0" "$RC"
+check "no session id: empty session column" $'3\tescalated\t\tunknown\tunknown\tunknown\tunknown\tunknown\t' "$(log_rows)"
+
+reset_stub
+# A log written before #251: nine columns, no session.
+printf 'date\tissue\toutcome\tpr_url\tinput_tokens\tcache_creation_input_tokens\tcache_read_input_tokens\toutput_tokens\tagents\n2026-01-01T00:00:00Z\t1\tpr\thttps://github.com/o/r/pull/1\t1\t2\t3\t4\t1\n' > "$QUEUE_RUNS_LOG"
+issue 3 2026-01-01 agent-ready agent-wip
+run release 3 escalated
+check "old log: release exits 0" "0" "$RC"
+check "old log: old row untouched" $'2026-01-01T00:00:00Z\t1\tpr\thttps://github.com/o/r/pull/1\t1\t2\t3\t4\t1' "$(sed -n 2p "$QUEUE_RUNS_LOG")"
+check "old log: new row carries the session" "sess-1" "$(tail -1 "$QUEUE_RUNS_LOG" | cut -f10)"
+check "old log: header gains the session column" "$TSV_HEADER" "$(head -1 "$QUEUE_RUNS_LOG")"
 
 echo "== 12. release: exit 0 and no temp file left, every outcome =="
 # The comment body is a mktemp file; its EXIT trap must still find it once

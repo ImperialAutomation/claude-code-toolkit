@@ -17,7 +17,10 @@
 # Every release appends one row to the run log ~/.claude/queue-runs.tsv
 # (QUEUE_RUNS_LOG overrides the path): date, issue, outcome, PR URL (empty
 # when none), the four token totals and the agent count, `unknown` in those
-# five columns without --tokens. A new file gets a header line first. The row
+# five columns without --tokens, and last the session id
+# ($CLAUDE_CODE_SESSION_ID, empty when unset) that queue-budget.sh counts. A
+# new file gets a header line first; an older header without `session` is
+# extended. The row
 # is written once the labels are updated; a log that cannot be written is a
 # warning, not a failed release.
 #
@@ -71,6 +74,10 @@ RUNS_LOG="${QUEUE_RUNS_LOG:-$HOME/.claude/queue-runs.tsv}"
 UNKNOWN="unknown"
 # Keys of the agent-tokens.py --json totals, in log column order.
 TOKEN_KEYS=(input_tokens cache_creation_input_tokens cache_read_input_tokens output_tokens)
+# Last log column: the session that released, so queue-budget.sh can count
+# the releases of one /loop (#251, D2). Empty when the variable is unset.
+SESSION_COLUMN="session"
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 
 usage() {
     echo "usage: $(basename "$0") [--repo <dir>] claim | [--tokens <json-file>] release <N> pr <url> | ... release <N> escalated | ... release <N> failed <message-file>" >&2
@@ -245,16 +252,31 @@ do_release() {
     log_run
 }
 
-# log_run: one row in the run log, the header first when the file is new.
+# join_tab <field>...: the fields joined by tabs; empty fields are kept.
+join_tab() {
+    local IFS=$'\t'
+    echo "$*"
+}
+
+# log_run: one row in the run log, the header first when the file is new. A
+# log from before the session column (#251) gets its header extended; its old
+# rows keep nine fields and so never match a session.
 log_run() {
-    local row
-    row=$(printf '%s\t' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$issue" "$outcome" "${pr_url:-}" "${token_columns[@]}")
+    local row header old_header tmp
+    row=$(join_tab "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$issue" "$outcome" "${pr_url:-}" "${token_columns[@]}" "$SESSION_ID")
+    old_header=$(join_tab date issue outcome pr_url "${TOKEN_KEYS[@]}" agents)
+    header=$(join_tab "$old_header" "$SESSION_COLUMN")
     {
         mkdir -p "$(dirname "$RUNS_LOG")" &&
         if [[ ! -s "$RUNS_LOG" ]]; then
-            printf 'date\tissue\toutcome\tpr_url\t%s\tagents\n' "$(IFS=$'\t'; echo "${TOKEN_KEYS[*]}")" > "$RUNS_LOG"
+            printf '%s\n' "$header" > "$RUNS_LOG"
+        elif [[ "$(head -1 "$RUNS_LOG")" == "$old_header" ]]; then
+            tmp=$(mktemp "$RUNS_LOG.XXXXXX") &&
+            { printf '%s\n' "$header"; tail -n +2 "$RUNS_LOG"; } > "$tmp" &&
+            # Copied back, not moved: the log keeps its own mode.
+            cat "$tmp" > "$RUNS_LOG" && rm -f "$tmp"
         fi &&
-        printf '%s\n' "${row%$'\t'}" >> "$RUNS_LOG"
+        printf '%s\n' "$row" >> "$RUNS_LOG"
     } 2>/dev/null || echo "warning: could not append to the run log '$RUNS_LOG'" >&2
 }
 
