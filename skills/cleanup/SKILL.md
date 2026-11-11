@@ -41,12 +41,22 @@ means fast-forwarding the live checkout. Run `/cleanup` from either tree:
   single linked worktree on an `issue-*` branch merged into `origin/main`. With
   several merged worktrees it lists them and asks for the branch.
 
-It checks everything first (live checkout clean and on `main`, fast-forward
-possible, branch merged into `origin/main`, its worktree clean and unlocked) and
-changes nothing when a check fails. Then it fast-forwards the live checkout to
-`origin/main`, removes the worktree with `git worktree remove`, deletes the
-branch with `git branch -d`, and handles the remote branch as below. A
-squash-merged branch is refused; delete it by hand.
+It checks everything first and changes nothing when a check fails: the live
+checkout clean and on `main`, a fast-forward possible without overwriting an
+untracked file there, the branch merged into `origin/main` with commits of its
+own (a fresh worktree another session just created is refused on every path),
+its worktree present, clean and unlocked. Then it removes the worktree with
+`git worktree remove` (listing the gitignored files that go with it),
+fast-forwards the live checkout to `origin/main`, deletes the branch with
+`git branch -d`, and handles the remote branch as below. When a step fails, it
+says what was already done; re-running with the branch named continues. A
+squash-merged or fast-forward-merged branch is refused; clean it up by hand with
+the commands it prints.
+
+**Run from the linked worktree, this removes your own working directory.**
+Afterwards, work in the live checkout: the script prints its path on the last
+line. Use absolute paths or `git -C <live>` from there on; a later command in
+the removed directory fails.
 
 ## Important
 

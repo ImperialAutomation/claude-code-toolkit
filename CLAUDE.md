@@ -43,4 +43,6 @@ git -C ~/Projects/claude-code-toolkit worktree add --no-track \
 worktree or from the live checkout, fast-forwards the live checkout to
 `origin/main`, removes the worktree and deletes the branch. It checks first and
 changes nothing when the live checkout is dirty, off `main` or not
-fast-forwardable, or the branch is not merged. `/finish` is not used here.
+fast-forwardable, or the branch is not merged or has no commits of its own.
+Run from the linked worktree, it removes that session's own cwd: continue in
+the live checkout. `/finish` is not used here.
