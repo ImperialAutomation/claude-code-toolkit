@@ -314,6 +314,16 @@ R=$(newrepo r28)
 fire_out "$R" "git -C $R commit -m 'feat: thing'"
 stdout_empty "unborn HEAD"
 
+echo "== 29. git-commit.sh --repo <B> -- '--repo <A>' -> trailer in B, A untouched =="
+# After `--` git-commit.sh reads every argument as a message line (#129), so a
+# `--repo` there is text, not the target. Reading it as one amends A.
+A=$(newrepo r29-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r29-b); git -C "$B" commit -qm "feat: thing"
+fire "$T" "~/.claude/bin/git-commit.sh --repo $B -- '--repo' '$A'"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]]

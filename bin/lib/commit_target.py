@@ -61,6 +61,8 @@ COMMIT_WRAPPER = "git-commit.sh"
 REPO_OPTION = "--repo"
 # git-commit.sh options that consume the next argument, besides --repo.
 WRAPPER_VALUE_OPTIONS = {"--file"}
+# git-commit.sh reads every argument after this one as a message line.
+END_OF_OPTIONS = "--"
 
 # git global options that consume the next argument when not written as --opt=value.
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
@@ -138,6 +140,8 @@ def _wrapper_repo(tokens):
     i = 1
     while i < len(tokens):
         token = tokens[i]
+        if token == END_OF_OPTIONS:
+            break
         if token == REPO_OPTION:
             repo = tokens[i + 1] if i + 1 < len(tokens) else ""
             i += 2
