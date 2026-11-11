@@ -170,6 +170,7 @@ make_repo main main develop
 run
 check "labels absent" "yes" "$(contains "$OUT" "release labels: none")"
 check "workflow absent" "yes" "$(contains "$OUT" "semver-tag workflow: none")"
+check "workflow list absent" "yes" "$(contains "$OUT" "workflows on main: none")"
 check "template absent" "yes" "$(contains "$OUT" "AGENT-REVIEW template: none")"
 check "semver verdict absent" "yes" "$(contains "$OUT" "semver: absent")"
 
@@ -190,6 +191,7 @@ run
 check "exit 0" "0" "$RC"
 check "labels present" "yes" "$(contains "$OUT" "release labels: release:major release:minor release:patch")"
 check "workflow present" "yes" "$(contains "$OUT" "semver-tag workflow: .github/workflows/semver-tag.yml")"
+check "workflow list present" "yes" "$(contains "$OUT" "workflows on main: semver-tag.yml")"
 check "template present" "yes" "$(contains "$OUT" "AGENT-REVIEW template: .github/PULL_REQUEST_TEMPLATE.md")"
 check "semver verdict present" "yes" "$(contains "$OUT" "semver: present")"
 

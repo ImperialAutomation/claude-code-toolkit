@@ -95,7 +95,8 @@ fi
 WORKFLOWS=$(git ls-tree --name-only "origin/$BASE" .github/workflows/ 2>/dev/null)
 SEMVER_WF=$(printf '%s\n' "$WORKFLOWS" | grep -E '/semver-tag\.ya?ml$' | head -n 1)
 echo "semver-tag workflow: ${SEMVER_WF:-none}"
-echo "workflows on $BASE: $(printf '%s\n' "$WORKFLOWS" | sed 's|.*/||' | tr '\n' ' ' | sed 's/ *$//')"
+WORKFLOW_NAMES=$(printf '%s\n' "$WORKFLOWS" | sed 's|.*/||' | tr '\n' ' ' | sed 's/ *$//')
+echo "workflows on $BASE: ${WORKFLOW_NAMES:-none}"
 TEMPLATE=".github/PULL_REQUEST_TEMPLATE.md"
 if git show "origin/$BASE:$TEMPLATE" 2>/dev/null | grep -q 'AGENT-REVIEW:START'; then
   echo "AGENT-REVIEW template: $TEMPLATE"
