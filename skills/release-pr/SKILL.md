@@ -30,8 +30,8 @@ release branch has another name. Read-only: it fetches and inspects, never write
 a ref.
 
 **A non-zero exit stops the release.** It means a branch is missing, base and
-head are the same, or a comparison failed; the message names the missing ref and
-lists the remote branches. Fix the arguments and rerun; never write a body from a
+head are the same, or a comparison failed; the message says which, and for a
+missing ref it lists the remote branches. Fix the arguments and rerun; never write a body from a
 partial report.
 
 The `=== REPO ===` line, `OWNER/NAME  (develop -> <release-branch>)`, names the
