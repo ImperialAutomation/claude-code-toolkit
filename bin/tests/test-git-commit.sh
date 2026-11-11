@@ -249,6 +249,99 @@ check "no commit in cwd" 1 "$(count_commits "$CALLER")"
 check "option not in commit message" "feat: equals form" \
     "$(git -C "$R" log -1 --format='%B')"
 
+# --- Read-only pre-commit cache hint (#179) ---------------------------------
+#
+# Under the sandbox ~/.cache/pre-commit is read-only and pre-commit dies with a
+# Python traceback before any hook runs. The script adds one line naming the
+# cause. These cases stub the pre-commit hook so no real pre-commit is needed.
+
+HINT="pre-commit cannot write its cache"
+
+EROFS_TRACE="Traceback (most recent call last):
+  File \"/usr/lib/python3/site-packages/pre_commit/staged_files_only.py\", line 50
+OSError: [Errno 30] Read-only file system: '/home/u/.cache/pre-commit/patch1700000000-123'"
+
+# Install an executable pre-commit hook that prints $2 to stream $3 and exits $4.
+stub_hook() { # repodir text stream(1|2) exit
+    local hook="$1/.git/hooks/pre-commit"
+    printf '#!/bin/sh\ncat <<'"'"'EOF'"'"' >&%s\n%s\nEOF\nexit %s\n' "$3" "$2" "$4" > "$hook"
+    chmod +x "$hook"
+}
+
+count_hint() { grep -cF "$HINT" <<<"$1" || true; }
+
+echo "== 18. EROFS pre-commit traceback on stderr -> hint once, no commit =="
+R=$(newrepo r18 feature)
+stub_hook "$R" "$EROFS_TRACE" 2 3
+OUT=$(bash "$SCRIPT" --repo "$R" "feat: blocked by sandbox" 2>&1)
+RC=$?
+check "exit non-zero" nonzero "$([[ $RC -ne 0 ]] && echo nonzero || echo "zero($RC)")"
+check "no commit created" 1 "$(count_commits "$R")"
+contains "original traceback kept" "Read-only file system" "$OUT"
+check "hint printed once" 1 "$(count_hint "$OUT")"
+# The hint must come after the traceback, so it is the last thing read.
+check "hint is the last line" 1 "$(tail -n 1 <<<"$OUT" | grep -cF "$HINT")"
+ERR=$(bash "$SCRIPT" --repo "$R" "feat: blocked by sandbox" 2>&1 >/dev/null)
+check "hint goes to stderr" 1 "$(count_hint "$ERR")"
+
+echo "== 19. EROFS pre-commit traceback on the hook's stdout -> hint =="
+# git routes a hook's stdout to its own stderr, so this lands in the same
+# stream as case 18; it guards against a check that only looks at one of them.
+R=$(newrepo r19 feature)
+stub_hook "$R" "$EROFS_TRACE" 1 3
+OUT=$(bash "$SCRIPT" --repo "$R" "feat: blocked by sandbox" 2>&1)
+RC=$?
+check "exit non-zero" nonzero "$([[ $RC -ne 0 ]] && echo nonzero || echo "zero($RC)")"
+check "hint printed once" 1 "$(count_hint "$OUT")"
+
+echo "== 19b. git's own stdout is untouched on success =="
+R=$(newrepo r19b feature)
+OUTONLY=$(bash "$SCRIPT" --repo "$R" "feat: summary on stdout" 2>/dev/null)
+contains "commit summary on stdout" "feat: summary on stdout" "$OUTONLY"
+
+echo "== 20. other hook failure (lint) -> no hint, exit kept =="
+R=$(newrepo r20 feature)
+stub_hook "$R" "ruff....................Failed
+- hook id: ruff
+src/x.py:1:1: F401 unused import" 1 1
+OUT=$(bash "$SCRIPT" --repo "$R" "feat: lint fails" 2>&1)
+RC=$?
+check "exit is the hook's" 1 "$RC"
+check "no hint" 0 "$(count_hint "$OUT")"
+contains "lint output kept" "F401" "$OUT"
+
+echo "== 21. read-only error not from pre-commit -> no hint =="
+R=$(newrepo r21 feature)
+stub_hook "$R" "OSError: [Errno 30] Read-only file system: '/srv/data/out.txt'" 2 3
+OUT=$(bash "$SCRIPT" --repo "$R" "feat: other EROFS" 2>&1)
+RC=$?
+check "exit non-zero" nonzero "$([[ $RC -ne 0 ]] && echo nonzero || echo "zero($RC)")"
+check "no hint" 0 "$(count_hint "$OUT")"
+
+echo "== 22. PRE_COMMIT_HOME path counts as the pre-commit marker =="
+R=$(newrepo r22 feature)
+stub_hook "$R" "OSError: [Errno 30] Read-only file system: '/opt/hookcache/patch1'" 2 3
+OUT=$(PRE_COMMIT_HOME=/opt/hookcache bash "$SCRIPT" --repo "$R" "feat: custom home" 2>&1)
+check "hint printed once" 1 "$(count_hint "$OUT")"
+
+echo "== 23. --file path prints the hint too =="
+R=$(newrepo r23 feature)
+stub_hook "$R" "$EROFS_TRACE" 2 3
+printf 'feat: via --file\n' > "$T/msg23.txt"
+OUT=$(bash "$SCRIPT" --repo "$R" --file "$T/msg23.txt" 2>&1)
+RC=$?
+check "exit non-zero" nonzero "$([[ $RC -ne 0 ]] && echo nonzero || echo "zero($RC)")"
+check "hint printed once" 1 "$(count_hint "$OUT")"
+
+echo "== 24. successful commit with hook output -> no hint, exit 0 =="
+R=$(newrepo r24 feature)
+stub_hook "$R" "pre-commit: all hooks passed" 1 0
+OUT=$(bash "$SCRIPT" --repo "$R" "feat: clean" 2>&1)
+RC=$?
+check "exit zero" 0 "$RC"
+check "commit created" 2 "$(count_commits "$R")"
+check "no hint" 0 "$(count_hint "$OUT")"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]]

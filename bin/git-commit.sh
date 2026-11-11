@@ -40,6 +40,17 @@
 #   tree where it was created, so a linked worktree sees no config and the guard
 #   never fires there, which is exactly where the mistake happens most. The git
 #   config route has no such gap: worktrees share .git/config.
+#
+# Read-only pre-commit cache:
+#   Under the Claude Code sandbox ~/.cache/pre-commit is read-only, and
+#   pre-commit dies with a long Python traceback (EROFS) before any hook runs.
+#   The fix is always to rerun the commit outside the sandbox, but the traceback
+#   does not say so. When a commit fails and its stderr holds both
+#   "Read-only file system" and a pre-commit marker ("pre-commit", or the value
+#   of $PRE_COMMIT_HOME), one hint line is printed after git's own output. The
+#   output and exit status are otherwise unchanged. PRE_COMMIT_HOME is never
+#   redirected automatically: hook environments live in that cache, and a fresh
+#   one re-downloads every hook repo, which needs network the sandbox may block.
 
 set -euo pipefail
 
@@ -47,6 +58,47 @@ set -euo pipefail
 # working directories, and bin/ is reached through a symlink.
 # shellcheck source=bin/lib/strip-sandbox-noise.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+
+readonly EROFS_MARKER="Read-only file system"
+readonly PRECOMMIT_MARKER="pre-commit"
+readonly PRECOMMIT_EROFS_HINT="git-commit.sh: pre-commit cannot write its cache (read-only, likely the sandbox). Nothing was committed; rerun this commit outside the sandbox."
+
+# Temp files removed on any exit; set once so both commit paths share one trap.
+TMPFILE=""
+CAPTURE=""
+trap 'rm -f ${TMPFILE:+"$TMPFILE"} ${CAPTURE:+"$CAPTURE"}' EXIT
+
+# True when the captured stderr shows pre-commit failing on a read-only path.
+is_precommit_erofs() { # capture-file
+    grep -qF -- "$EROFS_MARKER" "$1" || return 1
+    grep -qF -- "$PRECOMMIT_MARKER" "$1" && return 0
+    [[ -n "${PRE_COMMIT_HOME:-}" ]] && grep -qF -- "$PRE_COMMIT_HOME" "$1"
+}
+
+# Run `git commit "$@"` through the sandbox-noise filter, with its stderr also
+# copied to a capture file, and print the read-only cache hint when it applies.
+# Returns git's own status.
+#
+# Only stderr is captured: git sends a hook's stdout to its own stderr as well,
+# so every line pre-commit prints passes through here, and git's stdout (the
+# commit summary) stays untouched. fd 3 carries git's stdout past the pipe, as
+# in git_filtered. tee writes stderr straight back to fd 2 while capturing, so
+# the output still streams live; the pipeline is synchronous, so the hint is
+# printed only after all of it.
+commit_with_hint() {
+    local rc
+    CAPTURE=$(mktemp /tmp/git-commit-stderr-XXXXXX)
+    # set +e: a failing commit is the case under inspection, not a reason to
+    # abort before the hint. PIPESTATUS[0] is git_filtered's, i.e. git's status.
+    set +e
+    { git_filtered commit "$@" 2>&1 1>&3 3>&- | tee "$CAPTURE" >&2; } 3>&1
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [[ $rc -ne 0 ]] && is_precommit_erofs "$CAPTURE"; then
+        echo "$PRECOMMIT_EROFS_HINT" >&2
+    fi
+    return "$rc"
+}
 
 AMEND=""
 FROM_STDIN=""
@@ -147,12 +199,11 @@ if [[ -n "$FROM_FILE" ]]; then
     # stderr. The status is propagated explicitly instead, so callers see the
     # same exit code they did before.
     # shellcheck disable=SC2086  # $AMEND is intentionally word-split (may be empty)
-    git_filtered commit $AMEND -F "$FROM_FILE"
+    commit_with_hint $AMEND -F "$FROM_FILE"
     exit $?
 fi
 
 TMPFILE=$(mktemp /tmp/commit-msg-XXXXXX.txt)
-trap 'rm -f "$TMPFILE"' EXIT
 
 if [[ -n "$FROM_STDIN" ]]; then
     cat > "$TMPFILE"
@@ -173,5 +224,5 @@ fi
 
 # Not `exec`, for the same reason as the --file path above.
 # shellcheck disable=SC2086  # $AMEND is intentionally word-split (may be empty)
-git_filtered commit $AMEND -F "$TMPFILE"
+commit_with_hint $AMEND -F "$TMPFILE"
 exit $?
