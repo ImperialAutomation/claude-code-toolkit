@@ -2438,6 +2438,16 @@ for printing in (f"{APP_TOKEN} --repo {APP_REPO} --print", f"{APP_TOKEN} --print
         hook_decision(printing) == "deny" and reason is not None and "transcript" in reason,
     )
 
+# Under GH_TOKEN, `gh auth token` and `gh auth status --show-token` print the
+# app's token: the same leak --print is denied for, though bare they are fine.
+for revealing in ("gh auth token", "gh auth status --show-token", "FOO=1 gh auth status"):
+    command = f"{APP_TOKEN} --repo {APP_REPO} -- {revealing}"
+    approved, reason, _ = run_hook(command)
+    check(
+        f"app-token: `-- {revealing}` is denied, naming the transcript",
+        hook_decision(command) == "deny" and reason is not None and "transcript" in reason,
+    )
+
 check(
     "app-token: a disallowed call inside a chain is still denied",
     hook_decision(f"git status && {APP_TOKEN} --repo {APP_REPO} -- curl x") == "deny",

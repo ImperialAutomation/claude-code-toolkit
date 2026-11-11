@@ -647,11 +647,10 @@ APP_TOKEN_REPO_FLAG = "--repo"
 APP_TOKEN_PRINT_FLAG = "--print"
 
 
-def _gh_app_token_inner(args):
-    """`gh-app-token.sh --repo <owner/repo> -- <cmd> [args...]`, `--repo` as
-    one or two tokens, parsed like the script's own loop. `--print` runs no
-    command, so it has no inner command either: it is denied as a shape, which
-    keeps the token out of the agent's transcript."""
+def _gh_app_token_command(args):
+    """The tokens after `--` in `gh-app-token.sh --repo <owner/repo> -- <cmd>
+    [args...]`, `--repo` as one or two tokens, parsed like the script's own
+    loop; None when the call does not have that shape."""
     index, has_repo = 0, False
     while index < len(args):
         arg = args[index]
@@ -660,19 +659,49 @@ def _gh_app_token_inner(args):
         elif arg.startswith(APP_TOKEN_REPO_FLAG + "="):
             index, has_repo = index + 1, True
         elif arg == "--":
-            return _runnable(args[index + 1:]) if has_repo else None
+            return args[index + 1:] if has_repo else None
         else:
             return None
     return None
 
 
+def _reveals_gh_token(inner):
+    """True when `inner` is a `gh auth` command: under GH_TOKEN, `gh auth token`
+    and `gh auth status --show-token` print the app's token, which is what
+    `--print` is denied for. No review call needs `gh auth`."""
+    _, command = strip_command_prefixes(inner)
+    return (
+        len(command) >= 2
+        and os.path.basename(command[0]) == "gh"
+        and command[1] == "auth"
+    )
+
+
+def _gh_app_token_inner(args):
+    """The command a `gh-app-token.sh --repo <owner/repo> -- <cmd> [args...]`
+    call runs. `--print` runs no command, so it has no inner command either: it
+    is denied as a shape, which keeps the token out of the agent's transcript.
+    A `gh auth` command is denied the same way, since it prints the token."""
+    inner = _runnable(_gh_app_token_command(args))
+    if inner is None or _reveals_gh_token(inner):
+        return None
+    return inner
+
+
 def _gh_app_token_diagnose(args):
-    """Why a gh-app-token.sh call is not approvable, when it asks for --print."""
+    """Why a gh-app-token.sh call is not approvable, when it asks for the
+    token itself: `--print`, or a `gh auth` command that prints it."""
     options = args[:args.index("--")] if "--" in args else args
     if APP_TOKEN_PRINT_FLAG in options:
         return (
             "`--print` would put the token in the transcript; it is for humans. "
             "Hand the token to a command with `-- <cmd>` instead."
+        )
+    inner = _runnable(_gh_app_token_command(args))
+    if inner is not None and _reveals_gh_token(inner):
+        return (
+            "`gh auth` under the app would print or expose its token in the "
+            "transcript; no review call needs it."
         )
     return None
 
