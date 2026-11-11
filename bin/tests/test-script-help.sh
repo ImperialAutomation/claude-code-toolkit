@@ -41,6 +41,7 @@ declare -A MUST_SAY=(
     [strip-ansi.sh]=$'<outfile> defaults to <file>.clean\ncmd-save.sh --strip-ansi'
     [repeat-cmd.sh]=$'stops at the first non-zero exit\nwould be approved too'
     [http-status.sh]=$'a 4xx/5xx IS an answer\nprints ERR\nauth headers, retries, JSON parsing\nwait-for-healthy.sh'
+    [pypi-release-info.sh]=$'<version>  <upload-time>  <requires_python>[  yanked]\n<version>  not found\nnewest first\n1  the package does not exist on PyPI (404), PyPI is unreachable'
     [docker-scratch.sh]=$'not /tmp\nOnly for what a container must mount\nPaste the printed path literally\nno $(...)\nhook-block-destructive.sh\nreport it, and do not'
     [wait-for-pattern.sh]=$'--newer-than <epoch>\ndate +%s\nneed not exist yet\nwait-for-healthy.sh <container>'
     [venv-run.sh]=$'--repo <dir>\npip or python3 prompt\n.venv/bin/'
