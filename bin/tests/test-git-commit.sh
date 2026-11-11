@@ -342,6 +342,101 @@ check "exit zero" 0 "$RC"
 check "commit created" 2 "$(count_commits "$R")"
 check "no hint" 0 "$(count_hint "$OUT")"
 
+# --- Argument parsing (#129) -----------------------------------------------
+#
+# Every unrecognised argument used to become a message line, so `--help` or a
+# mistyped option committed whatever was staged, with that option as message.
+# Each refusal case has a staged change pending (newrepo), so "no commit" is a
+# real refusal and not git's "nothing to commit".
+
+nonzero() { [[ $1 -ne 0 ]] && echo nonzero || echo "zero($1)"; }
+
+for flag in --help -h; do
+    echo "== 25. $flag -> usage, exit 0, no commit =="
+    R=$(newrepo "r25$flag" feature)
+    OUT=$(bash "$SCRIPT" --repo "$R" "$flag" 2>"$T/err25")
+    RC=$?
+    check "exit zero" 0 "$RC"
+    check "no commit created" 1 "$(count_commits "$R")"
+    contains "prints usage" "Usage:" "$OUT"
+    check "header comment markers stripped" no \
+        "$([[ "$OUT" =~ (^|$'\n')# ]] && echo yes || echo no)"
+    check "nothing on stderr" 0 "$(wc -c < "$T/err25" | tr -d ' ')"
+    # Answered before any git call: works outside a repository too.
+    OUT=$(env -C "$T" bash "$SCRIPT" "$flag" 2>&1)
+    check "exit zero outside a repo" 0 "$?"
+done
+
+for bad in --ammend --add -m --repo-dir=x; do
+    echo "== 26. unknown option $bad -> exit 2, no commit =="
+    R=$(newrepo "r26$bad" feature)
+    OUT=$(bash "$SCRIPT" --repo "$R" "$bad" "feat: msg" 2>&1)
+    RC=$?
+    check "exit 2" 2 "$RC"
+    check "no commit created" 1 "$(count_commits "$R")"
+    contains "names the option" "unknown option '$bad'" "$OUT"
+    contains "points at --help" "--help" "$OUT"
+done
+
+echo "== 27. -- ends options: a message line may start with - =="
+R=$(newrepo r27 feature)
+OUT=$(bash "$SCRIPT" --repo "$R" -- "-x" "--not-an-option" 2>&1)
+RC=$?
+check "exit zero" 0 "$RC"
+check "commit created" 2 "$(count_commits "$R")"
+check "message kept verbatim" $'-x\n--not-an-option' "$(git -C "$R" log -1 --format='%B')"
+
+echo "== 28. bullet lines and empty lines are message lines, not options =="
+R=$(newrepo r28 feature)
+OUT=$(bash "$SCRIPT" --repo "$R" "feat: list" "" "- first" "- second" 2>&1)
+RC=$?
+check "exit zero" 0 "$RC"
+check "commit created" 2 "$(count_commits "$R")"
+check "bullets kept" $'feat: list\n\n- first\n- second' "$(git -C "$R" log -1 --format='%B')"
+
+echo "== 29. --file with positional lines -> exit 2, no commit =="
+R=$(newrepo r29 feature)
+printf 'feat: via --file\n' > "$T/msg29.txt"
+OUT=$(bash "$SCRIPT" --repo "$R" --file "$T/msg29.txt" "" "Co-Authored-By: X <x@x>" 2>&1)
+RC=$?
+check "exit 2" 2 "$RC"
+check "no commit created" 1 "$(count_commits "$R")"
+contains "explains the conflict" "--file" "$OUT"
+
+echo "== 30. --stdin with positional lines -> exit 2, no commit =="
+R=$(newrepo r30 feature)
+OUT=$(printf 'feat: via stdin\n' | bash "$SCRIPT" --repo "$R" --stdin "extra" 2>&1)
+RC=$?
+check "exit 2" 2 "$RC"
+check "no commit created" 1 "$(count_commits "$R")"
+
+echo "== 31. --file together with --stdin -> exit 2, no commit =="
+R=$(newrepo r31 feature)
+printf 'feat: via --file\n' > "$T/msg31.txt"
+OUT=$(printf 'feat: via stdin\n' | bash "$SCRIPT" --repo "$R" --stdin --file "$T/msg31.txt" 2>&1)
+RC=$?
+check "exit 2" 2 "$RC"
+check "no commit created" 1 "$(count_commits "$R")"
+
+for opt in --file --repo; do
+    echo "== 32. $opt without a value -> exit 2, clear message =="
+    R=$(newrepo "r32$opt" feature)
+    OUT=$(env -C "$R" bash "$SCRIPT" "feat: msg" "$opt" 2>&1)
+    RC=$?
+    check "exit 2" 2 "$RC"
+    check "no commit created" 1 "$(count_commits "$R")"
+    contains "names the option" "$opt requires a value" "$OUT"
+done
+
+echo "== 33. --file with --amend still works (known options combine) =="
+R=$(newrepo r33 feature)
+printf 'feat: amended via --file\n' > "$T/msg33.txt"
+OUT=$(bash "$SCRIPT" --repo "$R" --amend --file "$T/msg33.txt" 2>&1)
+RC=$?
+check "exit zero" 0 "$RC"
+check "amended, no new commit" 1 "$(count_commits "$R")"
+check "message from file" "feat: amended via --file" "$(git -C "$R" log -1 --format='%B')"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]]

@@ -8,6 +8,8 @@
 #   git-commit.sh "Single line commit message"
 #   git-commit.sh "Multi-line" "commit message" "each arg is a line"
 #   echo "message" | git-commit.sh --stdin
+#   git-commit.sh --file /tmp/msg.txt
+#   git-commit.sh -- "-a line that starts with a dash"
 #
 # Options:
 #   --file F   Read commit message from file F
@@ -18,6 +20,16 @@
 #              would break the Bash(~/.claude/bin/*) permission match)
 #   --allow-protected
 #              Commit even when the target tree is on a protected branch
+#   -h, --help Print this help and exit, without touching git
+#   --         End of options: every later argument is a message line
+#
+# Argument errors (exit 2, nothing committed):
+#   - an unknown option: any argument of a dash followed by a non-space
+#     character (`--ammend`, `--add`, `-m`). Message lines like "- a bullet"
+#     and "" are not options. A line that really starts with `-x` goes after `--`.
+#   - --file or --stdin together with message arguments, or with each other:
+#     the message has one source, extra lines are never silently dropped.
+#   - --file or --repo without a value.
 #
 # Protected branches:
 #   In repos where every change reaches the base branch through a PR, a commit
@@ -107,17 +119,47 @@ REPO_DIR=""
 ALLOW_PROTECTED=""
 MSG_ARGS=()
 
+readonly EXIT_USAGE=2
+
+# Print the header comment block (minus the shebang) as the help text.
+print_help() {
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+}
+
+usage_error() { # message
+    echo "Error: $1" >&2
+    echo "Run 'git-commit.sh --help' for usage." >&2
+    exit "$EXIT_USAGE"
+}
+
+# Refuses an option given as the last argument, instead of letting `set -u`
+# die on an unbound $2.
+require_value() { # option remaining-argc
+    [[ $2 -ge 2 ]] || usage_error "$1 requires a value."
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -h|--help)
+            print_help
+            exit 0
+            ;;
+        --)
+            shift
+            MSG_ARGS+=("$@")
+            break
+            ;;
         --stdin)
             FROM_STDIN=1
             shift
             ;;
         --file)
+            require_value "$1" $#
             FROM_FILE="$2"
             shift 2
             ;;
         --repo)
+            require_value "$1" $#
             REPO_DIR="$2"
             shift 2
             ;;
@@ -133,12 +175,27 @@ while [[ $# -gt 0 ]]; do
             ALLOW_PROTECTED=1
             shift
             ;;
+        -[!\ ]*)
+            # A dash followed by a non-space: an option this script does not
+            # know. Taken as a message line it would commit whatever is staged,
+            # with the typo as message (#129). "- bullet" lines do not match.
+            usage_error "unknown option '$1'."
+            ;;
         *)
             MSG_ARGS+=("$1")
             shift
             ;;
     esac
 done
+
+# One message source: lines passed next to --file or --stdin would otherwise
+# be dropped without a word, and a trailer among them lost.
+if [[ -n "$FROM_FILE" && -n "$FROM_STDIN" ]]; then
+    usage_error "--file and --stdin cannot be combined."
+fi
+if [[ ( -n "$FROM_FILE" || -n "$FROM_STDIN" ) && ${#MSG_ARGS[@]} -gt 0 ]]; then
+    usage_error "message arguments cannot be combined with --file or --stdin; put every line in the one source."
+fi
 
 # Switch into the repository if requested, so the caller need not prefix the
 # command with `cd` (which would break the permission allow-match).
