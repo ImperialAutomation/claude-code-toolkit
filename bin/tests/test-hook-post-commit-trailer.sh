@@ -13,7 +13,7 @@
 # hook from rewriting published history, and it was added after a mutation run
 # showed the suite stayed green with that guard deleted. Cases 10-26 guard the
 # target resolution: the cwd repo there holds another session's fresh commit.
-# Cases 29-37 cover revert, cherry-pick and merge (#209).
+# Cases 29-39 cover revert, cherry-pick and merge (#209).
 #
 # Every message to the model must arrive as PostToolUse additionalContext JSON
 # on stdout; every silent skip must leave stdout empty.
@@ -333,8 +333,9 @@ diverged() { # name
 echo "== 29. git revert --no-edit HEAD -> added =="
 R=$(newrepo r29); git -C "$R" commit -qm base
 echo w > "$R/w"; git -C "$R" add w; git -C "$R" commit -qm "feat: probe"
-git -C "$R" revert --no-edit HEAD -q
+git -C "$R" revert --no-edit HEAD >/dev/null
 fire_out "$R" "git -C $R revert --no-edit HEAD"
+check "HEAD is the revert" 'Revert "feat: probe"' "$(git -C "$R" log -1 --format=%s)"
 check "trailer added" yes "$(has_trailer "$R")"
 check "context says trailer added" yes "$(context_has "added missing")"
 
@@ -343,6 +344,7 @@ R=$(diverged r30)
 SIDE=$(git -C "$R" rev-parse side)
 git -C "$R" cherry-pick "$SIDE" >/dev/null
 fire "$R" "git cherry-pick $SIDE"
+check "HEAD is the pick" side "$(git -C "$R" log -1 --format=%s)"
 check "trailer added" yes "$(has_trailer "$R")"
 
 echo "== 31. git merge --no-ff <branch> -> added on the merge commit =="
@@ -415,6 +417,24 @@ echo "== 37. --no-edit elsewhere in the line does not skip a real commit =="
 R=$(newrepo r37); git -C "$R" commit -qm "feat: thing"
 fire "$R" "git -C $R commit -m 'feat: thing' && git -C $R log -1 --no-edit"
 check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 38. git cherry-pick -X<value with n> -> added (the value is not -n) =="
+R=$(diverged r38)
+SIDE=$(git -C "$R" rev-parse side)
+git -C "$R" cherry-pick -Xignore-space-change "$SIDE" >/dev/null
+fire "$R" "git -C $R cherry-pick -Xignore-space-change $SIDE"
+check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 39. git -C <B> revert, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r39-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r39-b); git -C "$B" commit -qm base
+echo w > "$B/w"; git -C "$B" add w; git -C "$B" commit -qm "feat: probe"
+git -C "$B" revert --no-edit HEAD >/dev/null
+fire "$A" "git -C $B revert --no-edit HEAD"
+check "B HEAD is the revert" 'Revert "feat: probe"' "$(git -C "$B" log -1 --format=%s)"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

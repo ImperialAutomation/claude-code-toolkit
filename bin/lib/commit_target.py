@@ -93,8 +93,8 @@ NO_COMMIT_OPTIONS = {
 # take a value (the rest of a cluster after them is that value, not flags).
 SHORT_NO_COMMIT = "n"
 SHORT_VALUE_OPTIONS = {
-    REVERT_SUBCOMMAND: {"m", "S"},
-    CHERRY_PICK_SUBCOMMAND: {"m", "S"},
+    REVERT_SUBCOMMAND: {"m", "S", "X"},
+    CHERRY_PICK_SUBCOMMAND: {"m", "S", "X"},
 }
 
 COMMIT_WRAPPER = "git-commit.sh"
