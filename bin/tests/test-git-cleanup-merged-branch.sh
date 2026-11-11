@@ -23,6 +23,9 @@
 #   6-9.  --help, unknown options, conflicting flags     -> answered without git
 #   10-14. stdin is not a terminal                       -> no prompt, safe default
 #   15.   --repo after the positional arguments          -> still honoured
+#   16-19. toolkit route: sibling, live auto-detect, live with branch,
+#          several merged                                -> cleans, or lists
+#   20-24. toolkit route refusals                        -> nothing changed
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -365,6 +368,159 @@ check "exit zero" 0 "$RC"
 check "local branch deleted" no "$(branch_exists "$R" issue-15-export)"
 check "on base branch" develop "$(git_q "$R" branch --show-current)"
 check "remote branch kept" yes "$(remote_branch_exists "$R" issue-15-export)"
+
+# --- Toolkit route (#206) ------------------------------------------------------
+#
+# The live toolkit checkout is the main worktree ~/.claude/bin points into. Each
+# fixture gets its own HOME whose .claude/bin symlinks into a temporary "live"
+# clone, so the real toolkit checkout and its worktrees are never involved.
+#
+# The PR is merged on the remote, as on the forge: the live checkout's main is
+# behind origin/main, and nothing is fetched before the script runs, so the
+# script's own fetch is what makes the merge visible.
+
+# A toolkit-shaped clone of a fresh remote on main, plus a HOME that makes it
+# live. Prints the live checkout's path; its HOME is "$live-home".
+tk_fixture() { # name
+    local d
+    d=$(newremote "$1" main)
+    mkdir -p "$d/bin"
+    printf '#!/bin/bash\n' > "$d/bin/tool.sh"
+    git -C "$d" add bin
+    git -C "$d" commit -qm "Add bin"
+    git -C "$d" push -q origin main
+    mkdir -p "$d-home/.claude"
+    ln -s "$d/bin" "$d-home/.claude/bin"
+    echo "$d"
+}
+
+# A sibling worktree "$live-<n>" on issue-<n>-<slug> with one commit, pushed.
+tk_worktree() { # live n slug
+    local live="$1" br="issue-$2-$3" wt="$1-$2"
+    git -C "$live" worktree add -q --no-track -b "$br" "$wt" origin/main
+    printf 'work for %s\n' "$br" > "$wt/feature-$2.md"
+    git -C "$wt" add -A
+    git -C "$wt" commit -qm "Add $br notes"
+    git -C "$wt" push -q origin "$br"
+}
+
+# Merge a pushed branch into the remote's main with a merge commit, as the
+# forge does, without touching the live checkout.
+tk_merge_on_remote() { # live branch
+    local s="$T/merge-$RANDOM"
+    git clone -q "$1.git" "$s"
+    git -C "$s" config user.email ops@example.com
+    git -C "$s" config user.name "Ravi Chandrasekaran"
+    git -C "$s" merge -q --no-ff -m "Merge $2" "origin/$2"
+    git -C "$s" push -q origin main
+    rm -rf "$s"
+}
+
+run_tk() { # live dir [args...]
+    HOME="$1-home" bash "$SCRIPT" --repo "$2" "${@:3}" </dev/null 2>&1
+}
+
+# Everything a refusal must leave alone, in one comparable line.
+tk_state() { # live worktree branch
+    printf 'head=%s on=%s wt=%s br=%s' \
+        "$(git -C "$1" rev-parse HEAD)" "$(git -C "$1" branch --show-current)" \
+        "$([[ -d "$2" ]] && echo yes || echo no)" "$(branch_exists "$1" "$3")"
+}
+
+# The success state the acceptance criteria name.
+check_cleaned() { # live worktree branch
+    check "live on main" main "$(git -C "$1" branch --show-current)"
+    check "live at origin/main" "$(git -C "$1.git" rev-parse main)" "$(git -C "$1" rev-parse HEAD)"
+    check "worktree removed" no "$([[ -d "$2" ]] && echo yes || echo no)"
+    # Trailing space: "$L-17" is also a prefix of a sibling "$L-170".
+    lacks "worktree unregistered" "$2 " "$(git -C "$1" worktree list)"
+    check "branch deleted" no "$(branch_exists "$1" "$3")"
+}
+
+echo "== 16. toolkit: run from the merged sibling worktree =="
+L=$(tk_fixture tk16)
+tk_worktree "$L" 16 widget
+tk_merge_on_remote "$L" issue-16-widget
+OUT=$(run_tk "$L" "$L-16"); RC=$?
+check "exit zero" 0 "$RC"
+check_cleaned "$L" "$L-16" issue-16-widget
+
+echo "== 17. toolkit: run from the live checkout, merged worktree auto-detected =="
+L=$(tk_fixture tk17)
+tk_worktree "$L" 17 widget
+tk_merge_on_remote "$L" issue-17-widget
+tk_worktree "$L" 170 unmerged
+# A fresh worktree without commits sits on main's own history: an ancestor of
+# origin/main, but not merged work. It must not be taken for the merged one.
+git -C "$L" worktree add -q --no-track -b issue-171-fresh "$L-171" origin/main
+OUT=$(run_tk "$L" "$L"); RC=$?
+check "exit zero" 0 "$RC"
+check_cleaned "$L" "$L-17" issue-17-widget
+check "unmerged worktree kept" yes "$([[ -d "$L-170" ]] && echo yes || echo no)"
+check "fresh worktree kept" yes "$([[ -d "$L-171" ]] && echo yes || echo no)"
+
+echo "== 18. toolkit: run from the live checkout with the branch given =="
+L=$(tk_fixture tk18)
+tk_worktree "$L" 18 widget
+tk_merge_on_remote "$L" issue-18-widget
+OUT=$(run_tk "$L" "$L" issue-18-widget); RC=$?
+check "exit zero" 0 "$RC"
+check_cleaned "$L" "$L-18" issue-18-widget
+
+echo "== 19. toolkit: several merged worktrees, no argument -> lists, refuses =="
+L=$(tk_fixture tk19)
+tk_worktree "$L" 19 alpha
+tk_merge_on_remote "$L" issue-19-alpha
+tk_worktree "$L" 190 beta
+tk_merge_on_remote "$L" issue-190-beta
+BEFORE=$(tk_state "$L" "$L-19" issue-19-alpha)
+OUT=$(run_tk "$L" "$L"); RC=$?
+check "exit one" 1 "$RC"
+contains "lists the first" issue-19-alpha "$OUT"
+contains "lists the second" issue-190-beta "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-19" issue-19-alpha)"
+check "second worktree kept" yes "$([[ -d "$L-190" ]] && echo yes || echo no)"
+
+# Each refusal case: set up a merged sibling, break one precondition, run from
+# the sibling, and require exit 1, a message, and an untouched state.
+tk_refusal() { # name n setup-function needle
+    local L
+    L=$(tk_fixture "$1")
+    tk_worktree "$L" "$2" widget
+    tk_merge_on_remote "$L" "issue-$2-widget"
+    "$3" "$L" "$L-$2"
+    local before
+    before=$(tk_state "$L" "$L-$2" "issue-$2-widget")
+    OUT=$(run_tk "$L" "$L-$2"); RC=$?
+    check "exit one" 1 "$RC"
+    contains "explains" "$4" "$OUT"
+    check "nothing changed" "$before" "$(tk_state "$L" "$L-$2" "issue-$2-widget")"
+}
+
+dirty_live() { printf 'unsaved\n' >> "$1/README.md"; }
+live_off_main() { git -C "$1" checkout -q -b side; }
+live_diverged() {
+    printf 'local only\n' > "$1/local.md"
+    git -C "$1" add -A
+    git -C "$1" commit -qm "Local-only main commit"
+}
+feature_unmerged() {
+    printf 'late\n' > "$2/late.md"
+    git -C "$2" add -A
+    git -C "$2" commit -qm "Commit after the merge"
+}
+dirty_worktree() { printf 'scratch\n' > "$2/scratch.txt"; }
+
+echo "== 20. toolkit: dirty live checkout -> refuses, changes nothing =="
+tk_refusal tk20 20 dirty_live "uncommitted changes"
+echo "== 21. toolkit: live checkout not on main -> refuses, changes nothing =="
+tk_refusal tk21 21 live_off_main "not on 'main'"
+echo "== 22. toolkit: live main cannot fast-forward -> refuses, changes nothing =="
+tk_refusal tk22 22 live_diverged "cannot fast-forward"
+echo "== 23. toolkit: feature branch not merged -> refuses, changes nothing =="
+tk_refusal tk23 23 feature_unmerged "not merged"
+echo "== 24. toolkit: dirty feature worktree -> refuses, changes nothing =="
+tk_refusal tk24 24 dirty_worktree "uncommitted or untracked"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

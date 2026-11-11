@@ -4,6 +4,21 @@
 # Usage: git-cleanup-merged-branch.sh [options] [feature-branch] [base-branch]
 #   If no branches specified, uses current branch as feature and finds its base.
 #
+# Toolkit route: when the repository's main worktree is the LIVE toolkit
+# checkout (the one ~/.claude/bin points into), merged work lives in a linked
+# worktree `../<repo>-<N>` and going live means fast-forwarding the live
+# checkout. Then, run from either tree:
+#   - feature branch: the argument; else the branch of the linked worktree it
+#     runs in; else, from the live checkout, the one linked worktree on an
+#     `issue-*` branch merged into origin/<base> (several: listed, exit 1)
+#   - base branch: the second argument, else origin/HEAD's target, else main
+#   - every check runs before the first change: live checkout clean and on
+#     <base>, <base> fast-forwardable to origin/<base>, the feature tip merged
+#     into origin/<base>, its worktree clean. Any failure changes nothing.
+#   - then: fast-forward the live checkout, `git worktree remove` the feature
+#     worktree, `git branch -d` the branch, remote branch as below
+# In every other repository the route below the toolkit section is unchanged.
+#
 # Options (anywhere on the command line):
 #   --repo DIR       Run git in repository DIR (avoids a leading `cd`, which
 #                    would break the Bash(~/.claude/bin/*) permission match)
@@ -27,6 +42,8 @@ set -e  # Exit on error
 # cwd: this script runs from arbitrary directories and bin/ is a symlink.
 # shellcheck source=bin/lib/strip-sandbox-noise.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+# shellcheck source=bin/lib/live-checkout.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/live-checkout.sh"
 
 readonly EXIT_USAGE=2
 
@@ -121,6 +138,130 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# --- Toolkit route (#206) -----------------------------------------------------
+
+# Refuse with a message; nothing has been changed when this is called.
+tk_refuse() { # message...
+    echo -e "${RED}Error: $1${NC}" >&2
+    shift
+    local line
+    for line in "$@"; do echo "$line" >&2; done
+    echo "Nothing was changed." >&2
+    exit 1
+}
+
+# `<path>\t<branch>\t<locked>` per worktree; branch empty when detached.
+tk_worktrees() {
+    git -C "$LIVE_ROOT" worktree list --porcelain | awk '
+        /^worktree / { if (p != "") print p "\t" b "\t" l; p = substr($0, 10); b = ""; l = "" }
+        /^branch refs\/heads\// { b = substr($0, 19) }
+        /^locked/ { l = "locked" }
+        END { if (p != "") print p "\t" b "\t" l }'
+}
+
+# Linked worktrees on an issue-* branch whose work is merged into $1. "Merged"
+# is an ancestor of the remote base that is NOT on its first-parent line: a
+# fresh worktree that has no commits yet also sits on that history, but on the
+# first-parent line itself, and is not finished work.
+tk_merged_issue_worktrees() { # remote-base
+    local first_parent path branch tip
+    first_parent=$(git -C "$LIVE_ROOT" rev-list --first-parent "$1")
+    while IFS=$'\t' read -r path branch _; do
+        [ "$path" != "$LIVE_ROOT" ] || continue
+        [[ "$branch" == issue-* ]] || continue
+        tip=$(git -C "$LIVE_ROOT" rev-parse "refs/heads/$branch")
+        git -C "$LIVE_ROOT" merge-base --is-ancestor "$tip" "$1" || continue
+        grep -qx "$tip" <<< "$first_parent" && continue
+        printf '%s\t%s\n' "$path" "$branch"
+    done < <(tk_worktrees)
+}
+
+toolkit_cleanup() {
+    # Leave the feature worktree first: it is about to be removed.
+    cd "$LIVE_ROOT"
+
+    local base remote_base worktree="" locked="" line path branch lock candidates
+    base="${POSITIONAL[1]:-$(live_base_branch "$LIVE_ROOT")}"
+    remote_base="origin/$base"
+
+    echo -e "${GREEN}=== Git Cleanup: Merged Toolkit Worktree ===${NC}"
+    echo "Live checkout: $LIVE_ROOT"
+
+    git_filtered fetch --prune origin || tk_refuse "fetching origin failed"
+    git_filtered rev-parse --verify -q "$remote_base" >/dev/null \
+        || tk_refuse "'$remote_base' does not exist"
+
+    FEATURE_BRANCH="${POSITIONAL[0]:-}"
+    if [ -z "$FEATURE_BRANCH" ] && [ "$REPO_TOP" != "$LIVE_ROOT" ]; then
+        FEATURE_BRANCH=$(git -C "$REPO_TOP" branch --show-current)
+        [ -n "$FEATURE_BRANCH" ] || tk_refuse "worktree '$REPO_TOP' is not on a branch"
+    fi
+    if [ -z "$FEATURE_BRANCH" ]; then
+        candidates=$(tk_merged_issue_worktrees "$remote_base")
+        case "$(grep -c . <<< "$candidates")" in
+            0) tk_refuse "no linked worktree on an issue-* branch is merged into '$remote_base'" ;;
+            1) FEATURE_BRANCH=$(cut -f2 <<< "$candidates") ;;
+            *) tk_refuse "several merged issue worktrees; name the branch to clean up:" \
+                   "$(sed 's/^\(.*\)\t\(.*\)$/  \2  (\1)/' <<< "$candidates")" ;;
+        esac
+    fi
+
+    echo "Feature branch: $FEATURE_BRANCH"
+    echo "Base branch: $base"
+
+    [ "$FEATURE_BRANCH" != "$base" ] || tk_refuse "cannot clean up the base branch '$base'"
+    git_filtered show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH" \
+        || tk_refuse "branch '$FEATURE_BRANCH' does not exist"
+
+    while IFS=$'\t' read -r path branch lock; do
+        [ "$branch" = "$FEATURE_BRANCH" ] || continue
+        worktree="$path"; locked="$lock"
+    done < <(tk_worktrees)
+    [ "$worktree" != "$LIVE_ROOT" ] \
+        || tk_refuse "'$FEATURE_BRANCH' is checked out in the live checkout itself"
+
+    # All checks before the first change.
+    [ "$(git_filtered branch --show-current)" = "$base" ] \
+        || tk_refuse "the live checkout is not on '$base'" "Switch it back: git -C $LIVE_ROOT switch $base"
+    [ -z "$(git_filtered status --porcelain --untracked-files=no)" ] \
+        || tk_refuse "the live checkout has uncommitted changes" "Commit or stash them in $LIVE_ROOT, then re-run."
+    git_filtered merge-base --is-ancestor HEAD "$remote_base" \
+        || tk_refuse "the live checkout's '$base' cannot fast-forward to '$remote_base' (it has commits of its own)"
+    git_filtered merge-base --is-ancestor "refs/heads/$FEATURE_BRANCH" "$remote_base" \
+        || tk_refuse "'$FEATURE_BRANCH' is not merged into '$remote_base'" \
+               "Merge its PR first; for a squash merge delete it by hand: git branch -D $FEATURE_BRANCH"
+    if [ -n "$worktree" ]; then
+        [ -z "$locked" ] || tk_refuse "worktree '$worktree' is locked" "Unlock it: git worktree unlock $worktree"
+        [ -z "$(git -C "$worktree" status --porcelain)" ] \
+            || tk_refuse "worktree '$worktree' has uncommitted or untracked files" \
+                   "Commit, move or remove them, then re-run."
+    fi
+
+    echo -e "\n${GREEN}Step 1: Fast-forwarding the live checkout to $remote_base${NC}"
+    git_filtered merge --ff-only "$remote_base"
+
+    if [ -n "$worktree" ]; then
+        echo -e "\n${GREEN}Step 2: Removing worktree $worktree${NC}"
+        git_filtered worktree remove "$worktree"
+    fi
+
+    echo -e "\n${GREEN}Step 3: Deleting merged branch $FEATURE_BRANCH${NC}"
+    git_filtered branch -d "$FEATURE_BRANCH"
+    handle_remote_branch
+
+    echo -e "\n${GREEN}=== Cleanup Complete: live at $(git_filtered log -1 --oneline) ===${NC}"
+}
+
+REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || true)
+LIVE_ROOT=$(live_checkout_root)
+if [ -n "$REPO_TOP" ] && [ -n "$LIVE_ROOT" ] \
+   && [ "$(git worktree list --porcelain | sed -n '1s/^worktree //p')" = "$LIVE_ROOT" ]; then
+    toolkit_cleanup
+    exit 0
+fi
+
+# --- Every other repository ---------------------------------------------------
 
 echo -e "${GREEN}=== Git Cleanup: Merged Branch ===${NC}"
 echo "Feature branch: $FEATURE_BRANCH"
