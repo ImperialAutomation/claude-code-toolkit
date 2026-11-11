@@ -273,7 +273,8 @@ log_run() {
         elif [[ "$(head -1 "$RUNS_LOG")" == "$old_header" ]]; then
             tmp=$(mktemp "$RUNS_LOG.XXXXXX") &&
             { printf '%s\n' "$header"; tail -n +2 "$RUNS_LOG"; } > "$tmp" &&
-            mv "$tmp" "$RUNS_LOG"
+            # Copied back, not moved: the log keeps its own mode.
+            cat "$tmp" > "$RUNS_LOG" && rm -f "$tmp"
         fi &&
         printf '%s\n' "$row" >> "$RUNS_LOG"
     } 2>/dev/null || echo "warning: could not append to the run log '$RUNS_LOG'" >&2
