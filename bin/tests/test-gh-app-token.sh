@@ -201,6 +201,12 @@ echo 333333 > "$T/.config/github-apps/halfdone/review/app-id"
 ERR=$(run --repo halfdone/tool -- true 2>&1 >/dev/null); STATUS=$?
 check "missing private key exits 1" "1" "$STATUS"
 check "message names private-key.pem" "yes" "$(contains "$ERR" "private-key.pem")"
+echo "not a key" > "$T/.config/github-apps/halfdone/review/private-key.pem"
+ERR=$(run --repo halfdone/tool -- touch "$T/ran" 2>&1 >/dev/null); STATUS=$?
+check "invalid private key exits 1" "1" "$STATUS"
+check "message says the key is not valid" "yes" "$(contains "$ERR" "not a valid RSA private key")"
+check "invalid key: command not run" "no" "$([[ -e "$T/ran" ]] && echo yes || echo no)"
+check "invalid key: no API call" "no" "$([[ -e "$STUB/calls.log" ]] && echo yes || echo no)"
 
 echo "== 7. app not installed on the repo: non-zero, named, command not run =="
 reset_stub

@@ -133,6 +133,7 @@ Global CLAUDE.md names each wrapper in one line and leaves the details to the sc
 | `find-tracking-pr.sh` | `find-tracking-pr.sh <repo> <issue> [--exclude <pr>]...` | Find the open tracking PR for a parent issue (exact branch/closing-keyword match) |
 | `gh-issues-export.sh` | `gh-issues-export.sh [--repo R] [--state S] [--output F]` | Export GitHub issues to JSON file with search/filter |
 | `gh-save.sh` | `gh-save.sh <output-file> <gh-args...>` | Save `gh` command output to file (avoids redirect prompts) |
+| `gh-app-token.sh` | `gh-app-token.sh --repo <owner/repo> (-- <cmd> [args...] \| --print)` | Run `<cmd>` as the review GitHub App of the repo's owner: `GH_TOKEN` is an installation token limited to that one repository, so an agent can approve or request changes on a PR the human's account opened. One private app per owner account, credentials in `~/.config/github-apps/<owner>/review/`; setup, checks and rotation in the [review app runbook](docs/review-app-runbook.md). The auto-approve hook judges `<cmd>` like a bare command and denies `--print`, which is for humans |
 | `cmd-save.sh` | `cmd-save.sh [--stderr separate\|merge] [--strip-ansi] <output-file> <command> [args...]` | Save any command's output to a file. Options go before `<output-file>`; everything after it is the command. Reports the command's own exit status and the byte count written; an empty capture from a command that did write to stderr adds `stderr: <n> bytes not captured, rerun with --stderr merge` to that line. The auto-approve hook approves it only when `<command>` is approvable on its own, and otherwise denies it with a hint to run `<command>` bare |
 | `strip-ansi.sh` | `strip-ansi.sh <file> [<outfile>]` | Write a copy of a file without ANSI colour/cursor codes (default `<file>.clean`), so captured test output can be grepped without a `sed` chain |
 
@@ -346,7 +347,7 @@ not.
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
-| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads, `sed` HTML-tag stripping (hint: `markitdown`) and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare (`<wrapper> --help` alone runs nothing and is approved) |
+| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads, `sed` HTML-tag stripping (hint: `markitdown`) and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`, `gh-app-token.sh`) whose inner command is not approvable, with a hint to run that command bare (for `gh-app-token.sh`: not to, since bare it would act as the user's own account; its `--print` is denied too) (`<wrapper> --help` alone runs nothing and is approved) |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-block-toolkit-live-checkout.sh` | PreToolUse hook in settings.json | Block `git checkout`/`git switch` that takes the live toolkit checkout (the one `~/.claude/bin` points into) off its base branch; the message names the worktree route ([why](CLAUDE.md)) |
@@ -415,6 +416,7 @@ claude-code-toolkit/
 │   ├── owasp-zap-scan.sh          ← OWASP ZAP baseline security scan
 │   ├── gh-issues-export.sh        ← export GitHub issues to JSON file
 │   ├── gh-save.sh                 ← save gh command output to file
+│   ├── gh-app-token.sh            ← run a command as the repo owner's review GitHub App
 │   ├── cmd-save.sh                ← save any command's output to file
 │   ├── strip-ansi.sh              ← copy a file without ANSI escape codes
 │   ├── sync-toolkit.sh            ← sync toolkit from configured git sources
