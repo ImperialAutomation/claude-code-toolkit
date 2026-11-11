@@ -79,12 +79,15 @@ Read it for the title. Pick `<slug>`: a short kebab-case summary of the title.
 
 ### Step 4: Spawn the issue sub-agent
 
-Use the Agent tool, `subagent_type: "general-purpose"`, in the foreground (do
-NOT use `run_in_background`): the iteration needs its result before it can
-release the claim. The spike on #188 confirmed that this sub-agent can run
+Use the Agent tool, `subagent_type: "general-purpose"`. It runs in the
+background; the launch result holds its `agentId: <id>` (note it for Step 4b),
+and its completion notification is the wake signal for Step 4b. Until that
+notification arrives, release nothing, claim nothing and do not end the
+iteration: `agent-wip` stays on until the outcome exists (see "Pacing" for the
+fallback wakeup). The spike on #188 confirmed that this sub-agent can run
 `/implement` including its own Phase 3 verification sub-agent.
 
-The report arrives as the sub-agent's hand-back message. A sub-agent that ends
+The report arrives in the completion notification. A sub-agent that ends
 without a report holding one of the three result blocks below is a failure.
 
 Prompt, with the placeholders filled in:
@@ -163,8 +166,8 @@ WORKTREE: <worktree, if one was made>
 
 ### Step 4b: Measure the tokens
 
-The Agent tool result of Step 4 contains `agentId: <id>`, the issue sub-agent's
-id. Measure that agent and every agent it spawned, whatever the outcome (a
+`<id>` is the issue sub-agent's `agentId` from the launch result of Step 4.
+Measure that agent and every agent it spawned, whatever the outcome (a
 failed or escalated run costs just as much):
 
 ```bash
@@ -174,7 +177,7 @@ failed or escalated run costs just as much):
 - exit 0: `/tmp/<project>-queue-tokens-<N>.json` holds the totals; Read it for
   its `summary` (Step 7) and pass it to the release in Step 5.
 - exit 1 (no transcript), exit 2 (ambiguous or unreadable), or no `agentId` in
-  the result: the measurement failed. That never fails the iteration: release
+  the launch result: the measurement failed. That never fails the iteration: release
   without `--tokens`, report `tokens: unknown`.
 
 The `subagent_tokens` of a completion notice is not this number: it is roughly
@@ -244,6 +247,10 @@ next one runs (#188, D6).
 
 - **Worked an issue** (released as pr, escalated or failed): run the next
   iteration right away; the queue may hold more.
+- **Sub-agent running** (Step 4 launched, no completion notification yet):
+  schedule a fallback wakeup after 60 minutes, in case no notification
+  arrives. A wakeup that finds the sub-agent still running claims nothing and
+  schedules the next fallback.
 - **Idle** (empty queue, WIP limit reached, or WIP count unknown): schedule the
   next iteration after 30 minutes. The queue and the review backlog change
   slowly.
