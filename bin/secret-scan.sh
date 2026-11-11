@@ -4,22 +4,57 @@ set -euo pipefail
 # Scan codebase for hardcoded secrets, API keys, tokens, and credentials.
 # Uses regex patterns to detect common secret patterns in source files.
 #
-# Usage: secret-scan.sh [project-dir]
+# Usage: secret-scan.sh [path...]
+# Each path is a file or a directory; all of them are scanned in one run.
+# No path scans the current directory.
 # Example: secret-scan.sh /path/to/project
+#          secret-scan.sh src/components src/pages/Login.tsx
+#
+# Exit codes: 0 clean, 1 potential secrets found, 2 a path does not exist.
 
-PROJECT_DIR="${1:-.}"
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+(( $# == 0 )) && set -- .
 
-if [[ ! -d "$PROJECT_DIR" ]]; then
-  echo "Error: directory not found: $PROJECT_DIR" >&2
-  exit 2
+# Validate every path before scanning anything: a partial scan that reports
+# CLEAN is a false verdict.
+for path in "$@"; do
+  if [[ ! -e "$path" ]]; then
+    echo "Error: path not found: $path" >&2
+    echo "Usage: secret-scan.sh [path...]  (files or directories)" >&2
+    exit 2
+  fi
+done
+
+SCAN_PATHS=()   # absolute paths handed to the scanner
+SCAN_DIRS=()    # the directory arguments, for the tracked .env check
+for path in "$@"; do
+  if [[ -d "$path" ]]; then
+    abs="$(cd "$path" && pwd)"
+    SCAN_DIRS+=("$abs")
+  else
+    abs="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+  fi
+  SCAN_PATHS+=("$abs")
+done
+
+# One directory argument keeps the old output: findings relative to it.
+# Several paths show full paths, because relative ones would be ambiguous.
+STRIP_PREFIX=""
+if [[ ${#SCAN_PATHS[@]} -eq 1 && ${#SCAN_DIRS[@]} -eq 1 ]]; then
+  STRIP_PREFIX="${SCAN_DIRS[0]}/"
 fi
 
 ISSUES=0
 
 echo "Secret Scan Report"
 echo "=================================================="
-echo "Project: $PROJECT_DIR"
+if [[ ${#SCAN_PATHS[@]} -eq 1 ]]; then
+  echo "Project: ${SCAN_PATHS[0]}"
+else
+  echo "Paths (${#SCAN_PATHS[@]}):"
+  for path in "${SCAN_PATHS[@]}"; do
+    echo "  $path"
+  done
+fi
 echo ""
 
 # Directories and files to exclude
@@ -31,6 +66,7 @@ EXCLUDE_PATTERNS="\.env\.example|\.env\.template|secret-scan\.sh|CLAUDE\.md|cred
 # Build rg exclusion args
 RG_ARGS=(
   --no-heading
+  --with-filename
   --line-number
   --color never
   --type-add 'src:*.{py,ts,tsx,js,jsx,json,yml,yaml,toml,cfg,ini,conf,sh,sql,html,env}'
@@ -58,7 +94,7 @@ scan_pattern() {
   local context="${3:-}"
 
   local results
-  results="$(rg "${RG_ARGS[@]}" -e "$pattern" "$PROJECT_DIR" 2>/dev/null || true)"
+  results="$(rg "${RG_ARGS[@]}" -e "$pattern" "${SCAN_PATHS[@]}" 2>/dev/null || true)"
 
   # Filter out known safe files
   if [[ -n "$results" ]]; then
@@ -83,7 +119,8 @@ scan_pattern() {
     echo ""
     echo "$results" | while IFS= read -r line; do
       # Truncate long lines and make path relative
-      local rel_line="${line#"$PROJECT_DIR"/}"
+      local rel_line="$line"
+      [[ -n "$STRIP_PREFIX" ]] && rel_line="${line#"$STRIP_PREFIX"}"
       if [[ ${#rel_line} -gt 200 ]]; then
         rel_line="${rel_line:0:200}..."
       fi
@@ -143,22 +180,29 @@ scan_pattern \
   "Long secret values should come from environment variables"
 
 # --- Check for .env files that might be committed ---
+# Runs per directory argument; file arguments have no directory scope to check.
 echo "── .env Files in Repository ──"
 echo ""
-if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
-  tracked_envs="$(git -C "$PROJECT_DIR" ls-files '*.env' '.env' '**/.env' 2>/dev/null | grep -v -E '\.(example|template|test|ci|sample)$' || true)"
-  if [[ -n "$tracked_envs" ]]; then
-    echo "  WARNING: .env files tracked by git:"
-    echo "$tracked_envs" | while IFS= read -r f; do
-      echo "    $f"
-    done
-    ISSUES=$((ISSUES + 1))
-  else
-    echo "  No .env files tracked by git."
-  fi
-else
-  echo "  Not a git repository — skipping tracked .env check."
+if [[ ${#SCAN_DIRS[@]} -eq 0 ]]; then
+  echo "  Only files given; skipping tracked .env check."
 fi
+for dir in "${SCAN_DIRS[@]}"; do
+  [[ ${#SCAN_DIRS[@]} -gt 1 ]] && echo "  $dir:"
+  if git -C "$dir" rev-parse --is-inside-work-tree &>/dev/null; then
+    tracked_envs="$(git -C "$dir" ls-files '*.env' '.env' '**/.env' 2>/dev/null | grep -v -E '\.(example|template|test|ci|sample)$' || true)"
+    if [[ -n "$tracked_envs" ]]; then
+      echo "  WARNING: .env files tracked by git:"
+      echo "$tracked_envs" | while IFS= read -r f; do
+        echo "    $f"
+      done
+      ISSUES=$((ISSUES + 1))
+    else
+      echo "  No .env files tracked by git."
+    fi
+  else
+    echo "  Not a git repository — skipping tracked .env check."
+  fi
+done
 echo ""
 
 # Summary

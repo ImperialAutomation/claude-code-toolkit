@@ -26,5 +26,9 @@ jobs:
           git config --global user.email "toolkit-ci@users.noreply.github.com"
           mkdir -p "$HOME/Projects"
 
+      # secret-scan.sh shells out to ripgrep; its test plants keys to find.
+      - name: Install ripgrep
+        run: command -v rg || (sudo apt-get update && sudo apt-get install -y ripgrep)
+
       - name: Run test scripts
         run: bin/run-tests.sh --ci
