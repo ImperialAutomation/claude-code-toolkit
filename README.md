@@ -284,7 +284,7 @@ misdescribe the argument.
 
 | Script | Usage | Description |
 |--------|-------|-------------|
-| `secret-scan.sh` | `secret-scan.sh [project-dir]` | Scan codebase for hardcoded secrets, API keys, tokens |
+| `secret-scan.sh` | `secret-scan.sh [path...]` | Scan files and directories for hardcoded secrets, API keys, tokens. Every path is scanned; a missing one exits 2. Needs ripgrep (`rg`) |
 | `security-headers-check.sh` | `security-headers-check.sh <url>` | Check HTTP security headers (CSP, HSTS, X-Frame-Options, etc.) |
 | `owasp-zap-scan.sh` | `owasp-zap-scan.sh <url>` | OWASP ZAP baseline scan via Docker (requires running target) |
 
