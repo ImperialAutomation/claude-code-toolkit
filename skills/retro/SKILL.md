@@ -56,7 +56,7 @@ This scans the current project's transcripts and reports total Bash calls, an es
 
 **For a compound command, the row names the segment that actually defeats matching, not the chain's first token.** `grep ... | head; sed ...` is a `sed` problem: `grep` and `head` are already approved, so a remedy aimed at `grep` fixes a command that never prompted. Each row carries a `culprit` (the token a rule or wrapper must name) and a `culprit_example` (that segment verbatim) alongside the full-chain `example` — propose the remedy for the **culprit**.
 
-**A `Denied by hook` bucket is not friction.** Those commands (`sed -n 'X,Yp' <file>`, inline Python opening a file, an until+sleep file wait loop, a `cd <dir> && <cmd>` chain) never showed a prompt; `hook-auto-approve-bash.py` refused them. They are excluded from the prompted estimate, and the remedy is always the alternative the deny message names (Read, Grep, Edit, `wait-for-pattern.sh`, or `env -C` / `git -C` / `npm --prefix` for a cd-chain) — never an allowlist entry or a new wrapper.
+**A `Denied by hook` bucket is not friction.** Those commands (`sed -i` on a file, `sed -n 'X,Yp' <file>`, inline Python opening a file, an until+sleep file wait loop, a `cd <dir> && <cmd>` chain) never showed a prompt; `hook-auto-approve-bash.py` refused them. They are excluded from the prompted estimate, and the remedy is always the alternative the deny message names (Read, Grep, Edit, `wait-for-pattern.sh`, or `env -C` / `git -C` / `npm --prefix` for a cd-chain), never an allowlist entry or a new wrapper.
 
 The cd-chain is usually the largest of these buckets, and it is the one most
 easily misread as rule friction: the command looks unmatched because its first

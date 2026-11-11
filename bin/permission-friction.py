@@ -21,8 +21,8 @@ Three things can cover a segment, and all are consulted: the auto-approve
 hook's own safety logic, an allow rule matching the segment alone, and an
 opted-in rewriting-hook prefix (--rewrite-prefix).
 
-Hook denies (`sed -n 'X,Yp' <file>`, inline Python that opens a file, an
-until+sleep file wait loop) are reported in their own bucket and excluded from
+Hook denies (`sed -i` on a file, `sed -n 'X,Yp' <file>`, inline Python that
+opens a file, an until+sleep file wait loop) are reported in their own bucket and excluded from
 the prompted estimate: a deny shows no prompt at all. It is the opposite
 signal — a native tool exists — and the remedy is that tool, not an allowlist
 entry.
@@ -100,12 +100,14 @@ REASON_NO_RULE = "no allow rule covers this command"
 # points /retro at the wrong remedy. They are the opposite signal — the agent
 # reached for a shell command where a native tool exists — and the fix is to
 # use that tool, never an allowlist entry. Reported separately for that reason.
+REASON_HOOK_DENY_SED_EDIT = "denied by hook: sed -i used as a file editor"
 REASON_HOOK_DENY_SED_READ = "denied by hook: sed used as a file reader"
 REASON_HOOK_DENY_PYTHON_READ = "denied by hook: inline Python opens a file"
 REASON_HOOK_DENY_WAIT_LOOP = "denied by hook: until+sleep wait loop on a file"
 REASON_HOOK_DENY_CD_CHAIN = "denied by hook: cd-prefixed chain (use env -C / git -C)"
 
 HOOK_DENY_REASONS = (
+    REASON_HOOK_DENY_SED_EDIT,
     REASON_HOOK_DENY_SED_READ,
     REASON_HOOK_DENY_PYTHON_READ,
     REASON_HOOK_DENY_WAIT_LOOP,
@@ -224,6 +226,8 @@ def is_hook_denied(command):
     hook itself evaluates them, so the category a command lands in here is
     the message the agent actually saw.
     """
+    if _hook.command_has_sed_in_place_edit(command):
+        return REASON_HOOK_DENY_SED_EDIT
     if _hook.command_has_sed_file_read(command):
         return REASON_HOOK_DENY_SED_READ
     if _hook.command_has_python_file_read(command):
