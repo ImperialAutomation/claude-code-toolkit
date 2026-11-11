@@ -56,6 +56,9 @@
 #     command that does not tokenize. Never falls back to the cwd: amending the
 #     wrong commit cannot be undone, a missing trailer can.
 #   - A commit pushed by a `git push` later in the same call (names the hash)
+#   - A git-commit.sh call whose output (tool_response) lacks git's
+#     "[branch <sha>]" summary line for HEAD: the script refused or failed, so
+#     HEAD may be someone else's commit, or the output was cut off
 
 set -uo pipefail
 
@@ -72,6 +75,8 @@ EXIT_RESOLVED=0
 EXIT_UNRESOLVABLE=2
 # Its second output line when a `git push` follows the commit.
 PUSH_MARKER="push"
+# Its third output line when every commit segment is git-commit.sh.
+WRAPPER_MARKER="wrapper"
 
 TMP_ERR=$(mktemp)
 trap 'rm -f "$TMP_ERR"' EXIT
@@ -81,6 +86,18 @@ trap 'rm -f "$TMP_ERR"' EXIT
 report() { # message
     jq -cn --arg msg "$1" \
         '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $msg}}'
+}
+
+# True when the call's output holds git's commit summary line,
+# "[<branch> <sha>] <subject>", for the current HEAD of the repo. The prefix
+# match takes any abbreviation length git chose.
+output_names_head() { # repo output
+    local full abbrev
+    full=$(git -C "$1" rev-parse HEAD 2>/dev/null) || return 1
+    while read -r abbrev; do
+        [[ -n "$abbrev" && "$full" == "$abbrev"* ]] && return 0
+    done < <(grep -oE '^\[[^]]* [0-9a-f]{7,40}\]' <<< "$2" | grep -oE '[0-9a-f]{7,40}\]$' | tr -d ']')
+    return 1
 }
 
 INPUT=$(cat)
@@ -114,7 +131,7 @@ case $? in
         ;;
     *) exit 0 ;;
 esac
-{ read -r REPO_DIR; read -r PUSH_AFTER; } <<< "$TARGET"
+{ read -r REPO_DIR; read -r PUSH_AFTER; read -r COMMIT_KIND; } <<< "$TARGET"
 
 git -C "$REPO_DIR" rev-parse --verify HEAD &>/dev/null || exit 0
 
@@ -133,6 +150,23 @@ fi
 COMMIT_AGE=$(( $(date +%s) - $(git -C "$REPO_DIR" log -1 --format='%ct' 2>/dev/null || echo 0) ))
 if (( COMMIT_AGE > 120 )); then
     exit 0
+fi
+
+# git-commit.sh can end without committing (--help, an argument error, a
+# protected branch, a failing pre-commit hook), and the payload carries no exit
+# status. HEAD is then whatever the repo already had, possibly another
+# author's fresh commit. A real commit prints git's summary line naming the new
+# HEAD, so without that line in this call's output nothing is amended.
+if [[ "$COMMIT_KIND" == "$WRAPPER_MARKER" ]]; then
+    OUTPUT=$(echo "$INPUT" | jq -r '.tool_response
+        | if type == "object" then ([.stdout, .stderr] | map(select(type == "string")) | join("\n"))
+          elif type == "string" then .
+          else "" end' 2>/dev/null)
+    if ! output_names_head "$REPO_DIR" "$OUTPUT"; then
+        HASH=$(git -C "$REPO_DIR" rev-parse --short HEAD)
+        report "hook: Co-Authored-By trailer not added: the output of this git-commit.sh call does not show commit $HASH (HEAD of $REPO_DIR), so this call may not have made it; if it did, add the trailer manually"
+        exit 0
+    fi
 fi
 
 # A hook that rewrites a commit already pushed would desync the remote. Checked

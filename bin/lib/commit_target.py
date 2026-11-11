@@ -13,6 +13,7 @@ Usage:
 Output and exit status:
     0  line 1: the target directory (absolute)
        line 2: "push" if a `git push` segment follows the commit, else empty
+       line 3: "wrapper" if every commit segment is git-commit.sh, else empty
     1  the command contains no commit segment; nothing printed
     2  a commit segment exists but its target cannot be resolved; the reason
        is printed on stderr
@@ -56,6 +57,9 @@ COMMIT_SUBCOMMAND = "commit"
 PUSH_SUBCOMMAND = "push"
 # Second output line when a push follows the commit; the hook compares against it.
 PUSH_MARKER = "push"
+# Third output line when every commit segment is git-commit.sh, whose output
+# shows whether it committed (the hook then checks for git's summary line).
+WRAPPER_MARKER = "wrapper"
 
 COMMIT_WRAPPER = "git-commit.sh"
 REPO_OPTION = "--repo"
@@ -171,19 +175,20 @@ def _resolve_dir(parts, cwd):
 
 
 def _commit_target(segment, cwd):
-    """Target dir of a commit segment, or None if the segment does not commit."""
+    """(target dir, is git-commit.sh) of a commit segment, or None if the
+    segment does not commit."""
     chdirs, tokens = _strip_env_chdir(segment)
     _, tokens = _hook.strip_command_prefixes(tokens)
     if not tokens:
         return None
     if os.path.basename(tokens[0]) == COMMIT_WRAPPER:
         repo = _wrapper_repo(tokens)
-        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd)
+        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd), True
     git = _git_invocation(tokens)
     if git and git[0] == COMMIT_SUBCOMMAND:
         if git[2]:
             raise Unresolvable(f"git {git[2]} sets the repository; not resolved from command text")
-        return _resolve_dir(chdirs + git[1], cwd)
+        return _resolve_dir(chdirs + git[1], cwd), False
     return None
 
 
@@ -203,7 +208,8 @@ def _is_push(segment):
 
 
 def resolve(command, cwd):
-    """Return (target, pushed_after) or None without a commit segment.
+    """Return (target, pushed_after, wrapper_only) or None without a commit
+    segment.
 
     Raises Unresolvable with the reason.
     """
@@ -213,6 +219,7 @@ def resolve(command, cwd):
         raise Unresolvable(f"command does not tokenize ({exc})")
 
     targets = []
+    wrapper_only = True
     last_commit = -1
     # A `cd` that cannot be followed only matters if a commit comes after it.
     cd_error = None
@@ -225,11 +232,12 @@ def resolve(command, cwd):
         if moved is not None:
             cwd = moved
             continue
-        target = _commit_target(segment, cwd)
-        if target is not None:
+        commit = _commit_target(segment, cwd)
+        if commit is not None:
             if cd_error is not None:
                 raise cd_error
-            targets.append(target)
+            targets.append(commit[0])
+            wrapper_only = wrapper_only and commit[1]
             last_commit = index
 
     if not targets:
@@ -238,7 +246,7 @@ def resolve(command, cwd):
         raise Unresolvable("several commit segments with different targets: " + ", ".join(sorted(set(targets))))
 
     pushed_after = any(_is_push(segment) for segment in segments[last_commit + 1:])
-    return targets[0], pushed_after
+    return targets[0], pushed_after, wrapper_only
 
 
 def main():
@@ -250,9 +258,10 @@ def main():
         return EXIT_UNRESOLVABLE
     if result is None:
         return EXIT_NO_COMMIT
-    target, pushed_after = result
+    target, pushed_after, wrapper_only = result
     print(target)
     print(PUSH_MARKER if pushed_after else "")
+    print(WRAPPER_MARKER if wrapper_only else "")
     return EXIT_RESOLVED
 
 

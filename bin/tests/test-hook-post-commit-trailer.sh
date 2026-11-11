@@ -13,6 +13,7 @@
 # hook from rewriting published history, and it was added after a mutation run
 # showed the suite stayed green with that guard deleted. Cases 10-26 guard the
 # target resolution: the cwd repo there holds another session's fresh commit.
+# Cases 30-33 guard a git-commit.sh call that did not commit.
 #
 # Every message to the model must arrive as PostToolUse additionalContext JSON
 # on stdout; every silent skip must leave stdout empty.
@@ -46,17 +47,27 @@ has_trailer() {
     git -C "$1" log -1 --format='%B' | grep -qi "^Co-Authored-By:" && echo yes || echo no
 }
 
-fire() { # repodir command  — feed the hook a PostToolUse payload
-    printf '{"tool_input":{"command":%s},"cwd":%s}' \
-        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" &>/dev/null
+# A PostToolUse payload; [tool-stdout] is the call's output as tool_response.
+payload() { # repodir command [tool-stdout]
+    jq -cn --arg c "$2" --arg d "$1" --arg o "${3-}" \
+        '{tool_input: {command: $c}, cwd: $d, tool_response: {stdout: $o, stderr: ""}}'
+}
+
+fire() { # repodir command [tool-stdout]  — feed the hook a PostToolUse payload
+    payload "$@" | bash "$HOOK" &>/dev/null
 }
 
 # The hook reports to the model through stdout JSON, not stderr: a PostToolUse
 # hook's stderr on exit 0 never reaches the model.
 OUT="$T/stdout"
-fire_out() { # repodir command  — like fire, but keeps the hook's stdout in $OUT
-    printf '{"tool_input":{"command":%s},"cwd":%s}' \
-        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" | bash "$HOOK" >"$OUT" 2>/dev/null
+fire_out() { # repodir command [tool-stdout]  — like fire, but keeps the hook's stdout in $OUT
+    payload "$@" | bash "$HOOK" >"$OUT" 2>/dev/null
+}
+
+# git's commit summary line for HEAD of a repo, as git-commit.sh prints it. The
+# hook amends after a git-commit.sh call only when its output names HEAD so.
+summary() { # repodir
+    git -C "$1" log -1 --format="[$(git -C "$1" branch --show-current) %h] %s"
 }
 
 context_has() { # pattern  — stdout is exactly one PostToolUse additionalContext object containing it
@@ -133,7 +144,7 @@ stdout_empty "--no-edit"
 
 echo "== 7. wrapper-script form -> added =="
 R=$(newrepo r7); git -C "$R" commit -qm "feat: thing"
-fire "$R" "cd $R; ~/.claude/bin/git-commit.sh 'feat: thing'"
+fire "$R" "cd $R; ~/.claude/bin/git-commit.sh 'feat: thing'" "$(summary "$R")"
 check "trailer added" yes "$(has_trailer "$R")"
 
 echo "== 8. cwd fallback (no -C in command) -> added =="
@@ -159,7 +170,7 @@ echo "== 10. git-commit.sh --repo <other>, cwd elsewhere -> trailer in <other> =
 CWD=$(newrepo r10-cwd); git -C "$CWD" commit -qm "feat: other session"
 CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
 R=$(newrepo r10); git -C "$R" commit -qm "feat: thing"
-fire "$CWD" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing'"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing'" "$(summary "$R")"
 check "trailer added in target" yes "$(has_trailer "$R")"
 check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
 
@@ -167,7 +178,7 @@ echo "== 11. --repo=<other> -> trailer in <other> =="
 CWD=$(newrepo r11-cwd); git -C "$CWD" commit -qm "feat: other session"
 CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
 R=$(newrepo r11); git -C "$R" commit -qm "feat: thing"
-fire "$CWD" "~/.claude/bin/git-commit.sh --repo=$R 'feat: thing'"
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo=$R 'feat: thing'" "$(summary "$R")"
 check "trailer added in target" yes "$(has_trailer "$R")"
 check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
 
@@ -175,7 +186,7 @@ echo "== 12. --repo '<other>' (quoted) -> trailer in <other> =="
 CWD=$(newrepo r12-cwd); git -C "$CWD" commit -qm "feat: other session"
 CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
 R=$(newrepo r12); git -C "$R" commit -qm "feat: thing"
-fire "$CWD" "~/.claude/bin/git-commit.sh --repo '$R' \"feat: thing\""
+fire "$CWD" "~/.claude/bin/git-commit.sh --repo '$R' \"feat: thing\"" "$(summary "$R")"
 check "trailer added in target" yes "$(has_trailer "$R")"
 check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
 
@@ -184,7 +195,7 @@ CWD=$(newrepo r13-cwd); git -C "$CWD" commit -qm "feat: other session"
 CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
 R=$(newrepo r13); git -C "$R" commit -qm "feat: thing"
 FAKE_HOME="$T/home13"; mkdir -p "$FAKE_HOME"; ln -s "$R" "$FAKE_HOME/r13"
-HOME="$FAKE_HOME" fire "$CWD" "~/.claude/bin/git-commit.sh --repo ~/r13 'feat: thing'"
+HOME="$FAKE_HOME" fire "$CWD" "~/.claude/bin/git-commit.sh --repo ~/r13 'feat: thing'" "$(summary "$R")"
 check "trailer added in target" yes "$(has_trailer "$R")"
 check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
 
@@ -192,7 +203,7 @@ echo "== 14. git -C <A> add && git-commit.sh --repo <B> -> trailer in B, A untou
 A=$(newrepo r14-a); git -C "$A" commit -qm "feat: other session"
 A_BEFORE=$(git -C "$A" rev-parse HEAD)
 B=$(newrepo r14-b); git -C "$B" commit -qm "feat: thing"
-fire "$A" "git -C $A add f && ~/.claude/bin/git-commit.sh --repo $B 'feat: thing'"
+fire "$A" "git -C $A add f && ~/.claude/bin/git-commit.sh --repo $B 'feat: thing'" "$(summary "$B")"
 check "trailer added in B" yes "$(has_trailer "$B")"
 check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
 
@@ -254,7 +265,7 @@ BARE="$T/r21-remote.git"; git init -q --bare "$BARE"
 git -C "$R" remote add origin "$BARE"
 git -C "$R" push -q origin HEAD 2>/dev/null
 BEFORE=$(git -C "$R" rev-parse HEAD)
-fire_out "$R" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing' && git -C $R push"
+fire_out "$R" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing' && git -C $R push" "$(summary "$R")"
 check "pushed commit untouched" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
 check "context names the hash" yes "$(context_has "$(git -C "$R" rev-parse --short HEAD)")"
 check "context says pushed in the same call" yes "$(context_has "pushed in the same call")"
@@ -283,7 +294,7 @@ echo "== 24. cd <B> && git-commit.sh, cwd A -> trailer in B, A untouched =="
 A=$(newrepo r24-a); git -C "$A" commit -qm "feat: other session"
 A_BEFORE=$(git -C "$A" rev-parse HEAD)
 B=$(newrepo r24-b); git -C "$B" commit -qm "feat: thing"
-fire "$A" "cd $B && ~/.claude/bin/git-commit.sh 'feat: thing'"
+fire "$A" "cd $B && ~/.claude/bin/git-commit.sh 'feat: thing'" "$(summary "$B")"
 check "trailer added in B" yes "$(has_trailer "$B")"
 check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
 
@@ -320,9 +331,50 @@ echo "== 29. git-commit.sh --repo <B> -- '--repo <A>' -> trailer in B, A untouch
 A=$(newrepo r29-a); git -C "$A" commit -qm "feat: other session"
 A_BEFORE=$(git -C "$A" rev-parse HEAD)
 B=$(newrepo r29-b); git -C "$B" commit -qm "feat: thing"
-fire "$T" "~/.claude/bin/git-commit.sh --repo $B -- '--repo' '$A'"
+fire "$T" "~/.claude/bin/git-commit.sh --repo $B -- '--repo' '$A'" "$(summary "$B")"
 check "trailer added in B" yes "$(has_trailer "$B")"
 check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+# Cases 30-33: git-commit.sh can end without committing (an argument error,
+# --help, a failing hook). R's HEAD is then a fresh, trailer-less commit of
+# someone else; amending it relabels their work as agent-authored (#129).
+
+GIT_COMMIT_SH="$SCRIPT_DIR/../git-commit.sh"
+
+echo "== 30. git-commit.sh --repo R --ammend (refused) -> R untouched =="
+R=$(newrepo r30); git -C "$R" commit -qm "feat: someone else"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+echo y > "$R/g"; git -C "$R" add g
+# The real script's real output, so the test follows what it prints.
+REFUSAL=$(bash "$GIT_COMMIT_SH" --repo "$R" --ammend 'feat: x' 2>&1)
+fire_out "$T" "~/.claude/bin/git-commit.sh --repo $R --ammend 'feat: x'" "$REFUSAL"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+check "no trailer added" no "$(has_trailer "$R")"
+check "context says not added" yes "$(context_has "trailer not added")"
+
+echo "== 31. git-commit.sh --repo R --help -> R untouched =="
+R=$(newrepo r31); git -C "$R" commit -qm "feat: someone else"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+HELP=$(bash "$GIT_COMMIT_SH" --repo "$R" --help 2>&1)
+fire "$T" "~/.claude/bin/git-commit.sh --repo $R --help" "$HELP"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+check "no trailer added" no "$(has_trailer "$R")"
+
+echo "== 32. output names another commit than HEAD -> untouched =="
+R=$(newrepo r32); git -C "$R" commit -qm "feat: first"
+OLD_SUMMARY=$(summary "$R")
+echo y > "$R/g"; git -C "$R" add g; git -C "$R" commit -qm "feat: someone else"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire "$T" "~/.claude/bin/git-commit.sh --repo $R 'feat: x'" "$OLD_SUMMARY"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+
+echo "== 33. real git-commit.sh commit, its own output -> trailer added =="
+R=$(newrepo r33); git -C "$R" commit -qm "feat: base"
+echo y > "$R/g"; git -C "$R" add g
+COMMITTED=$(bash "$GIT_COMMIT_SH" --repo "$R" 'feat: thing' 2>&1)
+fire_out "$T" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing'" "$COMMITTED"
+check "trailer added" yes "$(has_trailer "$R")"
+check "context says trailer added" yes "$(context_has "added missing")"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
