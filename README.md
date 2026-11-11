@@ -345,7 +345,7 @@ not.
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
-| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare (`<wrapper> --help` alone runs nothing and is approved) |
+| `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads, `sed` HTML-tag stripping (hint: `markitdown`) and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`) whose inner command is not approvable, with a hint to run that command bare (`<wrapper> --help` alone runs nothing and is approved) |
 | `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-block-toolkit-live-checkout.sh` | PreToolUse hook in settings.json | Block `git checkout`/`git switch` that takes the live toolkit checkout (the one `~/.claude/bin` points into) off its base branch; the message names the worktree route ([why](CLAUDE.md)) |
@@ -515,12 +515,13 @@ The global settings include five `PreToolUse` hooks that run **in all permission
 
 1. **`hook-auto-approve-bash.sh`** (thin wrapper for `hook-auto-approve-bash.py`) — Auto-approves safe compound commands that permission matching would otherwise block. The `.py` implementation tokenizes the full command with `shlex` (not regex) and splits it into segments on `&&`, `||`, `;`, `|`. It strips a leading `cd <dir>` when `<dir>` resolves inside `~/Projects/`, leading `VAR=value` env prefixes (except variables that make a command load or run code, such as `PATH`, `PAGER`, `PYTHONPATH` and the `LD_*`/`GIT_*`/`npm_config_*` families: those are never stripped, so the command prompts), and a model-typed `rtk` or `rtk proxy` prefix (so `rtk grep ...` is judged as `grep ...`), then approves only if every segment's first token is on a conservative allowlist (the safe commands already allowed in settings.json, plus `echo`/`sleep`/`test`/`true`). Command substitution (`$(...)`, backticks) and heredocs/here-strings (`<<`, `<<<`) are never auto-approved, except `git commit` in any form. Unparseable input (unbalanced quotes, etc.) always falls through to the normal prompt — the hook fails open to the prompt, never to approval.
 
-   The same hook also **denies** five shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
+   The same hook also **denies** six shapes that already have a better tool, each with a hint naming it. A deny wins over the allow path, so it fires even when every segment is otherwise allowlisted:
 
    | Denied | Use instead |
    |---|---|
    | `sed -i ... <file>` (also `-i.bak`, `--in-place`, `-ni`) | Edit; for a multi-line rewrite, Read then Write |
    | `sed -n 'X,Yp' <file>` | the Read tool with offset/limit |
+   | `sed 's/<[^>]*>/.../g'` stripping HTML tags (pipe or file, with or without `-E`) | `markitdown <file> -o <scratch>/page.md`, then Read or Grep the Markdown; Read the HTML for a quick look |
    | inline Python (`-c` or a heredoc) that opens a file for reading | Read, Grep, or Edit |
    | `until <file-condition>; do sleep N; done` | `wait-for-pattern.sh [--newer-than <epoch>] <file> <extended-regex> [timeout] [poll]` |
    | `cd <dir> && <cmd>` | `git -C`, `npm --prefix`, or `env -C <dir> <cmd>` (approved when `<dir>` is inside `~/Projects` and `<cmd>` is approvable on its own) |
