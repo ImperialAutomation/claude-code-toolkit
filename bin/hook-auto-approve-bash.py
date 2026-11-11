@@ -544,6 +544,9 @@ def is_allowed_by_settings(tokens, rules):
 # fullmatch, not match with ^...$: Python's $ also matches before a trailing
 # newline, which the wrapper's bash =~ does not.
 REPEAT_COUNT_RE = re.compile(r"[1-9][0-9]*")
+REPEAT_WARMUP_RE = re.compile(r"0|[1-9][0-9]*")
+REPEAT_PERCENTILES_FLAG = "--percentiles"
+REPEAT_WARMUP_FLAG = "--warmup"
 
 
 def _runnable(inner):
@@ -557,10 +560,24 @@ def _runnable(inner):
 
 
 def _repeat_cmd_inner(args):
-    """`repeat-cmd.sh <positive-integer> <cmd> [args...]`."""
-    if not args or not REPEAT_COUNT_RE.fullmatch(args[0]):
+    """`repeat-cmd.sh [--percentiles] [--warmup <n>] <positive-integer> <cmd>
+    [args...]`, the options in any order, parsed like the script's own loop:
+    any other leading dash argument is an unknown option the script rejects."""
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        if args[index] == REPEAT_PERCENTILES_FLAG:
+            index += 1
+        elif (
+            args[index] == REPEAT_WARMUP_FLAG
+            and index + 1 < len(args)
+            and REPEAT_WARMUP_RE.fullmatch(args[index + 1])
+        ):
+            index += 2
+        else:
+            return None
+    if index >= len(args) or not REPEAT_COUNT_RE.fullmatch(args[index]):
         return None
-    return _runnable(args[1:])
+    return _runnable(args[index + 1:])
 
 
 CMD_SAVE_STDERR_MODES = frozenset({"separate", "merge"})
@@ -632,7 +649,8 @@ WrapperSpec = namedtuple("WrapperSpec", ("parse", "usage", "diagnose"), defaults
 
 COMMAND_RUNNING_WRAPPERS = {
     "repeat-cmd.sh": WrapperSpec(
-        _repeat_cmd_inner, "repeat-cmd.sh <count> <cmd> [args...]"
+        _repeat_cmd_inner,
+        "repeat-cmd.sh [--percentiles] [--warmup <n>] <count> <cmd> [args...]",
     ),
     "cmd-save.sh": WrapperSpec(
         _cmd_save_inner,
