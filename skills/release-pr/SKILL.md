@@ -1,31 +1,45 @@
 ---
 name: release-pr
-description: Create the develop → master release PR — inspect what changed since the last tag, decide the semver bump, apply the release:major/minor/patch label so the tag is generated correctly, and write the release body. Use for "release to master", "promote develop", "make a release PR", "cut a release", "new version tag".
+description: Create the release PR from develop to the release branch (master, main, or whatever the repo uses): inspect what changed since the last tag, decide the semver bump, apply the release:major/minor/patch label when the repo's tag workflow reads one, and write the release body. Use for "release to master", "release to main", "promote develop", "make a release PR", "cut a release", "new version tag".
 argument-hint: [major|minor|patch]
 user-invocable: true
 ---
 
-# Release PR — develop → master
+# Release PR: develop → the release branch
 
-Promotes the accumulated `develop` batch to `master`. Merging the PR is what
-creates the version tag and triggers the staging deploy, so the **label is
-load-bearing**: `semver-tag.yml` reads the merged PR's `release:*` label and
-computes the new tag from it. A wrong label ships a wrong version number; a
-missing label fails the merge.
+Promotes the accumulated `develop` batch to the release branch (`master` in the
+examples below; `main` or another name in many repos). In a repo with the semver
+machinery, merging the PR is what creates the version tag and triggers the
+staging deploy, so the **label is load-bearing**: `semver-tag.yml` reads the
+merged PR's `release:*` label and computes the new tag from it. A wrong label
+ships a wrong version number; a missing label fails the merge.
 
-**You do not create the tag.** Do not run `git tag`. The workflow does it.
+**You do not create the tag.** Do not run `git tag`. The workflow does it, or,
+in a repo without one, nobody does as part of this skill.
 
 ## Step 1 — Collect the facts
 
 ```bash
-bash ~/.claude/skills/release-pr/collect.sh --repo OWNER/NAME
+bash ~/.claude/skills/release-pr/collect.sh --repo OWNER/NAME [--base <release-branch>] [--head develop]
 ```
 
-Omit `--repo` to let it resolve via `gh repo view`. Read-only: it fetches and
-inspects, never writes a ref. Output sections:
+Omit `--repo` to let it resolve via `gh repo view`. Omit `--base` to let it pick
+the release branch: the repo's GitHub default branch, or, when that is `develop`
+itself, the first existing `origin/master`, `origin/main`. Pass `--base` when the
+release branch has another name. Read-only: it fetches and inspects, never writes
+a ref.
+
+**A non-zero exit stops the release.** It means a branch is missing, base and
+head are the same, or a comparison failed; the message names the missing ref and
+lists the remote branches. Fix the arguments and rerun; never write a body from a
+partial report.
+
+The `=== REPO ===` line, `OWNER/NAME  (develop -> <release-branch>)`, names the
+release branch every later step uses. Output sections:
 
 | Section | What it decides |
 |---|---|
+| RELEASE MACHINERY | whether the label, tag and AGENT-REVIEW steps apply (Step 1b) |
 | CURRENT VERSION | the three candidate tags — you pick one |
 | SIZE | the "N merged PRs, N commits, N files, +N/−N" opening line |
 | BEHIND CHECK | **stop condition** — see below |
@@ -33,11 +47,27 @@ inspects, never writes a ref. Output sections:
 | SEMVER SIGNALS | migrations, lockfiles, env vars, API surface |
 
 **BEHIND CHECK is a gate.** Merge commits from past releases are expected.
-A *non-merge* commit on master only means a hotfix landed directly on master
-and is not in develop — back-merge it into develop before releasing, or the
+A *non-merge* commit on the release branch only means a hotfix landed directly
+there and is not in develop. Back-merge it into develop before releasing, or the
 release silently ships around it.
 
+## Step 1b: Check the release machinery
+
+Read the RELEASE MACHINERY section:
+
+| Line | Present | Absent (`none`) |
+|---|---|---|
+| `semver:` | `present`: follow every step as written | `absent`: no `--label`, no version in the title, and say in the body that the repo has no semver workflow, so this merge creates no tag. Skip the label gotchas. `unknown`: `gh` could not list labels; run `gh label list --search release:` yourself before deciding |
+| `AGENT-REVIEW template:` | include the AGENT-REVIEW section | leave it out |
+| `workflows on <branch>:` | name the deploy workflow the merge triggers in the Deploy note | say the merge triggers no deploy |
+
+Never apply a `release:*` label nothing reads, and never create the labels or
+workflows from this skill: that is a separate decision for the repo owner.
+
 ## Step 2 — Decide the bump
+
+Skip this step when Step 1b found `semver: absent`: no workflow turns a bump
+into a tag, so there is nothing to decide.
 
 Answer one question: **could a user do something after this release they could
 not do before?**
@@ -62,10 +92,10 @@ Write to `/tmp/<project>-pr-body-release-<version>.md` with the Write tool
 Structure, consistent across every release since v1.5.0:
 
 ```markdown
-## Release develop → master (vOLD → vNEW)
+## Release develop → <release-branch> (vOLD → vNEW)
 
 Promotes the current `develop` batch (N merged PRs, N commits, N files,
-+N/−N) to `master`, tagging a semver release and deploying to **staging**.
++N/−N) to `<release-branch>`, tagging a semver release and deploying to **staging**.
 
 `release:<bump>` — <one paragraph justifying the bump, naming what is new or
 what class of thing is fixed, and explicitly noting what is NOT affected:
@@ -91,6 +121,11 @@ a changelog. Group related PRs under one heading.>
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
+Without semver machinery (Step 1b): the heading drops `(vOLD → vNEW)`, the
+opening line drops the tagging and deploy claims it cannot back, and the
+`release:<bump>` paragraph becomes one line: "No `release:*` label: this repo has
+no semver tag workflow, so merging creates no tag."
+
 Headings describe **the problem solved**, not the PR. Past releases use
 "The empty string was a config hole", "The restore path did not work",
 "Production health check pointed at a path that never existed".
@@ -107,13 +142,14 @@ Headings describe **the problem solved**, not the PR. Past releases use
   additive or destructive, whether it is idempotent. Call out any drop
   explicitly and say why it is safe (e.g. expand/contract split across two
   revisions so no intermediate commit is inconsistent).
-- **Deploy note** — always. State the tag and that merging triggers
-  `deploy-staging`. If a lockfile changed, say **"this is a rebuild, not a
+- **Deploy note**: always. State the tag (when there is one) and which deploy
+  workflow the merge triggers, e.g. `deploy-staging`, or that it triggers none. If a lockfile changed, say **"this is a rebuild, not a
   plain restart."**
 
 ### AGENT-REVIEW section
 
-Mandatory when the PR carries `agent-authored` (auto-applied). The
+Only when RELEASE MACHINERY lists an AGENT-REVIEW template. Then it is mandatory
+when the PR carries `agent-authored` (auto-applied). The
 `agent-pr-checklist` gate fails if the section is missing or any box is
 unticked. Copy the six items from `.github/PULL_REQUEST_TEMPLATE.md` and tick
 each with a **specific justification for this batch** — not a bare `[x]`:
@@ -129,7 +165,9 @@ box you have not checked.
 
 ## Step 4 — Create the PR
 
-Apply the label **at creation**, so `semver-check` sees exactly one:
+`--base` is the release branch from the `=== REPO ===` line (`master` in the
+example). With semver machinery, apply the label **at creation**, so
+`semver-check` sees exactly one:
 
 ```bash
 gh pr create --repo OWNER/NAME --base master --head develop \
@@ -140,6 +178,14 @@ gh pr create --repo OWNER/NAME --base master --head develop \
 
 Title format: `release: vX.Y.Z — <2-3 headline items with issue numbers>`.
 
+Without semver machinery, drop `--label` and the version:
+
+```bash
+gh pr create --repo OWNER/NAME --base main --head develop \
+  --title "release: <headline item> (#123), <second item> (#124)" \
+  --body-file /tmp/<project>-pr-body-release-<date>.md
+```
+
 ## Step 5 — Verify the gates
 
 ```bash
@@ -147,9 +193,11 @@ gh pr view <PR> --repo OWNER/NAME --json labels,statusCheckRollup \
   -q '{labels: [.labels[].name], checks: [.statusCheckRollup[] | {name, status, conclusion}]}'
 ```
 
-Expect `Validate release label`, `agent-pr-checklist`, `agent-pr-label`,
-`vitest`, `tsc --noEmit`, `dependency-audit` to pass. `Auto-merge minor/patch`
-and `Playwright E2E` skip on release PRs — that is normal, not a failure.
+Expect the repo's own checks to pass. In a repo with the full machinery these
+are `Validate release label`, `agent-pr-checklist`, `agent-pr-label`, `vitest`,
+`tsc --noEmit`, `dependency-audit`; `Auto-merge minor/patch` and
+`Playwright E2E` skip on release PRs; that is normal, not a failure. A repo
+without the machinery has none of the label or checklist checks.
 
 To wait for them without polling by hand:
 
@@ -169,10 +217,11 @@ done
 ## Step 6 — Stop
 
 **Do not merge.** No server-side protection on the free tier makes merging to
-`master` the user's call. Report the PR URL, the bump and its reasoning, the
-green checks, and any operator action needed before the deploy.
+the release branch the user's call. Report the PR URL, the bump and its
+reasoning (or that the repo has no semver machinery), the green checks, and any
+operator action needed before the deploy.
 
-After the user merges, the tag appears automatically:
+With semver machinery, the tag appears automatically after the user merges:
 
 ```bash
 git fetch origin --tags --quiet && git tag --sort=-v:refname | head -3
@@ -191,14 +240,17 @@ The tag is annotated, tagged by `github-actions[bot]`, with message
   fails the same way as a defence in depth.
 - **`--label` at creation beats `gh pr edit` after.** `semver-check` runs on
   `opened`, so creating unlabelled fires one red check before the label lands.
-- **An unlabelled PR to master fails the tag job after the merge has landed.**
+- **An unlabelled PR to the release branch fails the tag job after the merge has landed.**
   PR #2205 (ad-hoc hotfix, pre-convention) merged fine, then `Semver Tag` ran
   and **failed** — `Expected exactly one release:* label, found 0`. The commit
   is on master, untagged, and the failure is only visible in the Actions tab.
   The `skip` branch covers only a *direct push* with no PR behind it, never an
   unlabelled PR. Label before merging, always.
-- **Merge commits on master are not "master is ahead".** Every past release
-  leaves one. Only non-merge commits there are a problem.
+- **Merge commits on the release branch are not "the release branch is ahead".**
+  Every past release leaves one. Only non-merge commits there are a problem.
+- **`latest tag: none (v0.0.0 assumed)`** means the repo has no version tags yet.
+  With semver machinery the first release tags from v0.0.0; without it, ignore
+  the version lines.
 - **The tag is computed from the latest existing tag**, not from the PR title.
   A title saying v1.9.0 while the label says `patch` produces v1.8.1 and a
   title that lies. Recompute the title from the label.
@@ -213,4 +265,6 @@ The tag is annotated, tagged by `github-actions[bot]`, with message
 | `agent-pr-checklist` fails | AGENT-REVIEW section missing, or a box left `[ ]` | restore from `.github/PULL_REQUEST_TEMPLATE.md`, tick every box with a justification |
 | `dependency-audit` fails | a time-boxed exception expired | check `docs/governance/audit-exceptions.yml`; take the fix if past cooldown, otherwise re-date to the cooldown end — never override the cooldown for a security label |
 | No tag after merge | label removed before merge, or direct push | check the `Semver Tag` run; re-tagging by hand needs care since it becomes the base for the next release |
-| `collect.sh` shows a non-merge commit on master | hotfix landed directly on master | back-merge master into develop before releasing |
+| `collect.sh` shows a non-merge commit on the release branch | hotfix landed directly on it | back-merge the release branch into develop before releasing |
+| `collect.sh` exits 1: `origin/<x> does not exist` | wrong `--base`/`--head`, or the default branch is not the release branch | pick the right name from the listed remote branches and pass `--base` |
+| `collect.sh` exits 1: `cannot pick a release branch` | default branch is develop and there is no master/main | pass `--base <release-branch>` |
