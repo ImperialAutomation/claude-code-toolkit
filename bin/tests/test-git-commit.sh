@@ -367,7 +367,7 @@ for flag in --help -h; do
     check "exit zero outside a repo" 0 "$?"
 done
 
-for bad in --ammend --add -m --repo-dir=x; do
+for bad in --ammend --add -m -am --foo=bar --repo-dir=x; do
     echo "== 26. unknown option $bad -> exit 2, no commit =="
     R=$(newrepo "r26$bad" feature)
     OUT=$(bash "$SCRIPT" --repo "$R" "$bad" "feat: msg" 2>&1)
@@ -375,7 +375,20 @@ for bad in --ammend --add -m --repo-dir=x; do
     check "exit 2" 2 "$RC"
     check "no commit created" 1 "$(count_commits "$R")"
     contains "names the option" "unknown option '$bad'" "$OUT"
+    contains "names -- as the way out" "goes after '--'" "$OUT"
     contains "points at --help" "--help" "$OUT"
+done
+
+# Only option-shaped tokens are refused (D5): these lines committed before #129
+# and must keep doing so.
+for line in "---" "->" "-1" "-->" "-Wall removed" "--no-ff note"; do
+    echo "== 26b. dash-led message line '$line' -> commits =="
+    R=$(newrepo "r26b$line" feature)
+    OUT=$(bash "$SCRIPT" --repo "$R" "feat: msg" "$line" 2>&1)
+    RC=$?
+    check "exit zero" 0 "$RC"
+    check "commit created" 2 "$(count_commits "$R")"
+    check "line kept" "feat: msg"$'\n'"$line" "$(git -C "$R" log -1 --format='%B')"
 done
 
 echo "== 27. -- ends options: a message line may start with - =="
@@ -436,6 +449,54 @@ RC=$?
 check "exit zero" 0 "$RC"
 check "amended, no new commit" 1 "$(count_commits "$R")"
 check "message from file" "feat: amended via --file" "$(git -C "$R" log -1 --format='%B')"
+
+# An empty value is what an unset variable gives (`--repo "$WT"`): it must not
+# fall back to the cwd or switch the one-source check off. The cwd holds a
+# staged change, so a fallback would show as a commit there.
+for args in '--repo|' '--repo=' '--file|'; do
+    IFS='|' read -r -a ARGV <<< "$args"
+    [[ $args == *'|' ]] && ARGV+=("")
+    echo "== 34. ${ARGV[0]} with an empty value -> exit 2, nothing committed =="
+    R=$(newrepo "r34${ARGV[0]}" feature)
+    OUT=$(env -C "$R" bash "$SCRIPT" "${ARGV[@]}" "Co-Authored-By: X <x@x>" 2>&1)
+    RC=$?
+    check "exit 2" 2 "$RC"
+    check "no commit in cwd" 1 "$(count_commits "$R")"
+    contains "says the value is empty" "requires a value, got an empty one" "$OUT"
+done
+
+echo "== 35. --file --amend -> exit 2, the option is not taken as the file =="
+R=$(newrepo r35 feature)
+OUT=$(bash "$SCRIPT" --repo "$R" --file --amend 2>&1)
+RC=$?
+check "exit 2" 2 "$RC"
+check "no commit created" 1 "$(count_commits "$R")"
+contains "names the swallowed option" "--file requires a value, got the option '--amend'" "$OUT"
+
+echo "== 36. --repo --allow-protected 'msg' -> exit 2, flag not lost =="
+R=$(newrepo r36 feature)
+OUT=$(env -C "$R" bash "$SCRIPT" --repo --allow-protected "feat: msg" 2>&1)
+RC=$?
+check "exit 2" 2 "$RC"
+check "no commit created" 1 "$(count_commits "$R")"
+contains "names the swallowed option" "--repo requires a value, got the option '--allow-protected'" "$OUT"
+
+echo "== 37. no message at all -> exit 2 through the usage-error path =="
+R=$(newrepo r37 feature)
+OUT=$(bash "$SCRIPT" --repo "$R" 2>&1)
+RC=$?
+check "exit 2" 2 "$RC"
+check "no commit created" 1 "$(count_commits "$R")"
+contains "says no message" "no commit message provided" "$OUT"
+contains "points at --help" "Run 'git-commit.sh --help'" "$OUT"
+check "stale one-line usage gone" no "$([[ $OUT == *'Usage: git-commit.sh'* ]] && echo yes || echo no)"
+
+echo "== 38. --help shows usage only: exit codes, no internals, no em-dash =="
+OUT=$(bash "$SCRIPT" --help)
+contains "lists exit codes" "Exit codes:" "$OUT"
+contains "has examples" 'git-commit.sh [options] --file /tmp/msg.txt' "$OUT"
+check "no internal notes" no "$([[ $OUT == *"Internal notes"* || $OUT == *"Read-only pre-commit cache"* ]] && echo yes || echo no)"
+check "no em-dash" no "$([[ $OUT == *—* ]] && echo yes || echo no)"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
