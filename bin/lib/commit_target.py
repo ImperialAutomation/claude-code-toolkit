@@ -12,9 +12,11 @@ Usage:
 
 Output and exit status:
     0  line 1: the target directory (absolute)
-       line 2: "push" if a `git push` segment follows the commit, else empty
-       line 3: "merge" if the last commit segment is a `git merge`, else
-               "commit"
+       line 2: "push" if a `git push` segment follows the last commit
+               segment, else empty
+       line 3: the subcommands of the commit segments, space-separated and
+               without repeats: commit, revert, cherry-pick, merge
+               (git-commit.sh counts as commit)
     1  the command contains no commit segment; nothing printed
     2  a commit segment exists but its target cannot be resolved; the reason
        is printed on stderr
@@ -26,14 +28,16 @@ revert, cherry-pick or merge, minus the forms that leave no new commit:
     cherry-pick  -xn), --abort, --quit
     merge        --no-commit, --squash, --abort, --quit (-n on merge is
                  --no-stat, not --no-commit)
-A `git merge` that fast-forwards creates no commit either; that cannot be read
-from the text, so the caller checks HEAD is a merge commit for kind "merge".
+Long options are also recognised in an abbreviated form (`--no-comm`,
+`--abo`), as git accepts them. Whether a segment really created a commit (a
+merge or cherry-pick can fast-forward, a commit can fail) cannot be read from
+the text; the caller checks HEAD's reflog against the subcommands on line 3.
 
 Resolution, per commit segment, first match wins:
     1. git-commit.sh --repo <dir> / --repo=<dir> (the last one, as the script
        itself applies them)
-    2. the -C options of the `git ... commit` segment itself (cumulative, as
-       git applies them)
+    2. the -C options of the `git ... <sub>` segment itself (cumulative, as
+       git applies them), for every <sub> above
     3. the segment's working directory
 The working directory is the cwd, moved by any `cd <dir>` segment before the
 commit and by an `env -C <dir>` prefix on the commit segment itself. Relative
@@ -72,10 +76,10 @@ PUSH_SUBCOMMAND = "push"
 # Second output line when a push follows the commit; the hook compares against it.
 PUSH_MARKER = "push"
 
-# Third output line: what kind of command made the last commit. The hook
-# compares against these.
-KIND_COMMIT = "commit"
-KIND_MERGE = "merge"
+# Separator of the subcommands on the third output line.
+KIND_SEPARATOR = " "
+# Long-option prefix; an argument starting with it may be an abbreviation.
+LONG_PREFIX = "--"
 
 # `git commit --amend --no-edit` reuses a message as is; it does not count as
 # committing, so the hook leaves the amended commit alone.
@@ -152,22 +156,34 @@ def _short_cluster_has_no_commit(token, subcommand):
     return False
 
 
+def _is_long_option(arg, option):
+    """True if arg is `option` or an abbreviation of it, as git reads long
+    options (`--abo` for `--abort`). An ambiguous abbreviation makes git fail
+    without committing, so reading it as the option errs to the safe side."""
+    name = arg.split("=", 1)[0]
+    return len(name) > len(LONG_PREFIX) and name.startswith(LONG_PREFIX) and option.startswith(name)
+
+
+def _has_long_option(args, option):
+    return any(_is_long_option(arg, option) for arg in args)
+
+
 def _commit_kind(subcommand, args):
-    """Kind of commit a `git <subcommand> <args>` segment creates, or None."""
+    """The subcommand if a `git <subcommand> <args>` segment commits, or None."""
     if subcommand == COMMIT_SUBCOMMAND:
-        if AMEND_OPTION in args and NO_EDIT_OPTION in args:
+        if _has_long_option(args, AMEND_OPTION) and _has_long_option(args, NO_EDIT_OPTION):
             return None
-        return KIND_COMMIT
+        return subcommand
     if subcommand not in NO_COMMIT_OPTIONS:
         return None
     for arg in args:
-        if arg in NO_COMMIT_OPTIONS[subcommand]:
+        if any(_is_long_option(arg, option) for option in NO_COMMIT_OPTIONS[subcommand]):
             return None
         if (subcommand in SHORT_VALUE_OPTIONS and arg.startswith("-")
-                and not arg.startswith("--")
+                and not arg.startswith(LONG_PREFIX)
                 and _short_cluster_has_no_commit(arg, subcommand)):
             return None
-    return KIND_MERGE if subcommand == MERGE_SUBCOMMAND else KIND_COMMIT
+    return subcommand
 
 
 def _strip_env_chdir(tokens):
@@ -235,14 +251,15 @@ def _resolve_dir(parts, cwd):
 
 
 def _commit_target(segment, cwd):
-    """(target dir, kind) of a commit segment, or None if it does not commit."""
+    """(target dir, subcommand) of a commit segment, or None if it does not
+    commit. git-commit.sh counts as `commit`."""
     chdirs, tokens = _strip_env_chdir(segment)
     _, tokens = _hook.strip_command_prefixes(tokens)
     if not tokens:
         return None
     if os.path.basename(tokens[0]) == COMMIT_WRAPPER:
         repo = _wrapper_repo(tokens)
-        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd), KIND_COMMIT
+        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd), COMMIT_SUBCOMMAND
     git = _git_invocation(tokens)
     if not git:
         return None
@@ -271,10 +288,10 @@ def _is_push(segment):
 
 
 def resolve(command, cwd):
-    """Return (target, pushed_after, kind) or None without a commit segment.
+    """Return (target, pushed_after, kinds) or None without a commit segment.
 
-    kind is that of the last commit segment, the one HEAD reflects. Raises
-    Unresolvable with the reason.
+    kinds lists the subcommands of all commit segments, in order and without
+    repeats. Raises Unresolvable with the reason.
     """
     try:
         segments = _hook.split_segments(command)
@@ -282,7 +299,7 @@ def resolve(command, cwd):
         raise Unresolvable(f"command does not tokenize ({exc})")
 
     targets = []
-    kind = None
+    kinds = []
     last_commit = -1
     # A `cd` that cannot be followed only matters if a commit comes after it.
     cd_error = None
@@ -301,6 +318,8 @@ def resolve(command, cwd):
                 raise cd_error
             target, kind = commit
             targets.append(target)
+            if kind not in kinds:
+                kinds.append(kind)
             last_commit = index
 
     if not targets:
@@ -309,7 +328,7 @@ def resolve(command, cwd):
         raise Unresolvable("several commit segments with different targets: " + ", ".join(sorted(set(targets))))
 
     pushed_after = any(_is_push(segment) for segment in segments[last_commit + 1:])
-    return targets[0], pushed_after, kind
+    return targets[0], pushed_after, kinds
 
 
 def main():
@@ -321,10 +340,10 @@ def main():
         return EXIT_UNRESOLVABLE
     if result is None:
         return EXIT_NO_COMMIT
-    target, pushed_after, kind = result
+    target, pushed_after, kinds = result
     print(target)
     print(PUSH_MARKER if pushed_after else "")
-    print(kind)
+    print(KIND_SEPARATOR.join(kinds))
     return EXIT_RESOLVED
 
 
