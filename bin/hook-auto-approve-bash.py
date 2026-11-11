@@ -1001,6 +1001,77 @@ def is_sed_in_place_edit(tokens):
     return in_place and bool(files)
 
 
+# The one sed script that strips HTML tags: `s/<[^>]*>/<replacement>/<flags>`,
+# `/` as delimiter, a replacement without `/`, and flags drawn from g (required),
+# I/i (case) and p (print), so `w`, `e` and `m` never match.
+SED_HTML_TAG_STRIP_SCRIPT = re.compile(r"s/<\[\^>\]\*>/[^/]*/(?=[gIip]*g)[gIip]+")
+# Short options that change nothing but the regex dialect or auto-print.
+SED_HTML_HARMLESS_SHORT = "Ern"
+SED_HTML_HARMLESS_LONG = frozenset({"--regexp-extended", "--quiet", "--silent"})
+SED_EXPRESSION_SHORT = "e"
+SED_EXPRESSION_LONG = "--expression"
+
+
+def is_sed_html_tag_strip(tokens):
+    """True for `sed [-E|-r|-n] 's/<[^>]*>/<repl>/g' [file...]`: sed used to
+    read an HTML page by stripping its tags, which markitdown does losslessly.
+
+    Deliberately narrow, like the other sed rules: exactly one script, that
+    script the tag substitution and nothing more, and no option outside the
+    dialect and print flags. A second expression, a `w` command, `-f`, `-i`
+    or any other substitution is a real stream edit and is left alone. Files
+    are optional; without one sed reads a pipe, the shape seen in practice."""
+    if not tokens or tokens[0] != "sed":
+        return False
+
+    scripts = []
+    operands = []
+    args = tokens[1:]
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--":
+            operands.extend(args[index:])
+            break
+        if arg.startswith("--"):
+            name, has_value, value = arg.partition("=")
+            if name in SED_HTML_HARMLESS_LONG and not has_value:
+                continue
+            if name != SED_EXPRESSION_LONG:
+                return False
+            if not has_value:
+                if index >= len(args):
+                    return False
+                value = args[index]
+                index += 1
+            scripts.append(value)
+            continue
+        if arg.startswith("-") and len(arg) > 1:
+            for position, letter in enumerate(arg[1:], start=1):
+                if letter in SED_HTML_HARMLESS_SHORT:
+                    continue
+                if letter != SED_EXPRESSION_SHORT:
+                    return False
+                value = arg[position + 1:]
+                if not value:
+                    if index >= len(args):
+                        return False
+                    value = args[index]
+                    index += 1
+                scripts.append(value)
+                break
+            continue
+        operands.append(arg)
+
+    if not scripts:
+        if not operands:
+            return False
+        scripts.append(operands.pop(0))
+
+    return len(scripts) == 1 and bool(SED_HTML_TAG_STRIP_SCRIPT.fullmatch(scripts[0]))
+
+
 # --- Python used as a file reader -------------------------------------------
 # CLAUDE.md forbids python3 -c for file reading/writing/searching: Read, Grep
 # and Edit do it natively, with line numbers and no permission prompt. Python
@@ -1290,6 +1361,20 @@ def command_has_sed_in_place_edit(command):
     )
 
 
+def command_has_sed_html_tag_strip(command):
+    """True if any segment of `command` strips HTML tags through sed. False
+    (never raises) on unparseable input — the caller falls through."""
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    return any(
+        is_sed_html_tag_strip(strip_command_prefixes(segment)[1])
+        for segment in segments
+    )
+
+
 def is_command_safe(command, rules=NO_BASH_RULES):
     """True if every segment of `command` is safe under the settings `rules`.
     False (never raises) on unparseable input — the caller falls through to
@@ -1341,6 +1426,26 @@ def main():
                     "Hook: `sed -n 'X,Yp' <file>` is a file read. Use the Read "
                     "tool with offset/limit instead — it is allowlisted, shows "
                     "line numbers, and needs no permission prompt."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
+    if command_has_sed_html_tag_strip(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: `sed 's/<[^>]*>//g'` reads HTML by stripping tags, "
+                    "which leaves entities, script and style bodies and split "
+                    "words, and prompts every time. Convert the page once with "
+                    "`markitdown <file> -o <scratch>/page.md`, then use Read or "
+                    "Grep on the Markdown (no prompt, and it can be searched "
+                    "again without refetching). Piped output (`curl ... | sed`) "
+                    "goes to a file first. For a quick look, Read the HTML "
+                    "file directly."
                 ),
             }
         }

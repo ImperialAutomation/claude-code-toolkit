@@ -769,6 +769,85 @@ for command in ("printf x | sed 's/a/b/'", "git log | sed -n '1,5p'", "sed -i 's
         reason is None or "sed -i" not in reason,
     )
 
+# --- sed stripping HTML tags: deny with a hint pointing at markitdown (#246) ---
+# `sed 's/<[^>]*>//g'` is a lossy way to read a fetched page (entities, script
+# bodies and split words survive) and prompts on every run. markitdown converts
+# the page once into Markdown that Read and Grep handle without a prompt.
+
+for tokens in (
+    ["sed", "s/<[^>]*>/ /g"],
+    ["sed", "s/<[^>]*>//g"],
+    ["sed", "s/<[^>]*>//g", "page.html"],
+    ["sed", "s/<[^>]*>//gI", "page.html"],
+    ["sed", "-E", "s/<[^>]*>//g", "page.html"],
+    ["sed", "-r", "s/<[^>]*>//g"],
+    ["sed", "--regexp-extended", "s/<[^>]*>//g"],
+    ["sed", "-n", "s/<[^>]*>//gp"],
+    ["sed", "-e", "s/<[^>]*>//g"],
+    ["sed", "-es/<[^>]*>//g"],
+    ["sed", "--expression=s/<[^>]*>//g", "a.html", "b.html"],
+    ["sed", "-E", "-e", "s/<[^>]*>/\\n/g"],
+):
+    check(
+        f"sed-html: {shlex.join(tokens)} strips HTML tags",
+        hook.is_sed_html_tag_strip(tokens),
+    )
+
+for tokens in (
+    ["sed", "-i", "s/<[^>]*>//g", "page.html"],
+    ["sed", "s/<[^>]*>//g;w out.txt"],
+    ["sed", "s/<[^>]*>//gw out.txt"],
+    ["sed", "-e", "s/<[^>]*>//g", "-e", "s/a/b/"],
+    ["sed", "s/foo/bar/g"],
+    ["sed", "s/<[^>]*>//"],
+    ["sed", "s/<[^>]*>/a/b/g"],
+    ["sed", "s|<[^>]*>||g"],
+    ["sed", "-f", "strip.sed", "page.html"],
+    ["sed", "-n", "1,5p", "page.html"],
+    ["sed"],
+    ["grep", "s/<[^>]*>//g"],
+    [],
+):
+    check(
+        f"sed-html: {shlex.join(tokens) or '<empty>'} is NOT a tag strip",
+        not hook.is_sed_html_tag_strip(tokens),
+    )
+
+for command in (
+    "grep -oiE \"<pattern>\" page.html | sed 's/<[^>]*>/ /g' | sort -u | head -60",
+    "sed -E 's/<[^>]*>//g' page.html",
+    "sed -e 's/<[^>]*>//g' page.html",
+    "curl -s https://example.com | sed 's/<[^>]*>//g'",
+    "env -C ~/Projects/x sed 's/<[^>]*>//g' page.html",
+):
+    approved, reason, rc = run_hook(command)
+    check(
+        f"sed-html: hook denies {command!r} with a markitdown hint",
+        not approved and reason is not None and "markitdown" in reason and rc == 0,
+    )
+
+# D2: in-place editing keeps the Edit hint.
+_, reason, _ = run_hook("sed -i 's/<[^>]*>//g' page.html")
+check(
+    "sed-html: sed -i with the tag-strip script gets the Edit hint",
+    reason is not None and "sed -i" in reason and "markitdown" not in reason,
+)
+
+for command in (
+    "sed 's/<[^>]*>//g;w out.txt'",
+    "sed -e 's/<[^>]*>//g' -e 's/a/b/'",
+    "printf x | sed 's/foo/bar/g'",
+    "sed 's/<[^>]*>//'",
+):
+    _, reason, _ = run_hook(command)
+    check(
+        f"sed-html: {command!r} is not denied by the tag-strip rule",
+        reason is None or "markitdown" not in reason,
+    )
+
+approved, _, _ = run_hook("grep -oiE \"<pattern>\" page.html | sort -u | head -60")
+check("sed-html: the pipeline without sed is still approved", approved)
+
 # --- inline Python as a file reader: deny with a hint pointing at Read ---
 # Same reasoning as the sed guard above. CLAUDE.md forbids `python3 -c` for file
 # operations, yet a permission-friction scan still found 35 such calls across 14
