@@ -13,6 +13,7 @@
 # hook from rewriting published history, and it was added after a mutation run
 # showed the suite stayed green with that guard deleted. Cases 10-26 guard the
 # target resolution: the cwd repo there holds another session's fresh commit.
+# Cases 29-37 cover revert, cherry-pick and merge (#209).
 #
 # Every message to the model must arrive as PostToolUse additionalContext JSON
 # on stdout; every silent skip must leave stdout empty.
@@ -313,6 +314,107 @@ echo "== 28. unborn HEAD -> no warning =="
 R=$(newrepo r28)
 fire_out "$R" "git -C $R commit -m 'feat: thing'"
 stdout_empty "unborn HEAD"
+
+# Cases 29+: revert, cherry-pick and merge create commits without the word
+# `commit` in the command (#209). Each committing form gets the trailer; each
+# form that leaves no new commit must not touch the fresh, trailer-less HEAD it
+# finds, which is a commit this call did not make.
+
+# Two branches that diverged from a base: `side` has one commit (file g) that
+# mainline lacks. Leaves the repo on the default branch; prints the repo path.
+diverged() { # name
+    local d; d=$(newrepo "$1"); git -C "$d" commit -qm base
+    git -C "$d" checkout -qb side; echo y > "$d/g"; git -C "$d" add g; git -C "$d" commit -qm side
+    git -C "$d" checkout -q -
+    echo z > "$d/h"; git -C "$d" add h; git -C "$d" commit -qm mainline
+    echo "$d"
+}
+
+echo "== 29. git revert --no-edit HEAD -> added =="
+R=$(newrepo r29); git -C "$R" commit -qm base
+echo w > "$R/w"; git -C "$R" add w; git -C "$R" commit -qm "feat: probe"
+git -C "$R" revert --no-edit HEAD -q
+fire_out "$R" "git -C $R revert --no-edit HEAD"
+check "trailer added" yes "$(has_trailer "$R")"
+check "context says trailer added" yes "$(context_has "added missing")"
+
+echo "== 30. git cherry-pick <sha> -> added =="
+R=$(diverged r30)
+SIDE=$(git -C "$R" rev-parse side)
+git -C "$R" cherry-pick "$SIDE" >/dev/null
+fire "$R" "git cherry-pick $SIDE"
+check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 31. git merge --no-ff <branch> -> added on the merge commit =="
+R=$(diverged r31)
+git -C "$R" merge --no-ff -q side -m "Merge branch 'side'"
+fire_out "$R" "git -C $R merge --no-ff side"
+check "trailer added" yes "$(has_trailer "$R")"
+check "still a merge commit" 1 "$(git -C "$R" rev-list --no-walk --count --merges HEAD)"
+check "context says trailer added" yes "$(context_has "added missing")"
+
+echo "== 32. env -C <B> git cherry-pick, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r32-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(diverged r32-b)
+SIDE=$(git -C "$B" rev-parse side)
+git -C "$B" cherry-pick "$SIDE" >/dev/null
+fire "$A" "env -C $B git cherry-pick $SIDE"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+# Non-committing forms: HEAD stays a fresh, trailer-less commit this call did
+# not create; the hook must leave it alone and say nothing.
+for form in "revert --no-commit HEAD" "revert -n HEAD" "cherry-pick -n side" \
+            "cherry-pick -xn side" "cherry-pick --no-commit side" "cherry-pick --abort" \
+            "revert --quit"; do
+    echo "== 33. git $form -> untouched =="
+    R=$(diverged "r33-${form//[^a-z]/}")
+    BEFORE=$(git -C "$R" rev-parse HEAD)
+    fire_out "$R" "git -C $R $form"
+    check "$form: sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+    stdout_empty "$form"
+done
+
+# The merge forms run against a fresh, trailer-less merge commit (an earlier
+# merge this call did not make): only the option itself can keep the hook off it.
+for form in "merge --no-commit side" "merge --squash side" "merge --abort" "merge --quit"; do
+    echo "== 33m. git $form on a fresh merge HEAD -> untouched =="
+    R=$(diverged "r33m-${form//[^a-z]/}")
+    git -C "$R" merge --no-ff -q side -m "Merge branch 'side'"
+    BEFORE=$(git -C "$R" rev-parse HEAD)
+    fire_out "$R" "git -C $R $form"
+    check "$form: sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+    stdout_empty "$form"
+done
+
+echo "== 34. git merge --ff-only <branch> -> fast-forwarded commit untouched =="
+R=$(newrepo r34); git -C "$R" commit -qm base
+git -C "$R" checkout -qb side; echo y > "$R/g"; git -C "$R" add g; git -C "$R" commit -qm "feat: not ours"
+git -C "$R" checkout -q -
+git -C "$R" merge --ff-only -q side
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_out "$R" "git -C $R merge --ff-only side"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "fast-forward"
+
+echo "== 35. git merge -n <branch> (-n is --no-stat) -> merge commit gets the trailer =="
+R=$(diverged r35)
+git -C "$R" merge -n --no-ff -q side -m "Merge branch 'side'"
+fire "$R" "git -C $R merge -n --no-ff side"
+check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 36. git revert with an unresolvable -C -> context message =="
+CWD=$(newrepo r36); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_out "$CWD" 'git -C "$WT" revert --no-edit HEAD'
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "context says shell expansion" yes "$(context_has "shell expansion")"
+
+echo "== 37. --no-edit elsewhere in the line does not skip a real commit =="
+R=$(newrepo r37); git -C "$R" commit -qm "feat: thing"
+fire "$R" "git -C $R commit -m 'feat: thing' && git -C $R log -1 --no-edit"
+check "trailer added" yes "$(has_trailer "$R")"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

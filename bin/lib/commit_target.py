@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve which repository a Bash command committed to.
+"""Resolve which repository a Bash command committed to, and how.
 
 Used by hook-post-commit-trailer.sh, which amends HEAD of the repository this
 returns. Getting the target wrong does not merely skip the trailer: it can
@@ -13,9 +13,21 @@ Usage:
 Output and exit status:
     0  line 1: the target directory (absolute)
        line 2: "push" if a `git push` segment follows the commit, else empty
+       line 3: "merge" if the last commit segment is a `git merge`, else
+               "commit"
     1  the command contains no commit segment; nothing printed
     2  a commit segment exists but its target cannot be resolved; the reason
        is printed on stderr
+
+A commit segment is git-commit.sh, or `git ... <sub>` where <sub> is commit,
+revert, cherry-pick or merge, minus the forms that leave no new commit:
+    commit       --amend together with --no-edit (reuses an existing message)
+    revert,      -n / --no-commit (also inside a short-option cluster such as
+    cherry-pick  -xn), --abort, --quit
+    merge        --no-commit, --squash, --abort, --quit (-n on merge is
+                 --no-stat, not --no-commit)
+A `git merge` that fast-forwards creates no commit either; that cannot be read
+from the text, so the caller checks HEAD is a merge commit for kind "merge".
 
 Resolution, per commit segment, first match wins:
     1. git-commit.sh --repo <dir> / --repo=<dir> (the last one, as the script
@@ -53,9 +65,37 @@ EXIT_UNRESOLVABLE = 2
 
 GIT = "git"
 COMMIT_SUBCOMMAND = "commit"
+REVERT_SUBCOMMAND = "revert"
+CHERRY_PICK_SUBCOMMAND = "cherry-pick"
+MERGE_SUBCOMMAND = "merge"
 PUSH_SUBCOMMAND = "push"
 # Second output line when a push follows the commit; the hook compares against it.
 PUSH_MARKER = "push"
+
+# Third output line: what kind of command made the last commit. The hook
+# compares against these.
+KIND_COMMIT = "commit"
+KIND_MERGE = "merge"
+
+# `git commit --amend --no-edit` reuses a message as is; it does not count as
+# committing, so the hook leaves the amended commit alone.
+AMEND_OPTION = "--amend"
+NO_EDIT_OPTION = "--no-edit"
+
+# Long options per subcommand after which it creates no commit. The short -n
+# of revert and cherry-pick is read as part of a cluster, via SHORT_NO_COMMIT.
+NO_COMMIT_OPTIONS = {
+    REVERT_SUBCOMMAND: {"--no-commit", "--abort", "--quit"},
+    CHERRY_PICK_SUBCOMMAND: {"--no-commit", "--abort", "--quit"},
+    MERGE_SUBCOMMAND: {"--no-commit", "--squash", "--abort", "--quit"},
+}
+# revert and cherry-pick: the short no-commit flag, and the short options that
+# take a value (the rest of a cluster after them is that value, not flags).
+SHORT_NO_COMMIT = "n"
+SHORT_VALUE_OPTIONS = {
+    REVERT_SUBCOMMAND: {"m", "S"},
+    CHERRY_PICK_SUBCOMMAND: {"m", "S"},
+}
 
 COMMIT_WRAPPER = "git-commit.sh"
 REPO_OPTION = "--repo"
@@ -79,8 +119,8 @@ class Unresolvable(Exception):
 
 
 def _git_invocation(tokens):
-    """Return (subcommand, [-C values], repo override or None) for a `git ...`
-    segment, else None."""
+    """Return (subcommand, [-C values], repo override or None, [arguments after
+    the subcommand]) for a `git ...` segment, else None."""
     if not tokens or os.path.basename(tokens[0]) != GIT:
         return None
     dirs = []
@@ -89,7 +129,7 @@ def _git_invocation(tokens):
     while i < len(tokens):
         token = tokens[i]
         if not token.startswith("-"):
-            return token, dirs, override
+            return token, dirs, override, tokens[i + 1:]
         name = token.split("=", 1)[0]
         if name in GIT_REPO_OVERRIDES:
             override = name
@@ -99,7 +139,35 @@ def _git_invocation(tokens):
             i += 2
         else:
             i += 1
-    return None, dirs, override
+    return None, dirs, override, []
+
+
+def _short_cluster_has_no_commit(token, subcommand):
+    """True if a short-option cluster such as -xn holds the no-commit flag."""
+    for char in token[1:]:
+        if char == SHORT_NO_COMMIT:
+            return True
+        if char in SHORT_VALUE_OPTIONS[subcommand]:
+            return False
+    return False
+
+
+def _commit_kind(subcommand, args):
+    """Kind of commit a `git <subcommand> <args>` segment creates, or None."""
+    if subcommand == COMMIT_SUBCOMMAND:
+        if AMEND_OPTION in args and NO_EDIT_OPTION in args:
+            return None
+        return KIND_COMMIT
+    if subcommand not in NO_COMMIT_OPTIONS:
+        return None
+    for arg in args:
+        if arg in NO_COMMIT_OPTIONS[subcommand]:
+            return None
+        if (subcommand in SHORT_VALUE_OPTIONS and arg.startswith("-")
+                and not arg.startswith("--")
+                and _short_cluster_has_no_commit(arg, subcommand)):
+            return None
+    return KIND_MERGE if subcommand == MERGE_SUBCOMMAND else KIND_COMMIT
 
 
 def _strip_env_chdir(tokens):
@@ -167,20 +235,24 @@ def _resolve_dir(parts, cwd):
 
 
 def _commit_target(segment, cwd):
-    """Target dir of a commit segment, or None if the segment does not commit."""
+    """(target dir, kind) of a commit segment, or None if it does not commit."""
     chdirs, tokens = _strip_env_chdir(segment)
     _, tokens = _hook.strip_command_prefixes(tokens)
     if not tokens:
         return None
     if os.path.basename(tokens[0]) == COMMIT_WRAPPER:
         repo = _wrapper_repo(tokens)
-        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd)
+        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd), KIND_COMMIT
     git = _git_invocation(tokens)
-    if git and git[0] == COMMIT_SUBCOMMAND:
-        if git[2]:
-            raise Unresolvable(f"git {git[2]} sets the repository; not resolved from command text")
-        return _resolve_dir(chdirs + git[1], cwd)
-    return None
+    if not git:
+        return None
+    subcommand, dirs, override, args = git
+    kind = _commit_kind(subcommand, args)
+    if kind is None:
+        return None
+    if override:
+        raise Unresolvable(f"git {override} sets the repository; not resolved from command text")
+    return _resolve_dir(chdirs + dirs, cwd), kind
 
 
 def _cd_target(tokens, cwd):
@@ -199,9 +271,10 @@ def _is_push(segment):
 
 
 def resolve(command, cwd):
-    """Return (target, pushed_after) or None without a commit segment.
+    """Return (target, pushed_after, kind) or None without a commit segment.
 
-    Raises Unresolvable with the reason.
+    kind is that of the last commit segment, the one HEAD reflects. Raises
+    Unresolvable with the reason.
     """
     try:
         segments = _hook.split_segments(command)
@@ -209,6 +282,7 @@ def resolve(command, cwd):
         raise Unresolvable(f"command does not tokenize ({exc})")
 
     targets = []
+    kind = None
     last_commit = -1
     # A `cd` that cannot be followed only matters if a commit comes after it.
     cd_error = None
@@ -221,10 +295,11 @@ def resolve(command, cwd):
         if moved is not None:
             cwd = moved
             continue
-        target = _commit_target(segment, cwd)
-        if target is not None:
+        commit = _commit_target(segment, cwd)
+        if commit is not None:
             if cd_error is not None:
                 raise cd_error
+            target, kind = commit
             targets.append(target)
             last_commit = index
 
@@ -234,7 +309,7 @@ def resolve(command, cwd):
         raise Unresolvable("several commit segments with different targets: " + ", ".join(sorted(set(targets))))
 
     pushed_after = any(_is_push(segment) for segment in segments[last_commit + 1:])
-    return targets[0], pushed_after
+    return targets[0], pushed_after, kind
 
 
 def main():
@@ -246,9 +321,10 @@ def main():
         return EXIT_UNRESOLVABLE
     if result is None:
         return EXIT_NO_COMMIT
-    target, pushed_after = result
+    target, pushed_after, kind = result
     print(target)
     print(PUSH_MARKER if pushed_after else "")
+    print(kind)
     return EXIT_RESOLVED
 
 

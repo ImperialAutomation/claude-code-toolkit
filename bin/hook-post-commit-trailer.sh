@@ -40,13 +40,18 @@
 #   3. the session cwd, moved by a `cd <dir>` segment before the commit or an
 #      `env -C <dir>` prefix on the commit segment
 # Parsing lives in lib/commit_target.py, which reuses the approve hook's
-# tokenizer so quotes and separators are read the same way.
+# tokenizer so quotes and separators are read the same way. It also decides
+# which commands commit: git-commit.sh and `git commit`, and `git revert`,
+# `cherry-pick` and `merge` unless they ran with --no-commit or an equivalent.
 #
 # Skips silently:
 #   - Bash calls that did not commit
 #   - Commits that already carry the trailer
 #   - Repos with no commit yet, or a detached/unborn HEAD
-#   - Merge commits (the trailer belongs on the authored commit)
+#   - A merge commit HEAD after `git commit`, revert or cherry-pick (none of
+#     them made it; the trailer belongs on the authored commit)
+#   - A non-merge HEAD after `git merge` (a fast-forward made no commit)
+#   - `git commit --amend --no-edit` (reuses an existing message as is)
 #   - Commits older than 120 s
 #   - Pushed commits, when the command did not push them
 #
@@ -72,6 +77,8 @@ EXIT_RESOLVED=0
 EXIT_UNRESOLVABLE=2
 # Its second output line when a `git push` follows the commit.
 PUSH_MARKER="push"
+# Its third output line when the last commit segment is a `git merge`.
+KIND_MERGE="merge"
 
 TMP_ERR=$(mktemp)
 trap 'rm -f "$TMP_ERR"' EXIT
@@ -89,14 +96,9 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 [[ -z "$COMMAND" ]] && exit 0
 
 # Cheap pre-filter before the parser below, which decides whether the command
-# really commits (git-commit.sh or a raw `git ... commit`).
-if ! echo "$COMMAND" | grep -q 'commit'; then
-    exit 0
-fi
-
-# --amend --no-edit reuses an existing message; re-amending it here would loop
-# on a message this hook itself just wrote.
-if echo "$COMMAND" | grep -q -- '--no-edit'; then
+# really commits (git-commit.sh, or `git commit|revert|cherry-pick|merge`
+# without a no-commit option; `commit --amend --no-edit` does not count).
+if ! echo "$COMMAND" | grep -qE 'commit|revert|cherry-pick|merge'; then
     exit 0
 fi
 
@@ -114,13 +116,19 @@ case $? in
         ;;
     *) exit 0 ;;
 esac
-{ read -r REPO_DIR; read -r PUSH_AFTER; } <<< "$TARGET"
+{ read -r REPO_DIR; read -r PUSH_AFTER; read -r KIND; } <<< "$TARGET"
 
 git -C "$REPO_DIR" rev-parse --verify HEAD &>/dev/null || exit 0
 
-# Merge commits are not authored content.
-if [[ $(git -C "$REPO_DIR" rev-list --no-walk --count --merges HEAD 2>/dev/null) == "1" ]]; then
-    exit 0
+# A `git merge` gets the trailer on the merge commit it made; a non-merge HEAD
+# means it fast-forwarded and made nothing. Any other command makes no merge
+# commit, so a merge HEAD there is not this call's work.
+IS_MERGE=0
+[[ $(git -C "$REPO_DIR" rev-list --no-walk --count --merges HEAD 2>/dev/null) == "1" ]] && IS_MERGE=1
+if [[ "$KIND" == "$KIND_MERGE" ]]; then
+    (( IS_MERGE )) || exit 0
+else
+    (( IS_MERGE )) && exit 0
 fi
 
 MESSAGE=$(git -C "$REPO_DIR" log -1 --format='%B' 2>/dev/null)
