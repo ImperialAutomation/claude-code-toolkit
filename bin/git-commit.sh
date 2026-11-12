@@ -82,6 +82,8 @@ set -euo pipefail
 # working directories, and bin/ is reached through a symlink.
 # shellcheck source=bin/lib/strip-sandbox-noise.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+# shellcheck source=bin/lib/protected-branches.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/protected-branches.sh"
 
 readonly EROFS_MARKER="Read-only file system"
 readonly PRECOMMIT_MARKER="pre-commit"
@@ -241,34 +243,15 @@ if [[ -z "$ALLOW_PROTECTED" ]]; then
     CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || true)
 
     if [[ -n "$CURRENT_BRANCH" ]]; then
-        PROTECTED=()
-        # --show-toplevel rather than the cwd: the config file lives at the repo
-        # root, and this script is routinely called from a subdirectory.
-        REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || true)
-        PROTECTED_FILE="$REPO_TOP/.claude/protected-branches"
-
-        if [[ -n "$REPO_TOP" && -f "$PROTECTED_FILE" ]]; then
-            # The file is the single source when present; git config is not
-            # merged in, so "why is this branch protected" has one answer.
-            while IFS= read -r line || [[ -n "$line" ]]; do
-                line="${line%%#*}"                 # strip comments
-                line="${line#"${line%%[![:space:]]*}"}"  # strip leading space
-                line="${line%"${line##*[![:space:]]}"}"  # strip trailing space
-                [[ -n "$line" ]] && PROTECTED+=("$line")
-            done < "$PROTECTED_FILE"
-        else
-            while IFS= read -r line; do
-                [[ -n "$line" ]] && PROTECTED+=("$line")
-            done < <(git config --get-all toolkit.protectedBranch 2>/dev/null || true)
-        fi
-
-        for protected in ${PROTECTED+"${PROTECTED[@]}"}; do
+        # The per-repo list only, not the fixed develop/master/main the merge
+        # and push guards add: a repo opts in to this check by declaring it.
+        while IFS= read -r protected; do
             if [[ "$CURRENT_BRANCH" == "$protected" ]]; then
                 echo "Error: refusing to commit on protected branch '$CURRENT_BRANCH'." >&2
                 echo "Create a branch first (git -C $(pwd) switch -c <name>), or pass --allow-protected." >&2
                 exit 1
             fi
-        done
+        done < <(protected_branch_list .)
     fi
 fi
 
