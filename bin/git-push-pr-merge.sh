@@ -156,7 +156,10 @@
 #   --repo <dir>               Run against the worktree at <dir> instead of the
 #                              current directory. A path that is not a worktree
 #                              is an error, never a fallback to the caller's tree
-#   --base <branch>            Target branch for the PR (required)
+#   --base <branch>            Target branch for the PR (required). A protected
+#                              base (develop, master, main, or the repo's own
+#                              list, see bin/lib/protected-branches.sh) is
+#                              refused before the push unless --no-merge is set
 #   --title <title>            PR title (required). Applied to a reused PR too
 #   --body-file <path>         File containing PR body (required). Applied to a
 #                              reused PR too, overwriting edits made on GitHub
@@ -178,6 +181,8 @@ set -euo pipefail
 # working directories and bin/ is reached through a symlink.
 # shellcheck source=bin/lib/strip-sandbox-noise.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+# shellcheck source=bin/lib/protected-branches.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/protected-branches.sh"
 
 BASE=""
 TITLE=""
@@ -342,6 +347,17 @@ if ! [[ "$CI_TIMEOUT" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$CI_GRACE" =~ ^[0-9]+$ ]]; then
     echo "Error: --ci-grace must be a non-negative integer (got: $CI_GRACE)" >&2
+    exit 1
+fi
+
+# Protected-base guard. A merge into develop/master/main, or a branch the repo
+# itself declares protected, is the human's act (#312): this script is approved
+# without a prompt through Bash(~/.claude/bin/*), and the hook sees only its
+# command line, so the refusal has to live here. After the --repo cd, so the
+# list is the target tree's; before the push, so nothing leaves the machine.
+if [[ "$DO_MERGE" -eq 1 ]] && is_protected_branch . "$BASE"; then
+    echo "Error: refusing to merge into protected base branch '$BASE'." >&2
+    echo "Merges into a protected branch are the user's call. Re-run with --no-merge to open the PR for review, or ask the user to merge it." >&2
     exit 1
 fi
 

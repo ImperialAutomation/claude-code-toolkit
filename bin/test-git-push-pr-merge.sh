@@ -61,6 +61,10 @@
 #   43. `gh pr edit` fails                   -> exit non-zero, no CI wait, no merge
 #  43b. `gh pr view` fails                   -> same, and no edit attempted
 #   44. No existing PR                       -> created, no PR_EDIT line, STATUS: CREATED
+#   45. Merge into main/master/develop       -> refused before the push (#312)
+#   46. --no-merge into main                 -> still opens the PR
+#   47. Merge into a per-repo protected base -> refused
+#   48. Same, with --repo from another dir   -> the target tree's list is read
 #
 # Each scenario builds a throwaway repo and a fake `gh`/`git push` stub so it
 # never touches a real GitHub repo.
@@ -87,6 +91,9 @@ make_repo() {
     git -C "$dir" config user.name "Test"
     git -C "$dir" checkout -q -b main
     git -C "$dir" commit -q --allow-empty -m "root"
+    # The merge scenarios target an epic branch: merging into develop/master/
+    # main is refused before anything happens (#312, scenarios 45-48).
+    git -C "$dir" branch -q epic-1
     git -C "$dir" checkout -q -b issue-1-feature
     git -C "$dir" commit -q --allow-empty -m "feature work"
     echo "$dir"
@@ -506,9 +513,15 @@ FAKE_GH
 
     # Fake `git` that only intercepts `push`/`pull` (network ops); everything
     # else delegates to the real git so branch/commit machinery still works.
+    # A push leaves $workdir/pushed behind, so a refusal can be shown to come
+    # before anything left the machine.
     cat > "$bindir/git" <<FAKE_GIT
 #!/usr/bin/env bash
-if [ "\$1" = "push" ] || [ "\$1" = "pull" ]; then
+if [ "\$1" = "push" ]; then
+    touch "$workdir/pushed"
+    exit 0
+fi
+if [ "\$1" = "pull" ]; then
     exit 0
 fi
 exec $(command -v git) "\$@"
@@ -527,6 +540,10 @@ HEAD_STATE="current"
 # which is inert because no pattern is set and so no fetch happens at all.
 JOBLOG_STATE="match"
 
+# The --base run_case passes. An epic branch, so the merge path is reachable;
+# the protected-base scenarios (45-48) set it to a protected name.
+RUN_BASE="epic-1"
+
 run_case() {
     local name="$1"
     local repo="$2"
@@ -539,10 +556,10 @@ run_case() {
     echo "$JOBLOG_STATE" > "$repo/joblog-state"
     rm -f "$repo/merged" "$repo/checks-call-count" "$repo/create-count" \
         "$repo/view-call-count" "$repo/joblog-fetch-count" "$repo/joblog-endpoints" \
-        "$repo/edit-calls"
+        "$repo/edit-calls" "$repo/pushed"
 
     set +e
-    output=$(cd "$repo" && PATH="$repo/bin:$PATH" "$TARGET" --base main --title "Test PR" --body-file "$repo/body.md" "${extra_args[@]}" 2>&1)
+    output=$(cd "$repo" && PATH="$repo/bin:$PATH" "$TARGET" --base "$RUN_BASE" --title "Test PR" --body-file "$repo/body.md" "${extra_args[@]}" 2>&1)
     actual_exit=$?
     set -e
 
@@ -1606,6 +1623,69 @@ assert_contains "fresh PR: final status" "STATUS: CREATED" "$(cat "$repo44/last-
 assert_not_contains "fresh PR: no PR_EDIT line" "PR_EDIT:" "$(cat "$repo44/last-output.txt")"
 assert_file_content "fresh PR: no edit call" "$repo44/edit-calls" "<absent>"
 rm -rf "$repo44"
+
+# --- Scenarios 45-48: no merge into a protected base (#312) ---
+# The script merged into whatever --base named, and Bash(~/.claude/bin/*)
+# approves it without a prompt, so an agent could merge into main through it
+# while the hook only saw the wrapper's command line. The refusal comes before
+# the push: nothing about the branch leaves the machine.
+for protected_base in main master develop; do
+    repo45=$(make_repo)
+    make_fake_gh "$repo45"
+    echo "Test PR body" > "$repo45/body.md"
+    RUN_BASE="$protected_base"
+    run_case "merge into $protected_base" "$repo45" "pass" --ci-timeout 30 --ci-poll-interval 1
+    assert_exit "merge into $protected_base: exit code" "1" "$(cat "$repo45/last-exit.txt")"
+    assert_contains "merge into $protected_base: names the reason" "protected base branch '$protected_base'" "$(cat "$repo45/last-output.txt")"
+    assert_file_content "merge into $protected_base: nothing pushed" "$repo45/pushed" "<absent>"
+    assert_file_content "merge into $protected_base: no PR created" "$repo45/create-count" "<absent>"
+    assert_file_absent "merge into $protected_base: no merge" "$repo45/merged"
+    rm -rf "$repo45"
+done
+
+# --- Scenario 46: --no-merge into a protected base still opens the PR ---
+repo46=$(make_repo)
+make_fake_gh "$repo46"
+echo "Test PR body" > "$repo46/body.md"
+RUN_BASE="main"
+run_case "no-merge into main" "$repo46" "pass" --no-merge
+assert_exit "no-merge into main: exit code" "0" "$(cat "$repo46/last-exit.txt")"
+assert_contains "no-merge into main: PR created" "STATUS: CREATED" "$(cat "$repo46/last-output.txt")"
+assert_file_absent "no-merge into main: no merge" "$repo46/merged"
+rm -rf "$repo46"
+
+# --- Scenario 47: the repo's own protected list counts too ---
+# Same source as git-commit.sh (bin/lib/protected-branches.sh): a repo whose
+# release branch is not one of the fixed three declares it there.
+repo47=$(make_repo)
+make_fake_gh "$repo47"
+echo "Test PR body" > "$repo47/body.md"
+git -C "$repo47" config --add toolkit.protectedBranch epic-1
+RUN_BASE="epic-1"
+run_case "merge into per-repo protected" "$repo47" "pass" --ci-timeout 30 --ci-poll-interval 1
+assert_exit "per-repo protected: exit code" "1" "$(cat "$repo47/last-exit.txt")"
+assert_file_content "per-repo protected: nothing pushed" "$repo47/pushed" "<absent>"
+assert_file_absent "per-repo protected: no merge" "$repo47/merged"
+rm -rf "$repo47"
+
+# --- Scenario 48: --repo reads the protected list of the target tree ---
+# The list is read after the --repo cd: a caller standing in a repo without
+# the config must not lose the protection of the repo it targets.
+repo48=$(make_repo)
+make_fake_gh "$repo48"
+echo "Test PR body" > "$repo48/body.md"
+git -C "$repo48" config --add toolkit.protectedBranch epic-1
+caller48=$(mktemp -d -p "$TEST_ROOT")
+set +e
+out48=$(cd "$caller48" && PATH="$repo48/bin:$PATH" "$TARGET" --repo "$repo48" --base epic-1 \
+    --title "Test PR" --body-file "$repo48/body.md" --no-ci-wait 2>&1)
+rc48=$?
+set -e
+assert_exit "--repo protected list: exit code" "1" "$rc48"
+assert_contains "--repo protected list: names the reason" "protected base branch 'epic-1'" "$out48"
+assert_file_absent "--repo protected list: no merge" "$repo48/merged"
+rm -rf "$repo48" "$caller48"
+RUN_BASE="epic-1"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
