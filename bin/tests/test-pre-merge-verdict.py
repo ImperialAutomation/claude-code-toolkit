@@ -121,6 +121,9 @@ check("MEDIUM/LOW findings are still listed under APPROVE",
       any("magic number" in f for f in out.get("listed_findings", []))
       and any("todo" in f for f in out.get("listed_findings", [])))
 check("nothing at all -> APPROVE", verdict(base()) == "APPROVE")
+check("review_event: APPROVE -> APPROVE, BLOCKING -> REQUEST_CHANGES",
+      run(base())[1].get("review_event") == "APPROVE"
+      and run(base(tests={"passed": 0, "failed": 1}))[1].get("review_event") == "REQUEST_CHANGES")
 check("empty sections -> APPROVE",
       verdict(base(escalation={"hits": [], "linked_issues": []}, acceptance=[], runtime=[],
                    tests={"passed": 0, "failed": 0, "skipped": 0}, review_findings=[],
@@ -132,6 +135,8 @@ r, out = run(base(escalation={"hits": [ESC_HIT], "linked_issues": [{"number": 1,
                   tests={"passed": 1, "failed": 2, "skipped": 0},
                   review_findings=[{"severity": "MEDIUM", "finding": "dup code", "location": "d.py:1"}]))
 check("HUMAN and BLOCKING conditions together -> HUMAN", out.get("verdict") == "HUMAN")
+check("HUMAN over BLOCKING -> review event COMMENT, not REQUEST_CHANGES",
+      out.get("review_event") == "COMMENT")
 check("the BLOCKING reasons stay listed under HUMAN",
       any("bin/x.sh:7" in b for b in out.get("blocking_reasons", []))
       and any("2 failed" in b for b in out.get("blocking_reasons", [])))

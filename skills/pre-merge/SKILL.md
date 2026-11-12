@@ -1,19 +1,20 @@
 ---
 name: pre-merge
 description: Combined quality gate that orchestrates review, tests, verification, and AC checks before merge
-argument-hint: "[PR-number]"
+argument-hint: "[PR-number] [--post]"
 user-invocable: true
 ---
 
 # Pre-Merge Quality Gate
 
-The reviewer role: orchestrates every quality check into one gate report with one verdict, `APPROVE`, `BLOCKING` or `HUMAN`. This is a reporting tool: it does NOT auto-fix or auto-merge. The user decides what to act on.
+The reviewer role: orchestrates every quality check into one gate report with one verdict, `APPROVE`, `BLOCKING` or `HUMAN`. This is a reporting tool: it does NOT auto-fix or auto-merge. The user decides what to act on. With `--post` it also submits the report as a PR review under the review app (Phase 10).
 
 ## Input
 
 `$ARGUMENTS` can be:
 - **A PR number**: scope to that PR's changes
 - **Empty**: scope to current branch vs base branch
+- **`--post`** (with a PR number only): after the report, run Phase 10. Without it, nothing is written to GitHub.
 
 The local phases (review, tests, escalation check) read the checked-out tree, so for a PR number the PR's head branch should be checked out. When `HEAD` is not the PR head, say so at the top of the report.
 
@@ -31,6 +32,8 @@ Every file this skill writes is unique per project and PR, so two reviews can ru
 | `/tmp/<project>-pre-merge-pr-<key>.json` | PR metadata |
 | `/tmp/<project>-pre-merge-issue-<key>.json` | Linked issue (a second linked issue `<N>`: `/tmp/<project>-pre-merge-issue-<N>-<key>.json`) |
 | `/tmp/<project>-pre-merge-gates-<key>.json` | Input of `pre-merge-verdict.py` (Phase 8) |
+| `/tmp/<project>-pre-merge-report-<key>.md` | The Phase 9 report, the review body (Phase 10) |
+| `/tmp/<project>-pre-merge-human-<key>.json` | `HUMAN` decisions for the review (Phase 10) |
 
 ### If PR number provided:
 ```bash
@@ -233,3 +236,27 @@ Then the detail sections, each only when it has content:
 - **Approved escalations** (`approved_escalations`): hits that did not escalate because every linked issue carries the `approved:<key>` label.
 
 **This is a reporting gate. Do NOT auto-fix issues or suggest automatic remediation. Present the facts and let the user decide.**
+
+## Phase 10: Post (only with `--post`)
+
+Submits one PR review as the repo owner's review GitHub App (`gh-app-token.sh`, `docs/review-app-runbook.md`), never as the user. Write the Phase 9 report with the Write tool to `/tmp/<project>-pre-merge-report-<key>.md`. For a `HUMAN` verdict, also write `/tmp/<project>-pre-merge-human-<key>.json`: one entry per human reason, each with the question it raises, at least two options and your recommendation:
+
+```json
+[{"question": "...", "options": ["A: ...", "B: ..."], "recommendation": "A, because ..."}]
+```
+
+Then:
+
+```bash
+~/.claude/bin/pre-merge-post.py --gates /tmp/<project>-pre-merge-gates-<key>.json --body /tmp/<project>-pre-merge-report-<key>.md [--human /tmp/<project>-pre-merge-human-<key>.json]
+```
+
+It recomputes the verdict with the Phase 8 rules and posts the matching event: `APPROVE` → `APPROVE`, `BLOCKING` → `REQUEST_CHANGES`, `HUMAN` → `COMMENT` with the decisions on top of the body. Findings on a diff line become inline comments of that review; the rest are listed in its body. On `HUMAN` it then adds `needs-human` to the PR and to every linked issue (`escalation.linked_issues`). The app has `Contents: Read-only`, so its `APPROVE` does not count toward a required-approvals rule.
+
+| Exit | `status` | Meaning |
+|---|---|---|
+| 0 | `posted` | Review on the PR (and labels set on `HUMAN`) |
+| 3 | `post_failed` | No token or an API error; `stage` (`files`, `review`, `label`), `error`, `review_posted` |
+| 2 | (no JSON) | Invalid input, nothing sent: fix it and run again |
+
+A post failure is not a verdict: report the verdict from Phase 8 plus `review not posted (<error>)`, and never retry as the user's own account.
