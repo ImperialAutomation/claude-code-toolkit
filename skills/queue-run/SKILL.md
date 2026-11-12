@@ -29,7 +29,7 @@ escalation; `/refine` and the escalation hook raise it.
 | `--budget N` | 10 | Releases (pr, escalated, failed) this loop may make; then it stops. Idle iterations do not count (#251, D1, D3) |
 | `--max-prs N` | 3 | Agent PR WIP limit, passed to `agent-pr-wip.sh --limit` (D6). A separate brake: review backlog, not tokens |
 | `--max-idle N` | 16 | Consecutive idle iterations (8 hours at 30 minutes) before the loop stops (D4, D5) |
-| `--model <model>` | the session's | Model of the issue sub-agent in Step 4 (D3) |
+| `--model <model>` | the session's | Model of the sub-agents of Steps 4 and 4c (D3) |
 
 A value that is not a positive integer (or, for `--model`, empty) or an
 unknown argument: claim nothing, stop the loop and report the usage.
@@ -56,8 +56,10 @@ Check these before starting a loop. They are not checked by the skill itself.
 
 ## One iteration
 
-The session running the loop stays thin: it calls a few scripts, spawns one
-sub-agent, measures its tokens and releases the claim. All issue work happens in the sub-agent.
+The session running the loop stays thin: it calls a few scripts, spawns the
+sub-agents (the issue sub-agent, and on a PR a reviewer and at most one fix
+round), measures their tokens and releases the claim. All issue work happens
+in the sub-agents.
 
 `<project>` is the basename of `<repo>`, lowercase, non-alphanumerics as `-`.
 
@@ -208,22 +210,64 @@ Measure that agent and every agent it spawned, whatever the outcome (a
 failed or escalated run costs just as much):
 
 ```bash
-~/.claude/bin/cmd-save.sh /tmp/<project>-queue-tokens-<N>.json ~/.claude/bin/agent-tokens.py --agent <id> --json
+~/.claude/bin/cmd-save.sh /tmp/<project>-queue-tokens-<N>-issue.json ~/.claude/bin/agent-tokens.py --agent <id> --json
 ```
 
-- exit 0: `/tmp/<project>-queue-tokens-<N>.json` holds the totals; Read it for
-  its `summary` (Step 7) and pass it to the release in Step 5.
+- exit 0: the issue part is measured.
 - exit 1 (no transcript), exit 2 (ambiguous or unreadable), or no `agentId` in
-  the launch result: the measurement failed. That never fails the iteration: release
-  without `--tokens`, report `tokens: unknown`.
+  the launch result: the measurement failed. That never fails the iteration;
+  the whole-issue total is then unknown (Step 5).
+
+Step 4c measures each sub-agent it spawns the same way, one file per agent:
+`-review-1`, `-review-2` and `-fix` instead of `-issue`. Only files measured in
+this iteration count; a file left from an earlier run of the issue does not.
 
 The `subagent_tokens` of a completion notice is not this number: it is roughly
 the final context size.
 
+### Step 4c: Review the PR
+
+Only when the report is `PR_OPENED`, `gh-save.sh /tmp/<project>-queue-pr-<N>.json pr view <url> --json number,state`
+reads `OPEN`, and the labels (read as in Step 5) do not include
+`needs-human`. Otherwise go to Step 5.
+
+The prompts, their inputs and response formats are in
+`~/.claude/skills/queue-run/references/review-and-fix.md`; Read it now. The
+reviewer gets the issue, the PR and the worktree (`WORKTREE` of the report),
+never the issue sub-agent's plan or report (#288, D1).
+
+1. Spawn the **Reviewer**; measure it into `-review-1`. Its block is the
+   first review: `VERDICT` and `FINDINGS`, or "not posted" when the block is
+   `REVIEW_NOT_POSTED` or missing.
+2. First review `BLOCKING`: spawn the **Fix round** with `<comments>` = its
+   `REVIEW_URL`; measure it into `-fix`. On `FIXED`, spawn the Reviewer again
+   with the same inputs (the re-review), measured into `-review-2`. Exactly
+   one fix round and one re-review, whatever the re-review says.
+3. Any other first review: no fix round. `HUMAN` wins over `BLOCKING` (D4):
+   no fix round even when the review lists HIGH findings.
+
+While a sub-agent of this step runs, the "Sub-agent running" rule of
+"Pacing" holds: release nothing, claim nothing.
+
+Then sum the tokens per phase and for the whole issue, from the files of
+this iteration that measured (`agent-tokens.py --sum` adds `--json` outputs):
+
+```bash
+~/.claude/bin/cmd-save.sh /tmp/<project>-queue-tokens-<N>-review.json ~/.claude/bin/agent-tokens.py --sum <review-1> [<review-2>] --json
+~/.claude/bin/cmd-save.sh /tmp/<project>-queue-tokens-<N>-fix.json ~/.claude/bin/agent-tokens.py --sum <fix> --json
+```
+
+A phase is known only when every agent in it measured; a phase with a failed
+measurement gets no sum (its columns stay empty, its cost is reported
+`unknown`) and is left out of the whole. The whole is the sum of the issue
+part and the known phases into `/tmp/<project>-queue-tokens-<N>.json`, and
+only when the issue part measured. Without Step 4c it is the issue part
+alone.
+
 ### Step 5: Release
 
-Read the labels again yourself; the label, not the report, decides an
-escalation:
+Read the labels again yourself; for an issue that skipped Step 4c the label,
+not the report, decides an escalation:
 
 ```bash
 ~/.claude/bin/gh-save.sh /tmp/<project>-queue-labels-<N>.json issue view <N> --json labels
@@ -233,17 +277,46 @@ Then release in exactly one way. `agent-wip` is dropped only here, after the
 outcome exists: the escalation hook treats an issue with `agent-wip` as an
 autonomous run, so dropping it earlier would let a PR through unchecked.
 
-When Step 4b measured, every release below carries
+When the whole-issue total exists, every release below carries
 `--tokens /tmp/<project>-queue-tokens-<N>.json` right after `--repo <repo>`;
-when it failed, leave the option out. Each release comments with the totals
+otherwise leave the option out. Each release comments with the totals
 (or `tokens: unknown`) and appends one row to `~/.claude/queue-runs.tsv`.
+Every release is `~/.claude/bin/queue-claim.sh --repo <repo> [<options>] release ...`;
+the tables show it from `release` on.
+
+An issue that went through Step 4c is released by its review outcome; the
+first matching row wins. `pr <url> <note>` keeps the PR, swaps `agent-ready`
+for `agent-pr` and adds `needs-human` with the text of
+`/tmp/<project>-queue-review-<N>.md` in the comment: write that file first
+with the Write tool (what happened, the review URLs, and the error or
+`NOT_ADDRESSED` of a report). The PR is never lost.
+
+| Review outcome (Step 4c) | Release |
+|---|---|
+| First review `APPROVE` | `release <N> pr <url>` |
+| First review `HUMAN` (question, options and recommendation are in the review) | `release <N> pr <url> <note>` |
+| First review not posted | `release <N> pr <url> <note>`, the error in the note |
+| Fix round `ESCALATED`, `FAILED` or no report | `release <N> pr <url> <note>` |
+| Re-review `APPROVE` | `release <N> pr <url>` |
+| Re-review `BLOCKING`, `HUMAN` or not posted | `release <N> pr <url> <note>` |
+
+These releases also pass, before `release`, each run log option that has a
+value: `--review <V>` (first review: `APPROVE`, `BLOCKING`, `HUMAN`, or
+`error` when not posted), `--review-final <V>` (the re-review, same values;
+left out without one), `--review-findings <FINDINGS>` (of the first review,
+when a count), and `--review-tokens /tmp/<project>-queue-tokens-<N>-review.json`
+and `--fix-tokens /tmp/<project>-queue-tokens-<N>-fix.json` when that phase
+is known.
+
+Every other issue:
 
 | Situation | Release |
 |---|---|
-| `needs-human` is on the issue (whatever the report says) | `queue-claim.sh --repo <repo> release <N> escalated` |
-| `ESCALATED` without `needs-human` | `queue-claim.sh --repo <repo> release <N> escalated` (it adds the label and warns) |
-| `PR_OPENED`, and `gh-save.sh /tmp/<project>-queue-pr-<N>.json pr view <url> --json state` reads `OPEN` | `queue-claim.sh --repo <repo> release <N> pr <url>` (it swaps `agent-ready` for `agent-pr`, so the issue is not claimed again) |
-| `FAILED`, no usable report, or a PR URL that does not resolve to an open PR | `queue-claim.sh --repo <repo> release <N> failed /tmp/<project>-queue-failure-<N>.md` |
+| `needs-human` is on the issue (whatever the report says) | `release <N> escalated` |
+| `ESCALATED` without `needs-human` | `release <N> escalated` (it adds the label and warns) |
+| `FAILED`, no usable report, or a PR URL that does not resolve to an open PR | `release <N> failed /tmp/<project>-queue-failure-<N>.md` |
+
+`pr` swaps `agent-ready` for `agent-pr`, so the issue is not claimed again.
 
 For a failure, first write `/tmp/<project>-queue-failure-<N>.md` with the
 Write tool: the ERROR, ATTEMPTS and LAST_ERROR_OUTPUT of the report (or "the
@@ -275,11 +348,24 @@ one). Stop the loop and report it; do not switch it back yourself.
 ### Step 7: Report
 
 One line per iteration. A worked issue ends with its token totals (the
-`summary` of Step 4b in parentheses, or `(tokens: unknown)` when the
-measurement failed) and the budget used, `<used>` of Step 0 plus this release.
-An idle line ends with the `queue-budget.sh idle` output.
+`summary` of the whole-issue total in parentheses, or `tokens: unknown`) and
+the budget used, `<used>` of Step 0 plus this release. An idle line ends with
+the `queue-budget.sh idle` output.
 
-- `queue: #<N> -> PR <url> (in 0.0k / cw 95k / cr 1.47M / out 15k, 3 agents) [budget 3/10]`
+An issue that reached a PR names its review outcome in brackets after the PR,
+and its phase costs after the total: `; review out <x>` and, after a fix
+round, `, fix out <y>` (the `out` of that phase's `summary`), or
+`review tokens: unknown` / `fix tokens: unknown` for a phase that did not
+measure.
+
+- `queue: #<N> -> PR <url> [review: APPROVE] (in 0.0k / cw 95k / cr 1.47M / out 15k, 4 agents; review out 4k) [budget 3/10]`
+- `queue: #<N> -> PR <url> [review: BLOCKING -> APPROVE after fix] (in 0.0k / cw 120k / cr 1.9M / out 21k, 6 agents; review out 4k, fix out 3k) [budget 3/10]`
+- the other outcomes in the same place: `[review: HUMAN]`,
+  `[review: BLOCKING -> needs-human after fix]` (re-review `BLOCKING`),
+  `[review: BLOCKING -> HUMAN after fix]`,
+  `[review: BLOCKING -> not posted after fix (<reason>)]`,
+  `[review: BLOCKING -> fix escalated]`, `[review: BLOCKING -> fix failed]`,
+  `[review: not posted (<reason>)]`
 - `queue: #<N> escalated (needs-human) (<summary>) [budget 3/10]`
 - `queue: #<N> failed (first failure, back in queue) (<summary>) [budget 3/10]` or `(second failure, needs-human) (<summary>) [budget 3/10]`
 - `queue: idle (empty queue) [idle 2/16]` or `queue: idle (WIP limit <open>/<limit>) [idle 2/16]`
@@ -292,7 +378,8 @@ next one runs (#188, D6).
 
 - **Worked an issue** (released as pr, escalated or failed): run the next
   iteration right away; the queue may hold more.
-- **Sub-agent running** (Step 4 launched, no completion notification yet):
+- **Sub-agent running** (a sub-agent of Step 4 or 4c launched, no completion
+  notification yet):
   schedule a fallback wakeup after 60 minutes, in case no notification
   arrives. A wakeup that finds the sub-agent still running claims nothing,
   skips Step 0 (a stop file or a used-up budget never interrupts a running

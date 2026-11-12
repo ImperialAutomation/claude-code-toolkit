@@ -3,7 +3,7 @@
 #
 # Usage:
 #   queue-claim.sh [--repo <dir>] claim
-#   queue-claim.sh [--repo <dir>] [<release-options>] release <N> pr <url>
+#   queue-claim.sh [--repo <dir>] [<release-options>] release <N> pr <url> [<message-file>]
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> escalated
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> failed <message-file>
 #
@@ -55,6 +55,11 @@
 #                          PR. A PR closed unmerged needs a human to swap
 #                          them back. The `agent-pr` label must exist in the
 #                          repository.
+#   pr <url> <message-file>
+#                          the same, and also adds `needs-human` and puts the
+#                          file's text (why a human must look, e.g. a review
+#                          that could not be posted) in the comment. The PR is
+#                          kept; only the human decides what happens next.
 #   escalated              /refine or the escalation hook already posted the
 #                          question; adds `needs-human` only when it is missing
 #                          (with a warning), so the issue is never re-claimed.
@@ -102,7 +107,7 @@ FIX_PREFIX="fix_"
 REVIEW_VERDICTS=(APPROVE BLOCKING HUMAN error)
 
 usage() {
-    echo "usage: $(basename "$0") [--repo <dir>] claim | [<release-options>] release <N> pr <url> | ... release <N> escalated | ... release <N> failed <message-file> (see --help)" >&2
+    echo "usage: $(basename "$0") [--repo <dir>] claim | [<release-options>] release <N> pr <url> [<message-file>] | ... release <N> escalated | ... release <N> failed <message-file> (see --help)" >&2
     exit 2
 }
 
@@ -190,7 +195,10 @@ case "$command" in
         issue="$1"; outcome="$2"; shift 2
         [[ "$issue" =~ ^[0-9]+$ ]] || { echo "error: issue must be a number: '$issue'" >&2; usage; }
         case "$outcome" in
-            pr)        [[ $# -eq 1 && -n "$1" ]] || usage; pr_url="$1" ;;
+            pr)        [[ ( $# -eq 1 || $# -eq 2 ) && -n "$1" ]] || usage; pr_url="$1"
+                       message_file="${2:-}"
+                       [[ -z "$message_file" || -f "$message_file" ]] \
+                           || { echo "error: message file not found: '$message_file'" >&2; exit 2; } ;;
             escalated) [[ $# -eq 0 ]] || usage ;;
             failed)    [[ $# -eq 1 ]] || usage; message_file="$1"
                        [[ -f "$message_file" ]] || { echo "error: message file not found: '$message_file'" >&2; exit 2; } ;;
@@ -295,8 +303,16 @@ do_release() {
     case "$outcome" in
         pr)
             edit_args+=(--remove-label "$READY_LABEL" --add-label "$PR_LABEL")
-            printf '%s\nQueue runner opened %s for this issue.\n\n%s\n' \
-                "$COMMENT_MARKER" "$pr_url" "$tokens_line" > "$body"
+            {
+                printf '%s\nQueue runner opened %s for this issue.\n\n' "$COMMENT_MARKER" "$pr_url"
+                if [[ -n "$message_file" ]]; then
+                    edit_args+=(--add-label "$HUMAN_LABEL")
+                    printf 'It needs a human before it can be merged; it has `%s`.\n\n' "$HUMAN_LABEL"
+                    cat "$message_file"
+                    echo
+                fi
+                echo "$tokens_line"
+            } > "$body"
             comment "$issue" "$body"
             ;;
         escalated)

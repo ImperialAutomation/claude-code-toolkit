@@ -323,6 +323,36 @@ check "second release: header is still the first line" "1" "$(grep -c "^date" "$
 run claim
 check "pr: no later iteration claims it (would open a second PR)" "" "$OUT"
 
+echo "== 7b. release pr with a message: needs-human, PR kept =="
+reset_stub
+issue 3 2026-01-01 agent-ready agent-wip
+NOTE="$T/review-error.md"
+printf 'review not posted (files: no token for o/r)\n' > "$NOTE"
+run --tokens "$TOK" --review error release 3 pr https://github.com/o/r/pull/77 "$NOTE"
+check "pr+message: exit 0" "0" "$RC"
+check "pr+message: agent-pr and needs-human, agent-wip dropped" "agent-pr needs-human" "$(labels_of 3)"
+check "pr+message: one queue-runner comment" "1" "$(grep -c '^<!-- queue-runner -->$' "$STUB/comments/3" 2>/dev/null || echo 0)"
+check "pr+message: comment links the PR" "yes" "$(contains "$(comments_of 3)" "https://github.com/o/r/pull/77")"
+check "pr+message: comment holds the message" "yes" "$(contains "$(comments_of 3)" "no token for o/r")"
+check "pr+message: comment names needs-human" "yes" "$(contains "$(comments_of 3)" "needs-human")"
+check "pr+message: comment carries the totals" "yes" "$(contains "$(comments_of 3)" "$TOK_LINE")"
+check "pr+message: logged as pr with its PR" \
+    $'3\tpr\thttps://github.com/o/r/pull/77\t42\t94872\t1470008\t14878\t3\tsess-1' "$(log_rows)"
+check "pr+message: review column says error" "error" "$(review_rows | cut -f1)"
+run claim
+check "pr+message: not claimed again" "" "$OUT"
+
+reset_stub
+issue 3 2026-01-01 agent-ready agent-wip
+run release 3 pr https://github.com/o/r/pull/77 "$T/no-such-file.md"
+check "pr+missing message file: exit 2" "2" "$RC"
+check "pr+missing message file: labels untouched" "agent-ready agent-wip" "$(labels_of 3)"
+check "pr+missing message file: no gh call" "no" "$([[ -e "$STUB/calls" ]] && echo yes || echo no)"
+run release 3 pr https://github.com/o/r/pull/77 "$NOTE" extra
+check "pr with two extra arguments: exit 2" "2" "$RC"
+run release 3 pr https://github.com/o/r/pull/77
+check "pr without a message: no needs-human" "no" "$(has 3 needs-human)"
+
 reset_stub
 # A human puts agent-ready back (PR closed unmerged) but leaves agent-pr.
 issue 3 2026-01-01 agent-ready agent-pr
