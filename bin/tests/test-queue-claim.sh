@@ -7,8 +7,9 @@
 # Only `gh` is a stub, put first on PATH. It keeps a tiny issue tracker in
 # $STUB/issues/<N>/: `labels` (one per line), `created` (ISO date) and `state`
 # (OPEN when absent). It answers the four calls queue-claim.sh makes:
-#   gh issue list ... --label agent-ready ... --json ...   open agent-ready
-#       issues as JSON, NEWEST first on purpose (the script must sort);
+#   gh issue list ... --label <L> ... --json ...   open issues with label <L>
+#       (agent-ready, or agent-rework for claim --rework) as JSON, NEWEST
+#       first on purpose (the script must sort);
 #   gh issue view <N> --json state,labels
 #   gh issue edit <N> [--add-label X]... [--remove-label X]...
 #   gh issue comment <N> --body-file <file>   appended to $STUB/comments/<N>
@@ -80,11 +81,15 @@ if [[ "$filter" != "." && ( "$cmd" == "list" || "$cmd" == "view" ) ]]; then
 fi
 case "$cmd" in
     list)
-        case " $* " in *" --label agent-ready "*) ;; *) echo "list without --label agent-ready" >&2; exit 1 ;; esac
+        want=""
+        for ((i = 0; i < ${#args[@]}; i++)); do
+            [[ "${args[i]}" == "--label" ]] && want="${args[i + 1]}"
+        done
+        [[ -n "$want" ]] || { echo "list without --label" >&2; exit 1; }
         out='[]'
         # newest first, like gh's default order
         for d in $(ls "$I" 2>/dev/null); do
-            [[ "$(state_of "$d")" == "OPEN" ]] && has_label "$d" agent-ready || continue
+            [[ "$(state_of "$d")" == "OPEN" ]] && has_label "$d" "$want" || continue
             out=$(jq --argjson n "$d" --arg c "$(cat "$I/$d/created")" \
                     --argjson l "$(labels_json "$d")" \
                     '. + [{number: $n, createdAt: $c, labels: $l}]' <<< "$out")
@@ -182,6 +187,9 @@ check "--help exits 0" "0" "$RC"
 check "--help prints usage" "yes" "$(contains "$OUT" "sage")"
 check "--help names agent-failed" "yes" "$(contains "$OUT" "agent-failed")"
 check "--help names agent-pr" "yes" "$(contains "$OUT" "agent-pr")"
+check "--help names agent-rework" "yes" "$(contains "$OUT" "agent-rework")"
+check "--help names claim --rework" "yes" "$(contains "$OUT" "claim --rework")"
+check "--help names release rework" "yes" "$(contains "$OUT" "rework <url>")"
 check "--help names --tokens" "yes" "$(contains "$OUT" "--tokens")"
 check "--help names QUEUE_RUNS_LOG" "yes" "$(contains "$OUT" "QUEUE_RUNS_LOG")"
 for opt in --review --review-final --review-findings --review-tokens --fix-tokens; do
@@ -525,16 +533,148 @@ issue 3 2026-01-01 agent-ready agent-wip
 run release 3 escalated
 check "unknown header: left alone" $'something\telse' "$(head -1 "$QUEUE_RUNS_LOG")"
 
+echo "== 11d. claim --rework (#300) =="
+reset_stub
+issue 1 2026-01-01 agent-rework agent-pr agent-wip
+issue 2 2026-01-02 agent-rework agent-pr needs-human
+issue 3 2026-01-03 agent-rework epic
+issue 4 2025-12-01 agent-ready
+issue 5 2026-01-05 agent-rework agent-pr
+issue 6 2026-01-04 agent-rework agent-pr agent-failed
+issue 8 2026-01-08 agent-rework agent-pr
+run claim --rework
+check "rework: exit 0" "0" "$RC"
+check "rework: oldest claimable agent-rework issue (agent-failed is a retry)" "6" "$OUT"
+check "rework: claimed with agent-wip" "agent-failed agent-pr agent-rework agent-wip" "$(labels_of 6)"
+check "rework: agent-wip issue keeps its single claim" "agent-pr agent-rework agent-wip" "$(labels_of 1)"
+check "rework: needs-human issue not claimed" "no" "$(has 2 agent-wip)"
+check "rework: epic not claimed" "no" "$(has 3 agent-wip)"
+check "rework: an older agent-ready issue is not taken" "no" "$(has 4 agent-wip)"
+check "rework: newer rework issue untouched" "no" "$(has 5 agent-wip)"
+check "rework: listed the agent-rework label" "yes" "$(contains "$(cat "$STUB/calls")" "--label agent-rework")"
+run claim --rework
+check "rework: next call takes the next one" "5" "$OUT"
+
+reset_stub
+issue 4 2026-01-01 agent-ready
+run claim --rework
+check "rework, none waiting: prints nothing" "" "$OUT"
+check "rework, none waiting: exit 0" "0" "$RC"
+check "rework, none waiting: agent-ready issue untouched" "agent-ready" "$(labels_of 4)"
+
+reset_stub
+issue 3 2026-01-01 agent-rework agent-pr
+issue 4 2026-01-02 agent-rework agent-pr
+hook after-list "echo agent-wip >> \"\$STUB/issues/3/labels\""
+run claim --rework
+check "rework, race before: claims the next issue" "4" "$OUT"
+
+reset_stub
+issue 3 2026-01-01 agent-rework agent-pr
+issue 4 2026-01-02 agent-rework agent-pr
+hook after-claim-3 "echo needs-human >> \"\$STUB/issues/3/labels\""
+run claim --rework
+check "rework, race after: claims the next issue" "4" "$OUT"
+check "rework, race after: #3 released again" "no" "$(has 3 agent-wip)"
+
+reset_stub
+issue 3 2026-01-01 agent-rework agent-pr
+hook after-claim-3 "grep -vxF agent-rework \"\$STUB/issues/3/labels\" > \"\$STUB/l\"; mv \"\$STUB/l\" \"\$STUB/issues/3/labels\""
+run claim --rework
+check "rework, label removed while claiming: nothing claimed" "" "$OUT"
+check "rework, label removed while claiming: no claim left" "no" "$(has 3 agent-wip)"
+
+echo "== 11e. plain claim never takes agent-rework =="
+reset_stub
+issue 1 2026-01-01 agent-ready agent-rework
+issue 2 2026-01-02 agent-rework agent-pr
+issue 3 2026-01-03 agent-ready
+run claim
+check "plain claim skips an agent-rework issue" "3" "$OUT"
+check "plain claim: agent-rework issue untouched" "no" "$(has 1 agent-wip)"
+reset_stub
+issue 2 2026-01-02 agent-rework agent-pr
+run claim
+check "plain claim with only rework waiting: prints nothing" "" "$OUT"
+
+echo "== 11f. release rework =="
+reset_stub
+issue 3 2026-01-01 agent-pr agent-rework agent-wip
+run --tokens "$TOK" --review-final APPROVE --fix-tokens "$FIXTOK" --review-tokens "$REVTOK" \
+    release 3 rework https://github.com/o/r/pull/77
+check "rework: exit 0" "0" "$RC"
+check "rework: agent-rework and agent-wip swapped for agent-pr" "agent-pr" "$(labels_of 3)"
+check "rework: one queue-runner comment" "1" "$(grep -c '^<!-- queue-runner -->$' "$STUB/comments/3" 2>/dev/null || echo 0)"
+check "rework: comment links the PR" "yes" "$(contains "$(comments_of 3)" "https://github.com/o/r/pull/77")"
+check "rework: comment carries the totals" "yes" "$(contains "$(comments_of 3)" "$TOK_LINE")"
+check "rework: comment has no needs-human" "no" "$(contains "$(comments_of 3)" "needs-human")"
+check "rework: row has outcome rework and its PR" \
+    $'3\trework\thttps://github.com/o/r/pull/77\t42\t94872\t1470008\t14878\t3\tsess-1' "$(log_rows)"
+check "rework: review columns filled" \
+    $'\tAPPROVE\t\t10\t20\t30\t40\t2\t5\t6\t7\t8\t1' "$(review_rows)"
+run claim --rework
+check "rework released: not claimed again" "" "$OUT"
+run claim
+check "rework released: plain claim does not take it either" "" "$OUT"
+check "rework release counts in queue-budget.sh gate" "budget 1/2" \
+    "$(bash "$SCRIPT_DIR/../queue-budget.sh" gate 2 2>/dev/null)"
+bash "$SCRIPT_DIR/../queue-budget.sh" gate 1 >/dev/null 2>&1
+check "rework release uses up a budget of 1" "1" "$?"
+
+reset_stub
+issue 3 2026-01-01 agent-rework agent-wip
+run release 3 rework https://github.com/o/r/pull/77
+check "rework without agent-pr on the issue: agent-pr added" "agent-pr" "$(labels_of 3)"
+
+reset_stub
+issue 3 2026-01-01 agent-pr agent-rework agent-wip
+NOTE="$T/rework-note.md"
+printf 'Re-review stayed BLOCKING: https://github.com/o/r/pull/77#pullrequestreview-9\n' > "$NOTE"
+run --review-final BLOCKING release 3 rework https://github.com/o/r/pull/77 "$NOTE"
+check "rework+note: exit 0" "0" "$RC"
+check "rework+note: agent-pr and needs-human, no agent-rework" "agent-pr needs-human" "$(labels_of 3)"
+check "rework+note: comment holds the note" "yes" "$(contains "$(comments_of 3)" "pullrequestreview-9")"
+check "rework+note: comment names needs-human" "yes" "$(contains "$(comments_of 3)" "needs-human")"
+check "rework+note: outcome rework" "rework" "$(tail -1 "$QUEUE_RUNS_LOG" | cut -f3)"
+run claim --rework
+check "rework+note: not claimed again" "" "$OUT"
+
+echo "== 11g. failed and escalated rework keep agent-rework =="
+reset_stub
+issue 3 2026-01-01 agent-pr agent-rework agent-wip
+run release 3 failed "$MSG"
+check "rework failed once: agent-rework kept, agent-failed added" "agent-failed agent-pr agent-rework" "$(labels_of 3)"
+check "rework failed once: logged as failed" "failed" "$(tail -1 "$QUEUE_RUNS_LOG" | cut -f3)"
+run claim --rework
+check "rework failed once: claimed again for its retry" "3" "$OUT"
+run release 3 failed "$MSG"
+check "rework failed twice: agent-rework kept, needs-human added" \
+    "agent-failed agent-pr agent-rework needs-human" "$(labels_of 3)"
+run claim --rework
+check "rework failed twice: not claimed again" "" "$OUT"
+
+reset_stub
+issue 3 2026-01-01 agent-pr agent-rework agent-wip
+run release 3 escalated
+check "rework escalated: agent-rework kept, needs-human added" "agent-pr agent-rework needs-human" "$(labels_of 3)"
+check "rework escalated: logged as escalated" "escalated" "$(tail -1 "$QUEUE_RUNS_LOG" | cut -f3)"
+run claim --rework
+check "rework escalated: not claimed until the human removes needs-human" "" "$OUT"
+grep -vxF needs-human "$STUB/issues/3/labels" > "$T/l"; mv "$T/l" "$STUB/issues/3/labels"
+run claim --rework
+check "rework escalated, needs-human removed (D3 route): claimed again" "3" "$OUT"
+
 echo "== 12. release: exit 0 and no temp file left, every outcome =="
 # The comment body is a mktemp file; its EXIT trap must still find it once
 # do_release's locals are gone (set -u turned that into a non-zero exit).
 export TMPDIR="$T/tmpdir"
-for outcome in pr escalated failed; do
+for outcome in pr rework escalated failed; do
     reset_stub
     rm -rf "$TMPDIR"; mkdir -p "$TMPDIR"
     issue 3 2026-01-01 agent-ready agent-wip
     case "$outcome" in
         pr)        run release 3 pr https://github.com/o/r/pull/77 ;;
+        rework)    run release 3 rework https://github.com/o/r/pull/77 ;;
         escalated) run release 3 escalated ;;
         failed)    run release 3 failed "$MSG" ;;
     esac
@@ -588,6 +728,18 @@ run --fix-tokens "$TOK" claim
 check "--fix-tokens with claim: exit 2" "2" "$RC"
 run --review-tokens
 check "--review-tokens without a value: exit 2" "2" "$RC"
+run claim --rework extra
+check "claim --rework with an extra argument: exit 2" "2" "$RC"
+run claim --bogus
+check "claim with an unknown flag: exit 2" "2" "$RC"
+run --tokens "$TOK" claim --rework
+check "--tokens with claim --rework: exit 2" "2" "$RC"
+run release 3 rework
+check "rework without url: exit 2" "2" "$RC"
+run release 3 rework https://github.com/o/r/pull/77 "$T/nope.md"
+check "rework with missing message file: exit 2" "2" "$RC"
+run release 3 rework https://github.com/o/r/pull/77 "$MSG" extra
+check "rework with two extra arguments: exit 2" "2" "$RC"
 check "usage errors posted no comment" "" "$(comments_of 3)"
 check "usage errors wrote no log row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
 check "usage errors changed nothing" "agent-ready agent-wip" "$(labels_of 3)"

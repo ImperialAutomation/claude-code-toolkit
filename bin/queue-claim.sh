@@ -2,8 +2,9 @@
 # queue-claim.sh: claim and release issues of the agent queue (queue runner).
 #
 # Usage:
-#   queue-claim.sh [--repo <dir>] claim
+#   queue-claim.sh [--repo <dir>] claim [--rework]
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> pr <url> [<message-file>]
+#   queue-claim.sh [--repo <dir>] [<release-options>] release <N> rework <url> [<message-file>]
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> escalated
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> failed <message-file>
 #
@@ -40,15 +41,19 @@
 # release.
 #
 # claim     Takes the oldest open `agent-ready` issue (by creation date) that
-#           has none of `agent-wip`, `needs-human`, `epic` or `agent-pr`, adds
-#           `agent-wip` and prints its number. Prints nothing when the queue is
-#           empty.
+#           has none of `agent-wip`, `needs-human`, `epic`, `agent-pr` or
+#           `agent-rework`, adds `agent-wip` and prints its number. Prints
+#           nothing when the queue is empty.
 #           Labels are not atomic, so each candidate is re-read right before
 #           and right after the claim: claimed by someone else in between,
 #           skip it; no longer claimable after our claim (closed, escalated,
 #           made an epic), drop our `agent-wip` again. Either way the next
 #           candidate is tried. An `agent-failed` issue is claimable: that is
 #           its one retry.
+# claim --rework
+#           The same, for the oldest open `agent-rework` issue that has none
+#           of `agent-wip`, `needs-human`, `epic` (#300, D4). Only a human sets
+#           `agent-rework`, on an issue whose agent PR needs another round.
 # release   Ends a claim; every outcome drops `agent-wip`:
 #   pr <url>               comments with the PR link and swaps `agent-ready`
 #                          for `agent-pr`, so no later claim opens a second
@@ -60,7 +65,15 @@
 #                          file's text (why a human must look, e.g. a review
 #                          that could not be posted) in the comment. The PR is
 #                          kept; only the human decides what happens next.
-#   escalated              /refine or the escalation hook already posted the
+#   rework <url> [<message-file>]
+#                          after a rework round on the existing PR <url>:
+#                          comments like `pr` and swaps `agent-rework` for
+#                          `agent-pr`. With a message file it also adds
+#                          `needs-human` (a re-review that stayed BLOCKING or
+#                          says HUMAN, or a finding left for the human). A
+#                          failed or escalated rework uses `failed` or
+#                          `escalated`, which keep `agent-rework` (#300, D5).
+#   escalated             /refine or the escalation hook already posted the
 #                          question; adds `needs-human` only when it is missing
 #                          (with a warning), so the issue is never re-claimed.
 #                          Comments only the token line; /refine never reads a
@@ -84,9 +97,12 @@ HUMAN_LABEL="needs-human"
 EPIC_LABEL="epic"
 FAILED_LABEL="agent-failed"
 PR_LABEL="agent-pr"
+REWORK_LABEL="agent-rework"
 # Labels that make an agent-ready issue unclaimable (#188, D7 for epic; #263
-# for agent-pr).
-SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL" "$PR_LABEL")
+# for agent-pr; #300 for agent-rework, which only claim --rework takes).
+SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL" "$PR_LABEL" "$REWORK_LABEL")
+# Labels that make an agent-rework issue unclaimable (#300, D4).
+REWORK_SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL")
 # gh issue list returns 30 issues by default; the queue is never this long.
 GH_FETCH_LIMIT=200
 COMMENT_MARKER="<!-- queue-runner -->"
@@ -107,7 +123,7 @@ FIX_PREFIX="fix_"
 REVIEW_VERDICTS=(APPROVE BLOCKING HUMAN error)
 
 usage() {
-    echo "usage: $(basename "$0") [--repo <dir>] claim | [<release-options>] release <N> pr <url> [<message-file>] | ... release <N> escalated | ... release <N> failed <message-file> (see --help)" >&2
+    echo "usage: $(basename "$0") [--repo <dir>] claim [--rework] | [<release-options>] release <N> pr|rework <url> [<message-file>] | ... release <N> escalated | ... release <N> failed <message-file> (see --help)" >&2
     exit 2
 }
 
@@ -187,7 +203,14 @@ command="$1"; shift
 # Validate all arguments before touching anything.
 case "$command" in
     claim)
-        [[ $# -eq 0 ]] || usage
+        claim_label="$READY_LABEL"
+        claim_skip=("${SKIP_LABELS[@]}")
+        if [[ $# -eq 1 && "$1" == "--rework" ]]; then
+            claim_label="$REWORK_LABEL"
+            claim_skip=("${REWORK_SKIP_LABELS[@]}")
+        elif [[ $# -ne 0 ]]; then
+            usage
+        fi
         $release_options && { echo "error: --tokens, --review* and --fix-tokens belong to release" >&2; usage; }
         ;;
     release)
@@ -195,7 +218,7 @@ case "$command" in
         issue="$1"; outcome="$2"; shift 2
         [[ "$issue" =~ ^[0-9]+$ ]] || { echo "error: issue must be a number: '$issue'" >&2; usage; }
         case "$outcome" in
-            pr)        [[ ( $# -eq 1 || $# -eq 2 ) && -n "$1" ]] || usage; pr_url="$1"
+            pr|rework) [[ ( $# -eq 1 || $# -eq 2 ) && -n "$1" ]] || usage; pr_url="$1"
                        message_file="${2:-}"
                        [[ -z "$message_file" || -f "$message_file" ]] \
                            || { echo "error: message file not found: '$message_file'" >&2; exit 2; } ;;
@@ -246,12 +269,13 @@ labels_of() {
         --jq '"state:" + .state, .labels[].name'
 }
 
-# claimable <labels-of-output>: open, agent-ready, and no skip label.
+# claimable <labels-of-output>: open, the claim label (agent-ready, or
+# agent-rework for claim --rework), and no skip label of that claim.
 claimable() {
     grep -qxF "state:OPEN" <<< "$1" || return 1
-    grep -qxF -- "$READY_LABEL" <<< "$1" || return 1
+    grep -qxF -- "$claim_label" <<< "$1" || return 1
     local l
-    for l in "${SKIP_LABELS[@]}"; do
+    for l in "${claim_skip[@]}"; do
         grep -qxF -- "$l" <<< "$1" && return 1
     done
     return 0
@@ -259,13 +283,13 @@ claimable() {
 
 do_claim() {
     local skip_filter candidates n before after
-    skip_filter=$(printf '"%s",' "${SKIP_LABELS[@]}"); skip_filter="[${skip_filter%,}]"
-    candidates=$(gh issue list --state open --label "$READY_LABEL" \
+    skip_filter=$(printf '"%s",' "${claim_skip[@]}"); skip_filter="[${skip_filter%,}]"
+    candidates=$(gh issue list --state open --label "$claim_label" \
             --search "sort:created-asc" --limit "$GH_FETCH_LIMIT" \
             --json number,createdAt,labels \
             --jq "map(select([.labels[].name] - $skip_filter == [.labels[].name]))
                   | sort_by(.createdAt, .number) | .[].number") \
-        || gh_fail "list the open '$READY_LABEL' issues"
+        || gh_fail "list the open '$claim_label' issues"
 
     for n in $candidates; do
         # The list may be stale: someone may have claimed it since.
@@ -294,17 +318,23 @@ comment() {
 }
 
 do_release() {
-    local body labels edit_args
+    local body labels edit_args what
     body=$(mktemp)
     # Expanded now: the EXIT trap fires after this local is gone (set -u).
     trap "rm -f '$body'" EXIT
     edit_args=(--remove-label "$WIP_LABEL")
 
     case "$outcome" in
-        pr)
-            edit_args+=(--remove-label "$READY_LABEL" --add-label "$PR_LABEL")
+        pr|rework)
+            if [[ "$outcome" == pr ]]; then
+                edit_args+=(--remove-label "$READY_LABEL" --add-label "$PR_LABEL")
+                what="opened $pr_url for this issue"
+            else
+                edit_args+=(--remove-label "$REWORK_LABEL" --add-label "$PR_LABEL")
+                what="reworked $pr_url; the round is listed in its last queue-runner comment on the PR"
+            fi
             {
-                printf '%s\nQueue runner opened %s for this issue.\n\n' "$COMMENT_MARKER" "$pr_url"
+                printf '%s\nQueue runner %s.\n\n' "$COMMENT_MARKER" "$what"
                 if [[ -n "$message_file" ]]; then
                     edit_args+=(--add-label "$HUMAN_LABEL")
                     printf 'It needs a human before it can be merged; it has `%s`.\n\n' "$HUMAN_LABEL"
