@@ -266,6 +266,13 @@ _SQL_DESTRUCTIVE_RE='(^|[^[:alnum:]_])(DROP[[:space:]]+(TABLE|DATABASE|SCHEMA)|D
 _SQL_DELETE_RE='(^|[^[:alnum:]_])DELETE[[:space:]]+FROM([^[:alnum:]_]|$)'
 _SQL_WHERE_RE='(^|[^[:alnum:]_])WHERE([^[:alnum:]_]|$)'
 
+# The release guard (see "Guard: releases are the human's act" below). The
+# prefilter decides whether the command is worth starting Python for: git or gh
+# as a word, not inside a name like git-commit.sh or .gitignore.
+_RELEASE_PREFILTER_RE='(^|[^[:alnum:]_.-])(git|gh)([^[:alnum:]_.-]|$)'
+_RELEASE_GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/release_guard.py"
+readonly _RELEASE_REFUSED=10
+
 _sql_destructive_hit() {
     local segment
     while IFS= read -r segment; do
@@ -303,7 +310,7 @@ _sql_destructive_hit() {
 # Listed in one place rather than checked at each use, so a guard added later is
 # covered by adding its constant here instead of re-deriving the reasoning.
 for _required in _READONLY_LEADER_RE _INTERPRETER_LEADER_RE _SQL_DESTRUCTIVE_RE \
-                 _SQL_DELETE_RE _SQL_WHERE_RE; do
+                 _SQL_DELETE_RE _SQL_WHERE_RE _RELEASE_PREFILTER_RE; do
     # This emptiness check is kept for its DIAGNOSIS, not because it is the only
     # thing standing between an empty pattern and a fail-open. Mutation testing
     # showed both broken-constant cases still block without it, but each for a
@@ -412,68 +419,53 @@ CASE_SENSITIVE_PATTERNS=(
     "git branch.*-D"
 )
 
-# Guard: never auto-merge a PR into a protected base branch.
-# Blocks git-push-pr-merge.sh targeting develop/master/main UNLESS --no-merge is set.
-# Epic sub-issue PRs (--base <feature_branch>) are unaffected; only the shared
-# integration branches are protected. The agent must leave those PRs for the user
-# to review and merge manually. See implement / implement-epic skill rules.
-if echo "$COMMAND" | grep -qE 'git-push-pr-merge\.sh'; then
-    if echo "$COMMAND" | grep -qE -- '--base[= ]+(develop|master|main)([[:space:]]|$)'; then
-        if ! echo "$COMMAND" | grep -qE -- '--no-merge'; then
-            echo "BLOCKED by hook-block-destructive.sh: refusing to auto-merge a PR into a protected base branch (develop/master/main). This repo has no server-side branch protection (private/free tier), so merges to integration branches are the user's call. Re-run with --no-merge to open the PR for review, or ask the user to merge it." >&2
-            exit 2
-        fi
-    fi
-fi
-
-# Guard: never run a raw `git merge` while ON a protected base branch.
-# Merging INTO feature/epic branches is fine (that is the normal sync direction,
-# e.g. develop -> epic branch). But a merge whose TARGET is develop/master/main
-# must go through a reviewed PR the user merges manually — this repo has no
-# server-side branch protection (private/free tier). A static permission pattern
-# can't see the current branch, so the check lives here. The sanctioned wrapper
-# git-merge-branch.sh enforces the same rule; this catches raw `git merge` too.
+# Guard: releases are the human's act (#312). An agent acts on GitHub as the
+# human's own account, so no server-side setting can tell the two apart; this
+# hook is the only layer that can. bin/lib/release_guard.py refuses, per command
+# segment:
+#   - `git merge` while the target repo is on a protected branch
+#   - `git push` to a protected branch, explicit or resolved from the current
+#     branch's push config, and every tag push
+#   - `gh pr merge` and `gh api` merges into a protected base
+#   - `gh workflow run`, `gh run rerun` and workflow dispatches through the API
+#   - `gh release create`, publishing a draft, and release or ref creation
+#     through the API
+# Protected = develop, master, main, plus the target repo's own list from
+# bin/lib/protected-branches.sh, the source git-commit.sh and
+# git-push-pr-merge.sh read too. git-push-pr-merge.sh refuses a protected
+# --base itself, which is why no guard on its command line lives here: the
+# script reads the repo's full list, this hook would only see the text.
 #
-# Only match `git merge` when it STARTS a command segment — at line start or
-# right after a separator (; && || | & newline). This avoids false positives
-# where the substring "git merge" appears inside a quoted argument, e.g. a
-# commit message (git-commit.sh "feat: block raw git merge ...") or an echo.
-# We can't fully parse the shell, but anchoring to segment boundaries kills the
-# common cases. A leading-whitespace-after-separator allowance keeps it matching
-# `... && git merge ...`. Note `--no-edit` etc. are still caught (trailing \b).
-if echo "$COMMAND" | grep -qE '(^|[;&|]|&&|\|\|)[[:space:]]*git[[:space:]]+merge([[:space:]]|$)'; then
-    CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true)
-    case "$CURRENT_BRANCH" in
-        develop|master|main)
-            echo "BLOCKED by hook-block-destructive.sh: refusing 'git merge' while on protected branch '$CURRENT_BRANCH'. Merges INTO develop/master/main must go through a reviewed PR the user merges manually. To sync changes the other way (e.g. develop into a feature/epic branch), checkout that branch first — git-merge-branch.sh <source> does this with the same guard." >&2
+# The guard is Python because it has to PARSE the command, not match text: a
+# shlex tokenizer keeps quoted text an argument (a commit message naming
+# `git push origin main` is not a push), and it sees through the forms agents
+# actually use: `git -C <dir>`, `git -c k=v`, `env` prefixes, `cd x &&`, and
+# the wrappers cmd-save.sh, repeat-cmd.sh and venv-run.sh. It shares that
+# parsing with hook-auto-approve-bash.py and commit_target.py.
+#
+# The target repository is the one the command names (-C, env -C, cd), else the
+# cwd Claude Code reports for the call. Not the hook's own working directory:
+# reading the branch from there judged `git -C <worktree> merge` by whatever
+# tree the hook happened to start in.
+#
+# Python runs only when the command mentions git or gh as a word, so the common
+# Bash call pays nothing. Heredoc bodies are dropped first under the same rules
+# as every other guard here. Exit 10 is a refusal with the reason on stdout;
+# any other non-zero exit is the guard failing, and fails closed. The prefilter
+# regex and the guard's path are defined with the other constants above, so the
+# regex assertions cover the prefilter too.
+if grep -qE "$_RELEASE_PREFILTER_RE" <<< "$COMMAND"; then
+    _cwd=$(echo "$INPUT" | jq -r '.cwd // empty')
+    _rc=0
+    _reason=$(_strip_heredoc_bodies | python3 "$_RELEASE_GUARD" "${_cwd:-$PWD}" 2>&1) || _rc=$?
+    case "$_rc" in
+        0) ;;
+        "$_RELEASE_REFUSED")
+            echo "BLOCKED by hook-block-destructive.sh: $_reason" >&2
             exit 2
             ;;
-    esac
-fi
-
-# Guard: never merge a PR into a protected base branch via raw `gh pr merge`.
-# Mirrors the git-push-pr-merge.sh guard above, but for the bare gh CLI, which
-# carries no --base (the PR already knows its base). We resolve the PR's base via
-# the API: an explicit PR number/URL as the gh arg, else the PR for the current
-# branch. Merges into a feature/epic base stay allowed (epic flow); only
-# develop/master/main are the user's call to merge manually. On any lookup
-# failure we fail closed (block) — a merge command we can't classify is exactly
-# the one to stop. Only matches `gh pr merge` at a command-segment boundary, so
-# the substring inside a quoted arg (commit message, echo) is not caught.
-if echo "$COMMAND" | grep -qE '(^|[;&|]|&&|\|\|)[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
-    # Extract an explicit PR ref (number or URL) following `gh pr merge`, if any.
-    PR_REF=$(echo "$COMMAND" | grep -oE 'gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+[^[:space:]]+' | awk '{print $4}' || true)
-    case "$PR_REF" in
-        -*) PR_REF="" ;;  # a flag, not a PR ref → fall back to current branch
-    esac
-    PR_BASE=$(gh pr view ${PR_REF:+"$PR_REF"} --json baseRefName --jq '.baseRefName' 2>/dev/null || true)
-    if [ -z "$PR_BASE" ]; then
-        echo "BLOCKED by hook-block-destructive.sh: refusing 'gh pr merge' — could not resolve the PR's base branch to verify it isn't a protected one (develop/master/main). Merges into integration branches are the user's call; this repo has no server-side branch protection. Ask the user to merge it." >&2
-        exit 2
-    fi
-    case "$PR_BASE" in
-        develop|master|main)
-            echo "BLOCKED by hook-block-destructive.sh: refusing 'gh pr merge' into protected base branch '$PR_BASE'. Merges into develop/master/main must go through a PR the user reviews and merges manually (HIL). Leave the PR open for the user." >&2
+        *)
+            echo "BLOCKED by hook-block-destructive.sh: the release guard itself failed (exit $_rc) and cannot say whether this command merges, pushes or releases. Failing closed. This is a bug in the hook, not in the command; report it rather than working around it. Output: $_reason" >&2
             exit 2
             ;;
     esac
