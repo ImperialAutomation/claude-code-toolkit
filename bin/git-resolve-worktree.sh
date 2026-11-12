@@ -100,18 +100,11 @@ if [[ -z "$CURRENT_ROOT" ]]; then
     exit 1
 fi
 
-# Collect the repository's worktrees as `<path>\t<branch>` lines. --porcelain is
-# the stable machine format; a detached worktree gets an empty branch field
-# rather than being dropped, so it can still be matched by path and can still be
-# listed as a candidate.
-WORKTREES=$(
-    git worktree list --porcelain 2>/dev/null |
-    awk '
-        /^worktree /        { if (path != "") print path "\t" branch; path = substr($0, 10); branch = "" }
-        /^branch refs\/heads\// { branch = substr($0, 19) }
-        END                 { if (path != "") print path "\t" branch }
-    '
-)
+# Collect the repository's worktrees as `<path>\t<branch>\t...` lines (see
+# worktree_list); only the first two fields are used here. A detached worktree
+# gets an empty branch field rather than being dropped, so it can still be
+# matched by path and can still be listed as a candidate.
+WORKTREES=$(worktree_list)
 
 field() { # line index
     printf '%s' "$1" | cut -f"$2"

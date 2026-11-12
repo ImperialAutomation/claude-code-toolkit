@@ -19,7 +19,10 @@
 #
 # The live checkout is the MAIN worktree whose top level equals
 # dirname(readlink -f ~/.claude/bin). When ~/.claude/bin is not a symlink,
-# nothing is live and both functions report nothing.
+# nothing is live: live_checkout_root prints nothing and is_live_repo fails.
+#
+# worktree_list and main_worktree_root are the shared parsers of
+# `git worktree list --porcelain` for every script that needs one.
 
 # Print the live checkout's absolute top level, or nothing when there is none.
 live_checkout_root() {
@@ -32,10 +35,41 @@ live_checkout_root() {
 
     # Only the main worktree counts: a symlink pointing into a linked worktree
     # is unusual, but treating that tree as live would forbid working in it.
-    main_root=$(git -C "$root" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+    main_root=$(main_worktree_root "$root")
     [[ "$main_root" == "$root" ]] || return 0
 
     printf '%s\n' "$root"
+}
+
+# Print one `<path>\t<branch>\t<locked>\t<prunable>` line per worktree of the
+# repository at <dir> (default: the current directory), the main worktree first.
+# <branch> is empty for a detached worktree; <locked> is "locked" or empty;
+# <prunable> is "prunable" (registered, but its directory is gone) or empty.
+# --porcelain is git's stable machine format; this is its one parser.
+worktree_list() { # [dir]
+    git -C "${1:-.}" worktree list --porcelain 2>/dev/null | awk '
+        function out() { if (p != "") print p "\t" b "\t" l "\t" r }
+        /^worktree /            { out(); p = substr($0, 10); b = ""; l = ""; r = "" }
+        /^branch refs\/heads\// { b = substr($0, 19) }
+        /^locked/               { l = "locked" }
+        /^prunable/             { r = "prunable" }
+        END                     { out() }'
+}
+
+# Print the main worktree's path of the repository at <dir> (default: the
+# current directory), or nothing outside a repository.
+main_worktree_root() { # [dir]
+    worktree_list "${1:-.}" | awk -F'\t' 'NR == 1 { print $1 }'
+}
+
+# Succeed when the main worktree of the repository at <dir> (default: the
+# current directory) is the live checkout, from any of its worktrees.
+is_live_repo() { # [dir]
+    local live main
+    live=$(live_checkout_root)
+    [[ -n "$live" ]] || return 1
+    main=$(main_worktree_root "${1:-.}")
+    [[ "$main" == "$live" ]]
 }
 
 # Print the base branch of the repository at <dir>: origin/HEAD's target when

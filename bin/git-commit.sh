@@ -1,45 +1,69 @@
 #!/usr/bin/env bash
-# git-commit.sh — Commit with a message passed as argument or from stdin.
-#
-# Avoids heredoc/multiline issues in Claude Code sub-agents by writing
-# the message to a temp file and using git commit -F.
+# git-commit.sh: commit with a message passed as arguments, a file or stdin.
 #
 # Usage:
-#   git-commit.sh "Single line commit message"
-#   git-commit.sh "Multi-line" "commit message" "each arg is a line"
-#   echo "message" | git-commit.sh --stdin
+#   git-commit.sh [options] "Single line commit message"
+#   git-commit.sh [options] "Multi-line" "commit message" "each arg is a line"
+#   echo "message" | git-commit.sh [options] --stdin
+#   git-commit.sh [options] --file /tmp/msg.txt
+#   git-commit.sh [options] -- "-a line that starts with a dash"
 #
 # Options:
-#   --file F   Read commit message from file F
-#   --stdin    Read commit message from stdin
+#   --file F   Read the commit message from file F
+#   --stdin    Read the commit message from stdin
 #   --amend    Amend the previous commit (use with caution)
 #   --repo D, --repo=D
-#              Run git in repository directory D (avoids a leading `cd`, which
-#              would break the Bash(~/.claude/bin/*) permission match)
+#              Run git in repository directory D instead of the cwd
 #   --allow-protected
 #              Commit even when the target tree is on a protected branch
+#   -h, --help Print this help and exit, without touching git
+#   --         End of options: every later argument is a message line
+#
+# Argument errors (exit 2, nothing committed, no git call):
+#   - An unknown option. Only option-shaped arguments count: a dash and letters
+#     (-m, -am), or two dashes and a name (--ammend, --add, --foo=bar). Other
+#     lines that start with a dash ("- a bullet", "---", "->", "-1",
+#     "--no-ff note") are message lines. A message line that looks like an
+#     option goes after `--`.
+#   - More than one message source (--file, --stdin, message arguments), or
+#     none. Extra lines are never dropped silently.
+#   - --file or --repo without a value, with an empty value, or followed by
+#     another option instead of a value.
 #
 # Protected branches:
-#   In repos where every change reaches the base branch through a PR, a commit
-#   on develop/master/main is always a mistake. This script refuses it, because
-#   it is the one choke point every agent commit passes through — a check here
-#   runs whether or not the agent remembered the rule.
-#
-#   Which branches are protected is per repo, read from the first source that
-#   exists:
-#     1. <repo>/.claude/protected-branches — one branch name per line; blank
-#        lines and lines starting with # are ignored
+#   A commit on a branch the target repo marks protected is refused (exit 1)
+#   unless --allow-protected is given. The list comes from the first source
+#   that exists:
+#     1. <repo>/.claude/protected-branches, committed: one branch name per
+#        line; blank lines and lines starting with # are ignored
 #     2. git config --get-all toolkit.protectedBranch
-#   Neither present: nothing is protected, which is the default. Repos that
-#   commit straight to main are therefore unaffected.
+#   Neither present: nothing is protected. Names match exactly. Detached HEAD
+#   is always allowed.
 #
-#   Names match exactly, no globbing. Detached HEAD is always allowed (rebase,
-#   bisect, cherry-pick sequences).
+# Exit codes:
+#   0  committed (or --help)
+#   1  refused: protected branch, missing or empty message file, empty
+#      message, or a --repo directory that cannot be entered
+#   2  argument error (see above)
+#   other: the status of the failing `git commit`
 #
-#   Commit the .claude/protected-branches file. Untracked, it exists only in the
-#   tree where it was created, so a linked worktree sees no config and the guard
-#   never fires there, which is exactly where the mistake happens most. The git
-#   config route has no such gap: worktrees share .git/config.
+# A real commit prints git's "[branch abc1234] <subject>" line; without that
+# line nothing was committed.
+
+# Internal notes (not part of --help, which stops at the blank line above).
+#
+# Avoids heredoc/multiline issues in Claude Code sub-agents by writing the
+# message to a temp file and using git commit -F. --repo exists because a
+# leading `cd` would break the Bash(~/.claude/bin/*) permission match.
+#
+# Protected branches: in repos where every change reaches the base branch
+# through a PR, a commit on develop/master/main is always a mistake. This
+# script refuses it because it is the one choke point every agent commit passes
+# through: a check here runs whether or not the agent remembered the rule.
+# Commit the .claude/protected-branches file. Untracked, it exists only in the
+# tree where it was created, so a linked worktree sees no config and the guard
+# never fires there, which is exactly where the mistake happens most. The git
+# config route has no such gap: worktrees share .git/config.
 #
 # Read-only pre-commit cache:
 #   Under the Claude Code sandbox ~/.cache/pre-commit is read-only, and
@@ -58,6 +82,8 @@ set -euo pipefail
 # working directories, and bin/ is reached through a symlink.
 # shellcheck source=bin/lib/strip-sandbox-noise.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/strip-sandbox-noise.sh"
+# shellcheck source=bin/lib/protected-branches.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/protected-branches.sh"
 
 readonly EROFS_MARKER="Read-only file system"
 readonly PRECOMMIT_MARKER="pre-commit"
@@ -107,21 +133,66 @@ REPO_DIR=""
 ALLOW_PROTECTED=""
 MSG_ARGS=()
 
+readonly EXIT_USAGE=2
+# An argument shaped like an option this script does not know: a dash and
+# letters (-m, -am) or two dashes and a name (--ammend, --foo=bar). Taken as a
+# message line it would commit whatever is staged, with the typo as message
+# (#129). Every other dash-led line ("- bullet", "---", "-1") is a message line.
+readonly OPTION_SHAPED_RE='^(-[A-Za-z]+|--[A-Za-z][A-Za-z0-9-]*(=.*)?)$'
+
+# Print the first header comment block (minus the shebang) as the help text;
+# the internal notes after the blank line are not printed.
+print_help() {
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+}
+
+usage_error() { # message
+    echo "Error: $1" >&2
+    echo "Run 'git-commit.sh --help' for usage." >&2
+    exit "$EXIT_USAGE"
+}
+
+# Refuses an empty value (an unset variable: `--repo "$WT"` would otherwise
+# commit in the cwd) and an option in the value's place (`--file --amend`).
+check_value() { # option value
+    [[ -n "$2" ]] || usage_error "$1 requires a value, got an empty one."
+    [[ "$2" != -* ]] || usage_error "$1 requires a value, got the option '$2'."
+}
+
+# Like check_value, and refuses an option given as the last argument instead
+# of letting `set -u` die on an unbound $2.
+take_value() { # option remaining-argc value
+    [[ $2 -ge 2 ]] || usage_error "$1 requires a value."
+    check_value "$1" "$3"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -h|--help)
+            print_help
+            exit 0
+            ;;
+        --)
+            shift
+            MSG_ARGS+=("$@")
+            break
+            ;;
         --stdin)
             FROM_STDIN=1
             shift
             ;;
         --file)
+            take_value "$1" $# "${2-}"
             FROM_FILE="$2"
             shift 2
             ;;
         --repo)
+            take_value "$1" $# "${2-}"
             REPO_DIR="$2"
             shift 2
             ;;
         --repo=*)
+            check_value --repo "${1#--repo=}"
             REPO_DIR="${1#--repo=}"
             shift
             ;;
@@ -134,11 +205,25 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
+            if [[ "$1" =~ $OPTION_SHAPED_RE ]]; then
+                usage_error "unknown option '$1'. A message line that starts with a dash goes after '--'."
+            fi
             MSG_ARGS+=("$1")
             shift
             ;;
     esac
 done
+
+# Exactly one message source: lines passed next to --file or --stdin would
+# otherwise be dropped without a word, and a trailer among them lost.
+MSG_SOURCES=0
+if [[ -n "$FROM_FILE" ]]; then MSG_SOURCES=$((MSG_SOURCES + 1)); fi
+if [[ -n "$FROM_STDIN" ]]; then MSG_SOURCES=$((MSG_SOURCES + 1)); fi
+if [[ ${#MSG_ARGS[@]} -gt 0 ]]; then MSG_SOURCES=$((MSG_SOURCES + 1)); fi
+if [[ $MSG_SOURCES -ne 1 ]]; then
+    [[ $MSG_SOURCES -eq 0 ]] && usage_error "no commit message provided."
+    usage_error "the message has one source: --file, --stdin or message arguments, not several."
+fi
 
 # Switch into the repository if requested, so the caller need not prefix the
 # command with `cd` (which would break the permission allow-match).
@@ -158,34 +243,15 @@ if [[ -z "$ALLOW_PROTECTED" ]]; then
     CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || true)
 
     if [[ -n "$CURRENT_BRANCH" ]]; then
-        PROTECTED=()
-        # --show-toplevel rather than the cwd: the config file lives at the repo
-        # root, and this script is routinely called from a subdirectory.
-        REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || true)
-        PROTECTED_FILE="$REPO_TOP/.claude/protected-branches"
-
-        if [[ -n "$REPO_TOP" && -f "$PROTECTED_FILE" ]]; then
-            # The file is the single source when present; git config is not
-            # merged in, so "why is this branch protected" has one answer.
-            while IFS= read -r line || [[ -n "$line" ]]; do
-                line="${line%%#*}"                 # strip comments
-                line="${line#"${line%%[![:space:]]*}"}"  # strip leading space
-                line="${line%"${line##*[![:space:]]}"}"  # strip trailing space
-                [[ -n "$line" ]] && PROTECTED+=("$line")
-            done < "$PROTECTED_FILE"
-        else
-            while IFS= read -r line; do
-                [[ -n "$line" ]] && PROTECTED+=("$line")
-            done < <(git config --get-all toolkit.protectedBranch 2>/dev/null || true)
-        fi
-
-        for protected in ${PROTECTED+"${PROTECTED[@]}"}; do
+        # The per-repo list only, not the fixed develop/master/main the merge
+        # and push guards add: a repo opts in to this check by declaring it.
+        while IFS= read -r protected; do
             if [[ "$CURRENT_BRANCH" == "$protected" ]]; then
                 echo "Error: refusing to commit on protected branch '$CURRENT_BRANCH'." >&2
                 echo "Create a branch first (git -C $(pwd) switch -c <name>), or pass --allow-protected." >&2
                 exit 1
             fi
-        done
+        done < <(protected_branch_list .)
     fi
 fi
 
@@ -207,13 +273,9 @@ TMPFILE=$(mktemp /tmp/commit-msg-XXXXXX.txt)
 
 if [[ -n "$FROM_STDIN" ]]; then
     cat > "$TMPFILE"
-elif [[ ${#MSG_ARGS[@]} -gt 0 ]]; then
+else
     # Join arguments with newlines (each arg = one line)
     printf '%s\n' "${MSG_ARGS[@]}" > "$TMPFILE"
-else
-    echo "Error: No commit message provided." >&2
-    echo "Usage: git-commit.sh \"message\" or echo \"message\" | git-commit.sh --stdin" >&2
-    exit 1
 fi
 
 # Verify the message is not empty

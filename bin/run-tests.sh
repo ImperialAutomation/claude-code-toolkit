@@ -42,9 +42,10 @@ declare -A CI_SKIP=(
 )
 
 # Tools the tests as a set call directly (jq: hook tests; curl and python3:
-# http-status). A missing one is a broken environment, not a reason to skip:
-# the run stops before any test, naming the tool.
-PREREQS=(git python3 jq curl)
+# http-status; openssl: gh-app-token signs and verifies a real JWT). A missing
+# one is a broken environment, not a reason to skip: the run stops before any
+# test, naming the tool.
+PREREQS=(git python3 jq curl openssl)
 
 usage() {
     echo "usage: $(basename "$0") [--ci] [--list] [<test-script>...]" >&2
