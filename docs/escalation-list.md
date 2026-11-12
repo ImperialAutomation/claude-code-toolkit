@@ -5,6 +5,16 @@ categories below. A question that falls in one of them is not answered by the
 agent: it becomes an issue comment holding the question, the options and the
 recommendation, the issue gets the `needs-human` label, and the run stops.
 
+The review of a PR (`/pre-merge`, also Step 4c of `/queue-run`) applies the
+same list: a hit in categories 1 to 5 gives the verdict `HUMAN`, unless every
+linked issue carries its `approved:<key>` label (category 5 is never
+approved by a label). An `UNVERIFIABLE` acceptance criterion and a failing
+runtime check give `HUMAN` too.
+`HUMAN` wins over `BLOCKING`, so no fix round runs first. With `--post` the
+question, the options and the recommendation open the app's review on the PR
+(a `COMMENT`), and `needs-human` goes on the PR and every linked issue. What
+you do per verdict: `docs/review-app-runbook.md`, "Use".
+
 This list is the single source for `/refine`, `/implement` and the queue
 runner. Change it here, not in a skill.
 
@@ -77,7 +87,7 @@ number, never the matched text, so the hit can be quoted in a public issue.
 | `agent-ready` | An agent may pick this up |
 | `agent-backlog` | Triaged as agent-doable, but not released to the queue: the runner ignores it. Release by swapping it for `agent-ready`; this is how the human meters the queue's token spend |
 | `agent-wip` | Claimed by a session; others skip it |
-| `needs-human` | Blocked on a decision; a comment holds the question, the options and the recommendation |
+| `needs-human` | Blocked on a decision; a comment, or the review of a `HUMAN` verdict, holds the question, the options and the recommendation. The review also puts it on the PR |
 | `agent-failed` | Agent run failed on this issue; a second failure adds needs-human. The queue runner claims it once more (one retry) |
 | `agent-pr` | The queue runner opened a PR for this issue; it replaces `agent-ready`, so the issue is not claimed again. When the PR is closed unmerged, a human swaps it back for `agent-ready` |
 | `agent-rework` | Set only by a human: the issue's open agent PR needs another round. The queue runner claims it before any `agent-ready` issue and without the WIP limit, pushes a fix round to the existing PR branch, re-reviews it and swaps the label for `agent-pr` (plus `needs-human` when the re-review or a finding needs a human). A failed or escalated rework keeps it |
