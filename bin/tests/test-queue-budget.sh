@@ -101,6 +101,34 @@ row 3 pr sess-1
 run gate 2
 check "old rows plus one new row: 1/2" "budget 1/2" "$OUT"
 
+echo "== 2b. gate: rows with the review columns (#297) =="
+REVIEW_HEADER=$'review\treview_final\treview_findings\treview_input_tokens\treview_cache_creation_input_tokens\treview_cache_read_input_tokens\treview_output_tokens\treview_agents\tfix_input_tokens\tfix_cache_creation_input_tokens\tfix_cache_read_input_tokens\tfix_output_tokens\tfix_agents'
+# review_row <issue> <session> <review columns...>: a row as queue-claim.sh
+# writes it since #297, the 13 review columns after the session.
+review_row() {
+    local issue="$1" session="$2"; shift 2
+    local IFS=$'\t'
+    printf '2026-11-12T00:00:00Z\t%s\tpr\thttps://github.com/o/r/pull/%s\t1\t2\t3\t4\t1\t%s\t%s\n' \
+        "$issue" "$issue" "$session" "$*" >> "$QUEUE_RUNS_LOG"
+}
+reset
+printf '%s\t%s\n' "$HEADER" "$REVIEW_HEADER" > "$QUEUE_RUNS_LOG"
+# old (nine fields), current (ten) and new rows mixed in one log
+printf '2026-11-01T00:00:00Z\t1\tpr\thttps://github.com/o/r/pull/1\t1\t2\t3\t4\t1\n' >> "$QUEUE_RUNS_LOG"
+row 2 escalated sess-1
+review_row 3 sess-1 BLOCKING APPROVE 3 10 20 30 40 2 5 6 7 8 1
+review_row 4 sess-1 "" "" "" "" "" "" "" "" "" "" "" "" ""
+review_row 5 other-session APPROVE "" 0 10 20 30 40 2 "" "" "" "" ""
+# no session id: an empty 10th field followed by review columns never counts
+review_row 6 "" APPROVE "" 0 "" "" "" "" "" "" "" "" ""
+run gate 5
+check "old, current and new rows: exit 0" "0" "$RC"
+check "old, current and new rows: counts this session's current and new rows" "budget 3/5" "$OUT"
+run gate 3
+check "new rows reach the budget: exit 1" "1" "$RC"
+OUT=$(CLAUDE_CODE_SESSION_ID="APPROVE" bash "$QB" gate 5 2>/dev/null)
+check "a review value is never taken for the session" "budget 0/5" "$OUT"
+
 echo "== 3. gate: stop file =="
 reset
 touch "$QUEUE_STOP_FILE"
