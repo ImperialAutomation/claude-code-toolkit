@@ -45,6 +45,10 @@ Mapping, top to bottom; HUMAN wins over BLOCKING, whose reasons stay listed:
             NOT MET AC
   APPROVE   otherwise; MEDIUM/LOW/INFO /review findings are listed anyway
 
+Review event of each verdict, for /pre-merge --post (pre-merge-post.py):
+APPROVE -> APPROVE, BLOCKING -> REQUEST_CHANGES, HUMAN -> COMMENT plus the
+label needs-human.
+
 The shadow severity of a /code-review finding is reported and logged but never
 changes the verdict. A MEDIUM or LOW shadow severity counts as "would have
 been downgraded".
@@ -53,6 +57,7 @@ Output:
 
   {
     "verdict": "APPROVE|BLOCKING|HUMAN",
+    "review_event": "APPROVE|REQUEST_CHANGES|COMMENT",
     "human_reasons": ["..."],
     "blocking_reasons": ["..."],
     "listed_findings": ["..."],          # /review MEDIUM, LOW and INFO
@@ -88,6 +93,11 @@ LOG_COLUMNS = ("date", "repo", "pr_or_branch", "location", "shadow_severity", "v
 APPROVE = "APPROVE"
 BLOCKING = "BLOCKING"
 HUMAN = "HUMAN"
+
+# The PR review event of each verdict, for /pre-merge --post (#296).
+# HUMAN neither approves nor blocks: it is a COMMENT plus the label below.
+REVIEW_EVENTS = {APPROVE: "APPROVE", BLOCKING: "REQUEST_CHANGES", HUMAN: "COMMENT"}
+HUMAN_LABEL = "needs-human"
 
 AC_VERIFIED = "VERIFIED"
 AC_NOT_MET = "NOT MET"
@@ -236,6 +246,7 @@ def evaluate(data):
     downgraded = sum(f["shadow_severity"] != SHADOW_HIGH for f in correctness)
     return {
         "verdict": verdict,
+        "review_event": REVIEW_EVENTS[verdict],
         "human_reasons": human,
         "blocking_reasons": blocking,
         "listed_findings": listed,
