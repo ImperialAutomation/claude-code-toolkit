@@ -17,11 +17,11 @@
 #                  budget cannot be counted, so fail closed (D8);
 #                - this session's releases in the run log
 #                  ~/.claude/queue-runs.tsv reached <budget>. Every release
-#                  counts (pr, escalated, failed); a row counts when its
-#                  `session` column (the 10th, written by queue-claim.sh)
-#                  equals the session id. Rows from before that column have
-#                  nine fields and never count; the review columns (#297)
-#                  come after it and do not move it.
+#                  counts (pr, rework, escalated, failed); a row counts
+#                  when its `session` column (the 10th, written by
+#                  queue-claim.sh) equals the session id. Rows from before
+#                  that column have nine fields and never count; the review
+#                  columns (#297) come after it and do not move it.
 #                Otherwise prints `budget <used>/<budget>` and exits 0.
 # idle <max>     An iteration that claimed nothing. Adds one to this session's
 #                idle count in ~/.claude/queue-idle/<session-id> and prints

@@ -11,8 +11,8 @@ repository and runs a command with it:
 ~/.claude/bin/gh-app-token.sh --repo <owner>/<repo> -- gh pr review 123 --approve --body "..."
 ```
 
-This runbook covers setting up and maintaining those apps. Do the steps once
-per owner account. Nothing is configured per project beyond installing the app
+This runbook covers setting up, using and maintaining those apps. Do steps 1
+to 4 once per owner account. Nothing is configured per project beyond installing the app
 on the repository.
 
 Below, `<owner>` is the account login exactly as it appears in
@@ -140,7 +140,36 @@ cause:
 | `gh` itself answers `Resource not accessible by integration` (HTTP 403) | The token works, but the app lacks a permission for that call | Step 1, permissions table; then "Change the permissions" below |
 | `GitHub unreachable` | No network, or api.github.com is down | Retry |
 
-## 5. Maintain
+## 5. Use
+
+Every review under the app comes from `/pre-merge`; its verdict helper
+(`pre-merge-verdict.py`) picks `APPROVE`, `BLOCKING` or `HUMAN`.
+
+| Call | What happens |
+|---|---|
+| `/pre-merge <PR>` | Report only, nothing written to GitHub. Check out the PR's head branch first |
+| `/pre-merge <PR> --post` | The same report, then one review under the app (`pre-merge-post.py`) |
+| `/queue-run`, Step 4c | After the loop opens a PR, a reviewer sub-agent runs `/pre-merge <PR> --post`. A `BLOCKING` review gets one fix round and one re-review |
+
+The review shows as `<app-name>[bot]`. Its body opens with
+`/pre-merge verdict: <verdict>`, then the gate report. Findings on a diff line
+are inline comments, the rest are listed in the body; MEDIUM and LOW findings
+are listed under every verdict. You always merge yourself.
+
+| Verdict | Review event and labels | What you do |
+|---|---|---|
+| `APPROVE` | `APPROVE` | Read it and merge, or post what should change and hand it back |
+| `BLOCKING` | `REQUEST_CHANGES`; from `/queue-run`, `needs-human` on the issue when the re-review is still `BLOCKING` | Fix it yourself, or hand it back: the review is the input |
+| `HUMAN` | `COMMENT` with question, options and recommendation on top; `needs-human` on the PR and every linked issue | Post your decision as a PR or issue comment, remove `needs-human` from the PR and the issue, then hand it back or act on it yourself |
+| not posted | none; from `/queue-run`, `agent-pr` and `needs-human` on the issue, the error in its comment | Fix the cause (step 4 table), remove `needs-human` and run `/pre-merge <PR> --post`; never post as your own account |
+
+Hand back an agent PR (its issue has `agent-pr`) by adding `agent-rework` to
+the issue once it has no `needs-human`: the next `/queue-run` iteration runs a
+fix round on the review input posted since its last round (the app's reviews
+count), then a re-review. Without new input it escalates instead. See "Back
+to the loop after a review (#300)" in `docs/escalation-list.md`.
+
+## 6. Maintain
 
 ### Rotate the key
 
@@ -209,8 +238,14 @@ it does.
 
 The review itself is posted in every case and shows as `APPROVED` by
 `<app-name>[bot]`. Not tested: repository rulesets (only the classic rule).
-Write access lets the app push as well; whether the reviewer gets it is
-decided in #288, not here. The apps stay on `Contents: Read-only` until then.
+
+**Decision (#288, D5): the apps stay on `Contents: Read-only`.** Write access
+would let an app token push to every repo of the installation; a reviewer
+that cannot write stays independent of the fix sub-agent, the only writer. No
+repo requires approvals today, and a human merges every PR. So the app's
+`APPROVE` does not satisfy a required-approvals rule: a repo with that rule
+needs an approval from another person, an admin merge (`gh pr merge --admin`,
+only when the rule allows bypassing), or a new issue that revisits D5.
 
 Procedure, to repeat the test, on a throwaway repo under your personal account
 (public, because branch protection on a private repo needs a paid plan):
