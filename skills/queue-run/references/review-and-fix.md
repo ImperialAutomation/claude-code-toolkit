@@ -105,7 +105,7 @@ PR's existing branch from its existing worktree; it never opens a PR.
 | `<N>`, `<title>` | The issue |
 | `<repo>` | The checkout the loop started in (only read) |
 | `<pr>`, `<pr-url>` | The open PR |
-| `<worktree>`, `<branch>` | The PR's worktree and head branch (Step 4c: the `WORKTREE` of `PR_OPENED`; #300: resolved again with `git-resolve-worktree.sh`) |
+| `<worktree>`, `<branch>` | The PR's worktree and head branch (Step 4c: the `WORKTREE` of `PR_OPENED`; #300: the worktree on the PR's head branch, see `rework.md`) |
 | `<comments>` | One or more URLs of what to address, one per line: a review (`...#pullrequestreview-<id>`), a review comment (`...#discussion_r<id>`) or a PR/issue comment (`...#issuecomment-<id>`). Step 4c passes the `REVIEW_URL` of the `BLOCKING` review |
 
 ### Prompt
@@ -171,6 +171,12 @@ FIXED:
 COMMIT: <sha of the last commit pushed, or none when nothing changed>
 ADDRESSED: <fixed count> of <finding count>
 NOT_ADDRESSED: <each finding left as is, with the reason; or none>
+ROUND:
+- fixed <sha of the commit that fixed it>: <finding, one line>
+- rejected: <finding>: <why it does not hold>
+- left: <finding>: <question>; options: <two or more>; recommendation: <one>
+(one line per finding; `rejected` for a finding that does not hold, `left`
+for one that holds but cannot be fixed within the issue's scope)
 
 ESCALATED:
 REASON: <question and category>
@@ -183,6 +189,9 @@ LAST_ERROR_OUTPUT: <relevant output>
 ```
 
 ### After the fix round
+
+`ROUND` is the per-finding breakdown the rework path (#300, D8) turns into
+its round comment; Step 4c does not read it.
 
 The caller measures the fix sub-agent's tokens, then:
 

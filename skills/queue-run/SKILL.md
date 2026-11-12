@@ -26,7 +26,7 @@ escalation; `/refine` and the escalation hook raise it.
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `--budget N` | 10 | Releases (pr, escalated, failed) this loop may make; then it stops. Idle iterations do not count (#251, D1, D3) |
+| `--budget N` | 10 | Releases (pr, rework, escalated, failed) this loop may make; then it stops. Idle iterations do not count (#251, D1, D3) |
 | `--max-prs N` | 3 | Agent PR WIP limit, passed to `agent-pr-wip.sh --limit` (D6). A separate brake: review backlog, not tokens |
 | `--max-idle N` | 16 | Consecutive idle iterations (8 hours at 30 minutes) before the loop stops (D4, D5) |
 | `--model <model>` | the session's | Model of the sub-agents of Steps 4 and 4c (D3) |
@@ -82,7 +82,22 @@ It checks, between issues only, the three conditions that end the loop:
 - exit 1: claim nothing, stop the loop (see "Pacing") and report the printed
   line.
 
-### Step 1: Capacity
+### Step 1: Rework, then capacity
+
+Note the current branch of `<repo>` for Step 6:
+`git -C <repo> branch --show-current`.
+
+Rework comes first, without a WIP check: it finishes an open agent PR instead
+of adding one (#300, D4).
+
+```bash
+~/.claude/bin/queue-claim.sh --repo <repo> claim --rework
+```
+
+It prints `<N>` of the oldest `agent-rework` issue, or nothing. A number:
+follow `~/.claude/skills/queue-run/references/rework.md` (Read it now)
+instead of Steps 2 to 5, then Steps 6 and 7. Exit 1: as for Step 2.
+Nothing: check capacity.
 
 ```bash
 ~/.claude/bin/agent-pr-wip.sh --repo <repo> --limit <max-prs>
@@ -91,9 +106,6 @@ It checks, between issues only, the three conditions that end the loop:
 - exit 0: below the agent PR WIP limit, continue.
 - exit 1: the limit is reached. Claim nothing; go to "Pacing" (idle).
 - exit 2: the count is unknown. Treat it as exit 1 and report the stderr.
-
-Note the current branch of `<repo>` for Step 6:
-`git -C <repo> branch --show-current`.
 
 ### Step 2: Claim
 
@@ -366,6 +378,7 @@ measure.
   `[review: BLOCKING -> not posted after fix (<reason>)]`,
   `[review: BLOCKING -> fix escalated]`, `[review: BLOCKING -> fix failed]`,
   `[review: not posted (<reason>)]`
+- a rework iteration (its variants are in `references/rework.md`): `queue: #<N> rework PR <url> [review: APPROVE] (fixed 3, rejected 1, left 0) (<summary>) [budget 4/10]`
 - `queue: #<N> escalated (needs-human) (<summary>) [budget 3/10]`
 - `queue: #<N> failed (first failure, back in queue) (<summary>) [budget 3/10]` or `(second failure, needs-human) (<summary>) [budget 3/10]`
 - `queue: idle (empty queue) [idle 2/16]` or `queue: idle (WIP limit <open>/<limit>) [idle 2/16]`
@@ -376,7 +389,7 @@ measure.
 `/loop` without an interval is self-paced: each iteration decides when the
 next one runs (#188, D6).
 
-- **Worked an issue** (released as pr, escalated or failed): run the next
+- **Worked an issue** (released as pr, rework, escalated or failed): run the next
   iteration right away; the queue may hold more.
 - **Sub-agent running** (a sub-agent of Step 4 or 4c launched, no completion
   notification yet):

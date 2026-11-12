@@ -89,6 +89,16 @@ row 2 pr xsess-1
 run gate 1
 check "only an exact session match counts" "budget 0/1" "$OUT"
 
+reset
+new_log
+# A rework release (#300, D2) counts like any other release.
+row 1 pr sess-1
+row 1 rework sess-1
+run gate 3
+check "a rework row counts toward the budget" "budget 2/3" "$OUT"
+run gate 2
+check "a rework row can use up the budget: exit 1" "1" "$RC"
+
 echo "== 2. gate: log written before the session column =="
 reset
 printf '%s\n' "$OLD_HEADER" > "$QUEUE_RUNS_LOG"
