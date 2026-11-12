@@ -80,6 +80,7 @@ number, never the matched text, so the hit can be quoted in a public issue.
 | `needs-human` | Blocked on a decision; a comment holds the question, the options and the recommendation |
 | `agent-failed` | Agent run failed on this issue; a second failure adds needs-human. The queue runner claims it once more (one retry) |
 | `agent-pr` | The queue runner opened a PR for this issue; it replaces `agent-ready`, so the issue is not claimed again. When the PR is closed unmerged, a human swaps it back for `agent-ready` |
+| `agent-rework` | Set only by a human: the issue's open agent PR needs another round. The queue runner claims it before any `agent-ready` issue and without the WIP limit, pushes a fix round to the existing PR branch, re-reviews it and swaps the label for `agent-pr` (plus `needs-human` when the re-review or a finding needs a human). A failed or escalated rework keeps it |
 | `approved:permissions` | Human approved a category 1 hit on this issue |
 | `approved:leakage` | Human approved a category 2 hit on this issue |
 | `approved:interface` | Human approved a category 3 hit on this issue |
@@ -92,6 +93,24 @@ which the queue runner checks before a claim. The limit is 3, or the
 `--max-prs N` of `/queue-run` (passed as `agent-pr-wip.sh --limit N`). It is a
 separate brake from the loop's issue budget (`--budget`): the WIP limit
 protects review time, the budget protects tokens (#251, D6).
+
+### Back to the loop after a review (#300)
+
+Every review of an agent PR after its release passes the human: their own
+review, a `/code-review` they ran, a `HUMAN` verdict of the queue runner's
+review, or a re-review that stayed `BLOCKING` and added `needs-human`. To
+hand the PR back to the loop:
+
+1. Post what should change on the PR: a review, review comments, or a PR or
+   issue comment. After a `HUMAN` verdict, that comment holds the decision.
+2. Remove `needs-human` from the issue when it has it.
+3. Add `agent-rework` to the issue.
+
+The next `/queue-run` iteration claims it (`queue-claim.sh claim --rework`),
+addresses the review input posted since its last round comment on the PR,
+and lists per finding what it fixed, rejected or left for you in a new round
+comment. A rework release counts toward `--budget` like any other release.
+The human still merges.
 
 ## Recalibration
 
