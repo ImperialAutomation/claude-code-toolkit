@@ -39,4 +39,10 @@ git -C ~/Projects/claude-code-toolkit worktree add --no-track \
     -b issue-<N>-<slug> ~/Projects/claude-code-toolkit-<N> origin/main
 ```
 
-Removing the worktree and fast-forwarding the live checkout after merge: #206.
+**After merge:** `/cleanup` (`git-cleanup-merged-branch.sh`), from the linked
+worktree or from the live checkout, fast-forwards the live checkout to
+`origin/main`, removes the worktree and deletes the branch. It checks first and
+changes nothing when the live checkout is dirty, off `main` or not
+fast-forwardable, or the branch is not merged or has no commits of its own.
+Run from the linked worktree, it removes that session's own cwd: continue in
+the live checkout. `/finish` is not used here.

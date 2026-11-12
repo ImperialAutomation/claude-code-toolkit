@@ -17,6 +17,7 @@ Output and exit status:
        line 3: the subcommands of the commit segments, space-separated and
                without repeats: commit, revert, cherry-pick, merge
                (git-commit.sh counts as commit)
+       line 4: "wrapper" if every commit segment is git-commit.sh, else empty
     1  the command contains no commit segment; nothing printed
     2  a commit segment exists but its target cannot be resolved; the reason
        is printed on stderr
@@ -75,6 +76,9 @@ MERGE_SUBCOMMAND = "merge"
 PUSH_SUBCOMMAND = "push"
 # Second output line when a push follows the commit; the hook compares against it.
 PUSH_MARKER = "push"
+# Fourth output line when every commit segment is git-commit.sh, whose output
+# shows whether it committed (the hook then checks for git's summary line).
+WRAPPER_MARKER = "wrapper"
 
 # Separator of the subcommands on the third output line.
 KIND_SEPARATOR = " "
@@ -105,6 +109,8 @@ COMMIT_WRAPPER = "git-commit.sh"
 REPO_OPTION = "--repo"
 # git-commit.sh options that consume the next argument, besides --repo.
 WRAPPER_VALUE_OPTIONS = {"--file"}
+# git-commit.sh reads every argument after this one as a message line.
+END_OF_OPTIONS = "--"
 
 # git global options that consume the next argument when not written as --opt=value.
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
@@ -222,6 +228,8 @@ def _wrapper_repo(tokens):
     i = 1
     while i < len(tokens):
         token = tokens[i]
+        if token == END_OF_OPTIONS:
+            break
         if token == REPO_OPTION:
             repo = tokens[i + 1] if i + 1 < len(tokens) else ""
             i += 2
@@ -251,15 +259,15 @@ def _resolve_dir(parts, cwd):
 
 
 def _commit_target(segment, cwd):
-    """(target dir, subcommand) of a commit segment, or None if it does not
-    commit. git-commit.sh counts as `commit`."""
+    """(target dir, subcommand, is git-commit.sh) of a commit segment, or None
+    if it does not commit. git-commit.sh counts as `commit`."""
     chdirs, tokens = _strip_env_chdir(segment)
     _, tokens = _hook.strip_command_prefixes(tokens)
     if not tokens:
         return None
     if os.path.basename(tokens[0]) == COMMIT_WRAPPER:
         repo = _wrapper_repo(tokens)
-        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd), COMMIT_SUBCOMMAND
+        return _resolve_dir(chdirs + ([] if repo is None else [repo]), cwd), COMMIT_SUBCOMMAND, True
     git = _git_invocation(tokens)
     if not git:
         return None
@@ -269,7 +277,7 @@ def _commit_target(segment, cwd):
         return None
     if override:
         raise Unresolvable(f"git {override} sets the repository; not resolved from command text")
-    return _resolve_dir(chdirs + dirs, cwd), kind
+    return _resolve_dir(chdirs + dirs, cwd), kind, False
 
 
 def _cd_target(tokens, cwd):
@@ -288,10 +296,12 @@ def _is_push(segment):
 
 
 def resolve(command, cwd):
-    """Return (target, pushed_after, kinds) or None without a commit segment.
+    """Return (target, pushed_after, kinds, wrapper_only) or None without a
+    commit segment.
 
     kinds lists the subcommands of all commit segments, in order and without
-    repeats. Raises Unresolvable with the reason.
+    repeats; wrapper_only is True if every commit segment is git-commit.sh.
+    Raises Unresolvable with the reason.
     """
     try:
         segments = _hook.split_segments(command)
@@ -300,6 +310,7 @@ def resolve(command, cwd):
 
     targets = []
     kinds = []
+    wrapper_only = True
     last_commit = -1
     # A `cd` that cannot be followed only matters if a commit comes after it.
     cd_error = None
@@ -316,10 +327,11 @@ def resolve(command, cwd):
         if commit is not None:
             if cd_error is not None:
                 raise cd_error
-            target, kind = commit
+            target, kind, is_wrapper = commit
             targets.append(target)
             if kind not in kinds:
                 kinds.append(kind)
+            wrapper_only = wrapper_only and is_wrapper
             last_commit = index
 
     if not targets:
@@ -328,7 +340,7 @@ def resolve(command, cwd):
         raise Unresolvable("several commit segments with different targets: " + ", ".join(sorted(set(targets))))
 
     pushed_after = any(_is_push(segment) for segment in segments[last_commit + 1:])
-    return targets[0], pushed_after, kinds
+    return targets[0], pushed_after, kinds, wrapper_only
 
 
 def main():
@@ -340,10 +352,11 @@ def main():
         return EXIT_UNRESOLVABLE
     if result is None:
         return EXIT_NO_COMMIT
-    target, pushed_after, kinds = result
+    target, pushed_after, kinds, wrapper_only = result
     print(target)
     print(PUSH_MARKER if pushed_after else "")
     print(KIND_SEPARATOR.join(kinds))
+    print(WRAPPER_MARKER if wrapper_only else "")
     return EXIT_RESOLVED
 
 

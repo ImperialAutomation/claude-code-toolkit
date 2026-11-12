@@ -238,6 +238,11 @@ for w in "${WRAPPERS[@]}"; do
         case "${stripped#"${stripped%%[![:space:]]*}"}" in
             "#"*|"echo "*) continue ;;
         esac
+        # A remedy printed in a message ("Unlock it: git worktree unlock ...")
+        # is not an invocation either. Quoted strings are dropped before the
+        # line is judged again, except one holding a `$(`: that runs a command.
+        unquoted=$(sed -E 's/"([^"$]|\$[^(])*"//g' <<< "$stripped")
+        grep -qE '(^|[^_[:alnum:]])git ' <<< "$unquoted" || continue
         leaks+="$w:${line%%:*} "
     done < <(grep -nE '(^|[^_[:alnum:]])git ' "$BIN_DIR/$w" || true)
 done
