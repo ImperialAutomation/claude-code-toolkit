@@ -13,7 +13,9 @@
 # hook from rewriting published history, and it was added after a mutation run
 # showed the suite stayed green with that guard deleted. Cases 10-26 guard the
 # target resolution: the cwd repo there holds another session's fresh commit.
-# Cases 30-33 guard a git-commit.sh call that did not commit.
+# Cases 29-39 cover revert, cherry-pick and merge (#209); cases 40-50 the
+# review round of PR #289, where HEAD's reflog decides whether the call made it.
+# Cases 52-55 guard a git-commit.sh call that did not commit.
 #
 # Every message to the model must arrive as PostToolUse additionalContext JSON
 # on stdout; every silent skip must leave stdout empty.
@@ -45,6 +47,11 @@ check() { # name expected actual
 
 has_trailer() {
     git -C "$1" log -1 --format='%B' | grep -qi "^Co-Authored-By:" && echo yes || echo no
+}
+
+has_claude_trailer() { # repo [rev]
+    git -C "$1" log -1 --format='%B' "${2:-HEAD}" \
+        | grep -qiE '^Co-Authored-By:.*<noreply@anthropic\.com>' && echo yes || echo no
 }
 
 # A PostToolUse payload; [tool-stdout] is the call's output as tool_response.
@@ -98,15 +105,24 @@ check "trailer text" "Co-Authored-By: Claude <noreply@anthropic.com>" \
 # The amend changed the SHA; the model must hear that before it pushes.
 check "context says trailer added" yes "$(context_has "added missing")"
 
-echo "== 2. commit that already has a trailer -> untouched =="
+echo "== 2. commit that already has a Claude trailer (any model name) -> untouched =="
 R=$(newrepo r2)
 git -C "$R" commit -qm "feat: thing
 
-Co-Authored-By: Someone <s@example.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 BEFORE=$(git -C "$R" rev-parse HEAD)
 fire_out "$R" "git -C $R commit -m x"
 check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
 stdout_empty "trailer present"
+
+echo "== 2b. commit with only someone else's Co-Authored-By -> Claude trailer added =="
+R=$(newrepo r2b)
+git -C "$R" commit -qm "feat: thing
+
+Co-Authored-By: Alice <a@example.com>"
+fire_out "$R" "git -C $R commit -m x"
+check "claude trailer added" yes "$(has_claude_trailer "$R")"
+check "context says trailer added" yes "$(context_has "added missing")"
 
 echo "== 3. non-commit bash call -> untouched =="
 R=$(newrepo r3); git -C "$R" commit -qm "feat: thing"
@@ -325,24 +341,305 @@ R=$(newrepo r28)
 fire_out "$R" "git -C $R commit -m 'feat: thing'"
 stdout_empty "unborn HEAD"
 
-echo "== 29. git-commit.sh --repo <B> -- '--repo <A>' -> trailer in B, A untouched =="
+# Cases 29+: revert, cherry-pick and merge create commits without the word
+# `commit` in the command (#209). Each committing form gets the trailer; each
+# form that leaves no new commit must not touch the fresh, trailer-less HEAD it
+# finds, which is a commit this call did not make.
+
+# Two branches that diverged from a base: `side` has one commit (file g) that
+# mainline lacks. Leaves the repo on the default branch; prints the repo path.
+diverged() { # name
+    local d; d=$(newrepo "$1"); git -C "$d" commit -qm base
+    git -C "$d" checkout -qb side; echo y > "$d/g"; git -C "$d" add g; git -C "$d" commit -qm side
+    git -C "$d" checkout -q -
+    echo z > "$d/h"; git -C "$d" add h; git -C "$d" commit -qm mainline
+    echo "$d"
+}
+
+echo "== 29. git revert --no-edit HEAD -> added =="
+R=$(newrepo r29); git -C "$R" commit -qm base
+echo w > "$R/w"; git -C "$R" add w; git -C "$R" commit -qm "feat: probe"
+git -C "$R" revert --no-edit HEAD >/dev/null
+fire_out "$R" "git -C $R revert --no-edit HEAD"
+check "HEAD is the revert" 'Revert "feat: probe"' "$(git -C "$R" log -1 --format=%s)"
+check "trailer added" yes "$(has_trailer "$R")"
+check "context says trailer added" yes "$(context_has "added missing")"
+
+echo "== 30. git cherry-pick <sha> -> added =="
+R=$(diverged r30)
+SIDE=$(git -C "$R" rev-parse side)
+git -C "$R" cherry-pick "$SIDE" >/dev/null
+fire "$R" "git cherry-pick $SIDE"
+check "HEAD is the pick" side "$(git -C "$R" log -1 --format=%s)"
+check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 31. git merge --no-ff <branch> -> added on the merge commit =="
+R=$(diverged r31)
+git -C "$R" merge --no-ff -q side -m "Merge branch 'side'"
+fire_out "$R" "git -C $R merge --no-ff side"
+check "trailer added" yes "$(has_trailer "$R")"
+check "still a merge commit" 1 "$(git -C "$R" rev-list --no-walk --count --merges HEAD)"
+check "context says trailer added" yes "$(context_has "added missing")"
+
+echo "== 32. env -C <B> git cherry-pick, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r32-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(diverged r32-b)
+SIDE=$(git -C "$B" rev-parse side)
+git -C "$B" cherry-pick "$SIDE" >/dev/null
+fire "$A" "env -C $B git cherry-pick $SIDE"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+# Non-committing forms: HEAD stays a fresh, trailer-less commit this call did
+# not create; the hook must leave it alone and say nothing.
+for form in "revert --no-commit HEAD" "revert -n HEAD" "cherry-pick -n side" \
+            "cherry-pick -xn side" "cherry-pick --no-commit side" "cherry-pick --abort" \
+            "revert --quit"; do
+    echo "== 33. git $form -> untouched =="
+    R=$(diverged "r33-${form//[^a-z]/}")
+    BEFORE=$(git -C "$R" rev-parse HEAD)
+    fire_out "$R" "git -C $R $form"
+    check "$form: sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+    stdout_empty "$form"
+done
+
+# The merge forms run against a fresh, trailer-less merge commit (an earlier
+# merge this call did not make): only the option itself can keep the hook off it.
+for form in "merge --no-commit side" "merge --squash side" "merge --abort" "merge --quit"; do
+    echo "== 33m. git $form on a fresh merge HEAD -> untouched =="
+    R=$(diverged "r33m-${form//[^a-z]/}")
+    git -C "$R" merge --no-ff -q side -m "Merge branch 'side'"
+    BEFORE=$(git -C "$R" rev-parse HEAD)
+    fire_out "$R" "git -C $R $form"
+    check "$form: sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+    stdout_empty "$form"
+done
+
+echo "== 34. git merge --ff-only <branch> -> fast-forwarded commit untouched =="
+R=$(newrepo r34); git -C "$R" commit -qm base
+git -C "$R" checkout -qb side; echo y > "$R/g"; git -C "$R" add g; git -C "$R" commit -qm "feat: not ours"
+git -C "$R" checkout -q -
+git -C "$R" merge --ff-only -q side
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_out "$R" "git -C $R merge --ff-only side"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "fast-forward"
+
+echo "== 35. git merge -n <branch> (-n is --no-stat) -> merge commit gets the trailer =="
+R=$(diverged r35)
+git -C "$R" merge -n --no-ff -q side -m "Merge branch 'side'"
+fire "$R" "git -C $R merge -n --no-ff side"
+check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 36. git revert with an unresolvable -C -> context message =="
+CWD=$(newrepo r36); git -C "$CWD" commit -qm "feat: thing"
+CWD_BEFORE=$(git -C "$CWD" rev-parse HEAD)
+fire_out "$CWD" 'git -C "$WT" revert --no-edit HEAD'
+check "cwd repo untouched" "$CWD_BEFORE" "$(git -C "$CWD" rev-parse HEAD)"
+check "context says shell expansion" yes "$(context_has "shell expansion")"
+
+echo "== 37. --no-edit elsewhere in the line does not skip a real commit =="
+R=$(newrepo r37); git -C "$R" commit -qm "feat: thing"
+fire "$R" "git -C $R commit -m 'feat: thing' && git -C $R log -1 --no-edit"
+check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 38. git cherry-pick -X<value with n> -> added (the value is not -n) =="
+R=$(diverged r38)
+SIDE=$(git -C "$R" rev-parse side)
+git -C "$R" cherry-pick -Xignore-space-change "$SIDE" >/dev/null
+fire "$R" "git -C $R cherry-pick -Xignore-space-change $SIDE"
+check "trailer added" yes "$(has_trailer "$R")"
+
+echo "== 39. git -C <B> revert, cwd A -> trailer in B, A untouched =="
+A=$(newrepo r39-a); git -C "$A" commit -qm "feat: other session"
+A_BEFORE=$(git -C "$A" rev-parse HEAD)
+B=$(newrepo r39-b); git -C "$B" commit -qm base
+echo w > "$B/w"; git -C "$B" add w; git -C "$B" commit -qm "feat: probe"
+git -C "$B" revert --no-edit HEAD >/dev/null
+fire "$A" "git -C $B revert --no-edit HEAD"
+check "B HEAD is the revert" 'Revert "feat: probe"' "$(git -C "$B" log -1 --format=%s)"
+check "trailer added in B" yes "$(has_trailer "$B")"
+check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
+
+# Cases 40+: review round 1 of PR #289. Whether the call made HEAD comes from
+# HEAD's reflog (D5), so a commit the call only moved to is never amended.
+
+# A fresh, trailer-less merge commit on branch `integ` that the default branch
+# can fast-forward to. Leaves the repo on the default branch.
+ff_to_merge() { # name
+    local d; d=$(diverged "$1")
+    git -C "$d" checkout -qb integ
+    git -C "$d" merge --no-ff -q side -m "Merge branch 'side' into integ"
+    git -C "$d" checkout -q -
+    echo "$d"
+}
+
+echo "== 40. git merge --ff-only onto a fresh merge commit -> untouched (finding 1) =="
+R=$(ff_to_merge r40)
+git -C "$R" merge --ff-only -q integ
+BEFORE=$(git -C "$R" rev-parse HEAD)
+check "HEAD is a merge commit" 1 "$(git -C "$R" rev-list --no-walk --count --merges HEAD)"
+fire_out "$R" "git -C $R merge --ff-only integ"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "ff onto merge"
+
+echo "== 41. git cherry-pick --ff onto a fresh child commit -> untouched (finding 2) =="
+R=$(newrepo r41); git -C "$R" commit -qm base
+git -C "$R" checkout -qb side; echo y > "$R/g"; git -C "$R" add g; git -C "$R" commit -qm "feat: not ours"
+git -C "$R" checkout -q -
+git -C "$R" cherry-pick --ff side >/dev/null
+BEFORE=$(git -C "$R" rev-parse HEAD)
+check "fast-forwarded to side" "$(git -C "$R" rev-parse side)" "$BEFORE"
+fire_out "$R" "git -C $R cherry-pick --ff side"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "cherry-pick --ff"
+
+echo "== 42. range cherry-pick -> trailer on HEAD, context names the other pick (finding 3) =="
+R=$(diverged r42)
+git -C "$R" checkout -q side; echo y2 > "$R/g2"; git -C "$R" add g2; git -C "$R" commit -qm side2
+git -C "$R" checkout -q -
+git -C "$R" cherry-pick side~2..side >/dev/null
+FIRST=$(git -C "$R" rev-parse --short HEAD~1)
+fire_out "$R" "git -C $R cherry-pick side~2..side"
+check "trailer added on HEAD" yes "$(has_claude_trailer "$R")"
+check "first pick left alone" "$FIRST" "$(git -C "$R" rev-parse --short HEAD~1)"
+check "context says trailer added" yes "$(context_has "added missing")"
+check "context names the other pick" yes "$(context_has "also made $FIRST")"
+
+echo "== 43. conflicted merge concluded with git-commit.sh -> trailer added (finding 4, D4) =="
+R=$(newrepo r43); git -C "$R" commit -qm base
+git -C "$R" checkout -qb side; echo side > "$R/f"; git -C "$R" commit -qam side
+git -C "$R" checkout -q -
+echo main > "$R/f"; git -C "$R" commit -qam mainline
+git -C "$R" merge -q side &>/dev/null
+echo resolved > "$R/f"; git -C "$R" add f
+git -C "$R" commit -q --no-edit
+check "reflog says commit (merge)" "commit (merge)" "$(git -C "$R" log -g -1 --format=%gs | cut -d: -f1)"
+fire_out "$R" "~/.claude/bin/git-commit.sh --repo $R 'Merge branch side'" "$(summary "$R")"
+check "trailer added" yes "$(has_claude_trailer "$R")"
+check "still a merge commit" 1 "$(git -C "$R" rev-list --no-walk --count --merges HEAD)"
+
+echo "== 44. git commit && git merge --ff-only (merge fails) -> commit gets trailer (finding 5) =="
+R=$(diverged r44)
+echo q > "$R/q"; git -C "$R" add q; git -C "$R" commit -qm "feat: x"
+git -C "$R" merge --ff-only -q side &>/dev/null
+fire_out "$R" "git -C $R commit -m 'feat: x' && git -C $R merge --ff-only side"
+check "HEAD is the commit" "feat: x" "$(git -C "$R" log -1 --format=%s)"
+check "trailer added" yes "$(has_claude_trailer "$R")"
+
+echo "== 44b. git commit && git merge --no-ff -> merge amended, context names the commit =="
+R=$(diverged r44b)
+echo q > "$R/q"; git -C "$R" add q; git -C "$R" commit -qm "feat: x"
+COMMIT=$(git -C "$R" rev-parse --short HEAD)
+git -C "$R" merge --no-ff -q side -m "Merge branch 'side'"
+fire_out "$R" "git -C $R commit -m 'feat: x' && git -C $R merge --no-ff side"
+check "trailer added on the merge" yes "$(has_claude_trailer "$R")"
+check "context names the commit" yes "$(context_has "also made $COMMIT")"
+
+echo "== 45. cherry-pick of a commit with someone else's trailer -> Claude trailer added (finding 6) =="
+R=$(newrepo r45); git -C "$R" commit -qm base
+git -C "$R" checkout -qb side; echo y > "$R/g"; git -C "$R" add g
+git -C "$R" commit -qm "feat: by alice
+
+Co-Authored-By: Alice <a@example.com>"
+git -C "$R" checkout -q -
+echo z > "$R/h"; git -C "$R" add h; git -C "$R" commit -qm mainline
+git -C "$R" cherry-pick side >/dev/null
+fire "$R" "git -C $R cherry-pick side"
+check "claude trailer added" yes "$(has_claude_trailer "$R")"
+check "alice's trailer kept" 1 "$(git -C "$R" log -1 --format=%B | grep -c 'Alice')"
+
+# Abbreviated long options read as git reads them (finding 8). Each runs
+# against a fresh, trailer-less HEAD of the matching kind, so only the parser
+# keeps the hook off it.
+echo "== 46. git merge --abo on a fresh merge HEAD -> untouched =="
+R=$(diverged r46)
+git -C "$R" merge --no-ff -q side -m "Merge branch 'side'"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_out "$R" "git -C $R merge --abo"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "merge --abo"
+
+echo "== 46b. git cherry-pick --no-comm after a fresh pick -> untouched =="
+R=$(diverged r46b)
+git -C "$R" cherry-pick side >/dev/null
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_out "$R" "git -C $R cherry-pick --no-comm side"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "cherry-pick --no-comm"
+
+echo "== 46c. git commit --amen --no-edi -> untouched =="
+R=$(newrepo r46c); git -C "$R" commit -qm "feat: thing"
+git -C "$R" commit -q --amend --no-edit
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_out "$R" "git -C $R commit --amen --no-edi"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "commit --amen --no-edi"
+
+# Pre-filter (finding 10): commands that only mention merge must not start the
+# parser. A python3 shim on PATH records whether it ran.
+SHIM="$T/shim"; mkdir -p "$SHIM"; MARK="$T/python3-ran"
+printf '#!/bin/sh\ntouch %q\nexit 1\n' "$MARK" > "$SHIM/python3"; chmod +x "$SHIM/python3"
+for cmd in "git log --merges" "git branch --merged" "gh pr merge 12" "grep -r merge ."; do
+    echo "== 47. '$cmd' -> parser not started =="
+    R=$(newrepo "r47-${cmd//[^a-z]/}"); git -C "$R" commit -qm "feat: thing"
+    rm -f "$MARK"
+    PATH="$SHIM:$PATH" fire_out "$R" "$cmd"
+    check "$cmd: python3 not run" no "$([[ -e "$MARK" ]] && echo yes || echo no)"
+done
+echo "== 47b. git revert still reaches the parser =="
+rm -f "$MARK"
+PATH="$SHIM:$PATH" fire_out "$R" "git revert --no-edit HEAD"
+check "python3 run" yes "$([[ -e "$MARK" ]] && echo yes || echo no)"
+
+echo "== 48. no reflog -> nothing amended, context says so =="
+R=$(newrepo r48); git -C "$R" commit -qm "feat: thing"
+# The whole logs dir: without logs/HEAD git falls back to the branch's reflog.
+rm -rf "$R/.git/logs"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_out "$R" "git -C $R commit -m 'feat: thing'"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+check "context says no reflog" yes "$(context_has "no reflog")"
+
+echo "== 49. no-op git merge after a fresh plain commit -> untouched =="
+R=$(diverged r49)
+git -C "$R" merge -q side -m "Merge branch 'side'"
+echo q > "$R/q"; git -C "$R" add q; git -C "$R" commit -qm "feat: not ours"
+BEFORE=$(git -C "$R" rev-parse HEAD)
+fire_out "$R" "git -C $R merge side"
+check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
+stdout_empty "no-op merge"
+
+echo "== 50. conflicted revert concluded with git revert --continue -> added =="
+R=$(newrepo r50); git -C "$R" commit -qm base
+echo one > "$R/f"; git -C "$R" commit -qam "feat: one"
+echo two > "$R/f"; git -C "$R" commit -qam "feat: two"
+git -C "$R" revert --no-edit HEAD~1 &>/dev/null
+echo resolved > "$R/f"; git -C "$R" add f
+GIT_EDITOR=true git -C "$R" revert --continue &>/dev/null
+check "HEAD is the revert" 'Revert "feat: one"' "$(git -C "$R" log -1 --format=%s)"
+fire "$R" "git -C $R revert --continue"
+check "trailer added" yes "$(has_claude_trailer "$R")"
+
+echo "== 51. git-commit.sh --repo <B> -- '--repo <A>' -> trailer in B, A untouched =="
 # After `--` git-commit.sh reads every argument as a message line (#129), so a
 # `--repo` there is text, not the target. Reading it as one amends A.
-A=$(newrepo r29-a); git -C "$A" commit -qm "feat: other session"
+A=$(newrepo r51-a); git -C "$A" commit -qm "feat: other session"
 A_BEFORE=$(git -C "$A" rev-parse HEAD)
-B=$(newrepo r29-b); git -C "$B" commit -qm "feat: thing"
+B=$(newrepo r51-b); git -C "$B" commit -qm "feat: thing"
 fire "$T" "~/.claude/bin/git-commit.sh --repo $B -- '--repo' '$A'" "$(summary "$B")"
 check "trailer added in B" yes "$(has_trailer "$B")"
 check "A untouched" "$A_BEFORE" "$(git -C "$A" rev-parse HEAD)"
 
-# Cases 30-33: git-commit.sh can end without committing (an argument error,
+# Cases 52-55: git-commit.sh can end without committing (an argument error,
 # --help, a failing hook). R's HEAD is then a fresh, trailer-less commit of
 # someone else; amending it relabels their work as agent-authored (#129).
 
 GIT_COMMIT_SH="$SCRIPT_DIR/../git-commit.sh"
 
-echo "== 30. git-commit.sh --repo R --ammend (refused) -> R untouched =="
-R=$(newrepo r30); git -C "$R" commit -qm "feat: someone else"
+echo "== 52. git-commit.sh --repo R --ammend (refused) -> R untouched =="
+R=$(newrepo r52); git -C "$R" commit -qm "feat: someone else"
 BEFORE=$(git -C "$R" rev-parse HEAD)
 echo y > "$R/g"; git -C "$R" add g
 # The real script's real output, so the test follows what it prints.
@@ -352,24 +649,24 @@ check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
 check "no trailer added" no "$(has_trailer "$R")"
 check "context says not added" yes "$(context_has "trailer not added")"
 
-echo "== 31. git-commit.sh --repo R --help -> R untouched =="
-R=$(newrepo r31); git -C "$R" commit -qm "feat: someone else"
+echo "== 53. git-commit.sh --repo R --help -> R untouched =="
+R=$(newrepo r53); git -C "$R" commit -qm "feat: someone else"
 BEFORE=$(git -C "$R" rev-parse HEAD)
 HELP=$(bash "$GIT_COMMIT_SH" --repo "$R" --help 2>&1)
 fire "$T" "~/.claude/bin/git-commit.sh --repo $R --help" "$HELP"
 check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
 check "no trailer added" no "$(has_trailer "$R")"
 
-echo "== 32. output names another commit than HEAD -> untouched =="
-R=$(newrepo r32); git -C "$R" commit -qm "feat: first"
+echo "== 54. output names another commit than HEAD -> untouched =="
+R=$(newrepo r54); git -C "$R" commit -qm "feat: first"
 OLD_SUMMARY=$(summary "$R")
 echo y > "$R/g"; git -C "$R" add g; git -C "$R" commit -qm "feat: someone else"
 BEFORE=$(git -C "$R" rev-parse HEAD)
 fire "$T" "~/.claude/bin/git-commit.sh --repo $R 'feat: x'" "$OLD_SUMMARY"
 check "sha unchanged" "$BEFORE" "$(git -C "$R" rev-parse HEAD)"
 
-echo "== 33. real git-commit.sh commit, its own output -> trailer added =="
-R=$(newrepo r33); git -C "$R" commit -qm "feat: base"
+echo "== 55. real git-commit.sh commit, its own output -> trailer added =="
+R=$(newrepo r55); git -C "$R" commit -qm "feat: base"
 echo y > "$R/g"; git -C "$R" add g
 COMMITTED=$(bash "$GIT_COMMIT_SH" --repo "$R" 'feat: thing' 2>&1)
 fire_out "$T" "~/.claude/bin/git-commit.sh --repo $R 'feat: thing'" "$COMMITTED"
