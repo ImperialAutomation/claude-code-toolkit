@@ -180,6 +180,49 @@ agent(S2, "top2", [line("t2", (1, 1, 1, 1))])
 r = run("--agent", "top2")
 check("malformed meta in the session: exit 2 (tree undeterminable)", r.returncode == 2)
 
+print("--- --sum ---")
+PARTS = Path(tmp.name) / "parts"
+PARTS.mkdir()
+root_json = PARTS / "issue.json"
+root_json.write_text(run("--agent", "root", "--json").stdout)
+child2_json = PARTS / "review.json"
+child2_json.write_text(run("--agent", "child2", "--json").stdout)
+r = run("--sum", str(root_json), str(child2_json), "--json")
+check("sum: exit 0", r.returncode == 0)
+s = json.loads(r.stdout) if r.returncode == 0 else {}
+check("sum: totals added per category",
+      s.get("totals") == {c: EXPECTED[c] + v for c, v in
+                          zip(at.CATEGORIES, (5, 500, 5000, 50))})
+check("sum: agent counts added", s.get("agents") == 4 + 1)
+check("sum: models merged", s.get("models") == [OPUS, SONNET])
+check("sum: every measured root listed", s.get("agent_ids") == ["root", "child2"])
+check("sum: summary recomputed", s.get("summary") == at.summary(s.get("totals", {}), 5))
+
+sum_json = PARTS / "sum.json"
+sum_json.write_text(r.stdout)
+r = run("--sum", str(sum_json), str(root_json), "--json")
+nested = json.loads(r.stdout) if r.returncode == 0 else {}
+check("sum of a sum: exit 0, roots flattened",
+      r.returncode == 0 and nested.get("agent_ids") == ["root", "child2", "root"])
+check("sum of a sum: totals keep adding up",
+      nested.get("totals", {}).get("input_tokens") == 2 * EXPECTED["input_tokens"] + 5)
+
+r = run("--sum", str(root_json), "--json")
+one = json.loads(r.stdout) if r.returncode == 0 else {}
+check("sum of one part: its own totals", one.get("totals") == EXPECTED and one.get("agents") == 4)
+
+r = run("--sum", str(root_json))
+check("sum, text output: exit 0 and totals", r.returncode == 0 and str(EXPECTED["output_tokens"]) in r.stdout)
+
+r = run("--sum", str(root_json), str(PARTS / "missing.json"), "--json")
+check("sum with a missing file: exit 2, nothing on stdout", r.returncode == 2 and r.stdout == "")
+bad = PARTS / "bad.json"
+bad.write_text('{"totals": {"input_tokens": 1}, "agents": 1, "agent_id": "x"}')
+r = run("--sum", str(root_json), str(bad), "--json")
+check("sum with a malformed part: exit 2, names the file", r.returncode == 2 and "bad.json" in r.stderr)
+r = run("--agent", "root", "--sum", str(root_json))
+check("--agent and --sum together: usage error exit 2", r.returncode == 2)
+
 print("--- CLI ---")
 r = run("--help")
 check("--help exits 0", r.returncode == 0)
