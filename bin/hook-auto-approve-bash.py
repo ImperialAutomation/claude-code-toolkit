@@ -643,9 +643,76 @@ def _venv_run_inner(args):
     return _runnable(args)
 
 
+APP_TOKEN_REPO_FLAG = "--repo"
+APP_TOKEN_PRINT_FLAG = "--print"
+
+
+def _gh_app_token_command(args):
+    """The tokens after `--` in `gh-app-token.sh --repo <owner/repo> -- <cmd>
+    [args...]`, `--repo` as one or two tokens, parsed like the script's own
+    loop; None when the call does not have that shape."""
+    index, has_repo = 0, False
+    while index < len(args):
+        arg = args[index]
+        if arg == APP_TOKEN_REPO_FLAG and index + 1 < len(args):
+            index, has_repo = index + 2, True
+        elif arg.startswith(APP_TOKEN_REPO_FLAG + "="):
+            index, has_repo = index + 1, True
+        elif arg == "--":
+            return args[index + 1:] if has_repo else None
+        else:
+            return None
+    return None
+
+
+def _reveals_gh_token(inner):
+    """True when `inner` is a `gh auth` command: under GH_TOKEN, `gh auth token`
+    and `gh auth status --show-token` print the app's token, which is what
+    `--print` is denied for. No review call needs `gh auth`."""
+    _, command = strip_command_prefixes(inner)
+    return (
+        len(command) >= 2
+        and os.path.basename(command[0]) == "gh"
+        and command[1] == "auth"
+    )
+
+
+def _gh_app_token_inner(args):
+    """The command a `gh-app-token.sh --repo <owner/repo> -- <cmd> [args...]`
+    call runs. `--print` runs no command, so it has no inner command either: it
+    is denied as a shape, which keeps the token out of the agent's transcript.
+    A `gh auth` command is denied the same way, since it prints the token."""
+    inner = _runnable(_gh_app_token_command(args))
+    if inner is None or _reveals_gh_token(inner):
+        return None
+    return inner
+
+
+def _gh_app_token_diagnose(args):
+    """Why a gh-app-token.sh call is not approvable, when it asks for the
+    token itself: `--print`, or a `gh auth` command that prints it."""
+    options = args[:args.index("--")] if "--" in args else args
+    if APP_TOKEN_PRINT_FLAG in options:
+        return (
+            "`--print` would put the token in the transcript; it is for humans. "
+            "Hand the token to a command with `-- <cmd>` instead."
+        )
+    inner = _runnable(_gh_app_token_command(args))
+    if inner is not None and _reveals_gh_token(inner):
+        return (
+            "`gh auth` under the app would print or expose its token in the "
+            "transcript; no review call needs it."
+        )
+    return None
+
+
 # `diagnose(args)` explains a malformed call in one sentence when it can name
 # the cause, otherwise returns None and the documented shape speaks for itself.
-WrapperSpec = namedtuple("WrapperSpec", ("parse", "usage", "diagnose"), defaults=(None,))
+# `bare_equivalent` is False for a wrapper whose inner command, run bare, does
+# something else: the deny hint must not send the agent there.
+WrapperSpec = namedtuple(
+    "WrapperSpec", ("parse", "usage", "diagnose", "bare_equivalent"), defaults=(None, True)
+)
 
 COMMAND_RUNNING_WRAPPERS = {
     "repeat-cmd.sh": WrapperSpec(
@@ -659,6 +726,13 @@ COMMAND_RUNNING_WRAPPERS = {
     ),
     "venv-run.sh": WrapperSpec(
         _venv_run_inner, "venv-run.sh [--repo <dir>] <cmd> [args...]"
+    ),
+    # Run bare, the inner command acts as the user's own GitHub account.
+    "gh-app-token.sh": WrapperSpec(
+        _gh_app_token_inner,
+        "gh-app-token.sh --repo <owner/repo> -- <cmd> [args...]",
+        _gh_app_token_diagnose,
+        bare_equivalent=False,
     ),
 }
 
@@ -754,6 +828,14 @@ def unapprovable_wrapper_reason(found):
             f"`~/.claude/bin/{COMMAND_RUNNING_WRAPPERS[found.name].usage}`."
         )
         return f"{reason} {found.detail}" if found.detail else reason
+    if not COMMAND_RUNNING_WRAPPERS[found.name].bare_equivalent:
+        return (
+            f"Hook: {found.name} runs the command it is given, and is approved only "
+            "when that command would be approved on its own. This one "
+            f"(`{_shell_join(found.inner)}`) is not. Do not run it without the "
+            "wrapper: that would act as the user's own GitHub account instead of "
+            "the app. Ask the user how to proceed."
+        )
     return (
         f"Hook: {found.name} runs the command it is given, and is approved only "
         "when that command would be approved on its own. This one is not "
