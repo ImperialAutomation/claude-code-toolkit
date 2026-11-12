@@ -308,24 +308,34 @@ run "xargs -I{} git push --force {}"                                 BLOCK
 #
 # Driven by breaking the hook on purpose in a copy, since the whole point is
 # behaviour under a fault that cannot be triggered through the normal input.
-run_broken() { # run_broken <label> <sed-expr-to-corrupt-the-hook>
-    local label="$1" corrupt="$2" tmp rc got
-    tmp=$(mktemp)
-    sed "$corrupt" "$HOOK" > "$tmp"
-    chmod +x "$tmp"
-    printf '%s' 'git status' | jq -Rs '{tool_input:{command:.}}' | bash "$tmp" >/dev/null 2>&1
+#
+# The copy sits next to a symlink to the real bin/lib, so the release guard it
+# calls is found: without it every copy would block for that reason alone, and
+# these cases would pass whatever the corruption did. The "unbroken copy" case
+# pins that: an uncorrupted copy must still allow.
+run_broken() { # run_broken <label> <sed-expr-to-corrupt-the-hook> [BLOCK|ALLOW]
+    local label="$1" corrupt="$2" want="${3:-BLOCK}" tmp rc got
+    tmp=$(mktemp -d)
+    ln -s "$(dirname "$HOOK")/lib" "$tmp/lib"
+    sed "$corrupt" "$HOOK" > "$tmp/hook.sh"
+    chmod +x "$tmp/hook.sh"
+    printf '%s' 'git status' | jq -Rs '{tool_input:{command:.}}' | bash "$tmp/hook.sh" >/dev/null 2>&1
     rc=$?
-    rm -f "$tmp"
+    rm -rf "$tmp"
     got=ALLOW
     [ "$rc" -eq 2 ] && got=BLOCK
-    if [ "$got" = BLOCK ]; then
+    if [ "$got" = "$want" ]; then
         pass=$((pass + 1))
         printf 'PASS  %-6s broken hook: %s\n' "$got" "$label"
     else
         fail=$((fail + 1))
-        printf 'FAIL  got=%-6s want=BLOCK  broken hook: %s (exit %s)\n' "$got" "$label" "$rc"
+        printf 'FAIL  got=%-6s want=%-6s broken hook: %s (exit %s)\n' "$got" "$want" "$label" "$rc"
     fi
 }
+
+run_broken "unbroken copy"        's|^$||' ALLOW
+# The release guard cannot run (#312): a Python error must not read as allow.
+run_broken "release guard missing" 's|release_guard\.py|release_guard_missing.py|'
 
 # A command that does not exist: the shape of the exit-127 incident.
 # SC2016 is the point: these are sed expressions, and $(cat) is the literal text
@@ -400,6 +410,75 @@ run "echo \$(reboot)"                                                ALLOW
 run "awk '{print}' f.txt && reboot"                                  BLOCK
 run "gh pr list && reboot"                                           BLOCK
 run "sed -n 1p f && git push --force origin main"                    BLOCK
+
+# --- release routes (#312) ---
+# The guard itself is tested route by route in bin/tests/test-release-guard.py.
+# These cases pin the wiring: the hook hands the guard the command AND the cwd
+# Claude Code reports, refuses on its verdict, and quoted text stays text.
+FIX=$(mktemp -d)
+trap 'rm -rf "$FIX"' EXIT
+R="$FIX/repo"
+mkdir -p "$R" "$FIX/elsewhere" "$FIX/gh"
+git -C "$R" init -q -b main
+git -C "$R" -c user.name=t -c user.email=t@t commit -q --allow-empty -m root
+git -C "$R" tag v1.2.3
+git -C "$R" checkout -q -b issue-1-x
+# A fake gh that reports $FIX/gh/base as every PR's base.
+printf '#!/bin/bash\ncat "%s/gh/base" 2>/dev/null\n' "$FIX" > "$FIX/gh/gh"
+chmod +x "$FIX/gh/gh"
+export PATH="$FIX/gh:$PATH"
+
+run_in() { # run_in <cwd> "<command>" <BLOCK|ALLOW>
+    local cwd="$1" cmd="$2" expect="$3" rc got
+    printf '%s' "$cmd" | jq -Rs --arg cwd "$cwd" '{tool_input:{command:.}, cwd:$cwd}' | "$HOOK" >/dev/null 2>&1
+    rc=$?
+    got=ALLOW
+    [ "$rc" -eq 2 ] && got=BLOCK
+    if [ "$got" = "$expect" ]; then
+        pass=$((pass + 1))
+        printf 'PASS  %-6s [%s] %s\n' "$got" "${cwd##*/}" "$cmd"
+    else
+        fail=$((fail + 1))
+        printf 'FAIL  got=%-6s want=%-6s [%s] %s\n' "$got" "$expect" "${cwd##*/}" "$cmd"
+    fi
+}
+
+run_in "$R" "git push -u origin issue-1-x"                           ALLOW
+run_in "$R" "git push origin main"                                   BLOCK
+run_in "$R" "git push origin HEAD:master"                            BLOCK
+run_in "$FIX/elsewhere" "git -C $R push origin HEAD:main"            BLOCK
+run_in "$FIX/elsewhere" "env -C $R git push origin develop"          BLOCK
+run_in "$R" "git push origin v1.2.3"                                 BLOCK
+run_in "$R" "git push --tags"                                        BLOCK
+run_in "$R" "gh workflow run deploy-production.yml"                  BLOCK
+run_in "$R" "gh release create v2.0.0"                               BLOCK
+# shellcheck disable=SC2088  # the tilde is command text, as the hook sees it
+run_in "$R" "~/.claude/bin/cmd-save.sh /tmp/o.txt gh workflow run x.yml"  BLOCK
+run_in "$R" "gh api -X POST repos/o/r/actions/workflows/x.yml/dispatches -f ref=main"  BLOCK
+echo main > "$FIX/gh/base"
+run_in "$R" "gh pr merge 5 --merge"                                  BLOCK
+run_in "$R" "gh api -X PUT repos/o/r/pulls/5/merge"                  BLOCK
+echo epic-1 > "$FIX/gh/base"
+run_in "$R" "gh pr merge 5 --merge"                                  ALLOW
+rm -f "$FIX/gh/base"
+run_in "$R" "gh pr merge 5 --merge"                                  BLOCK
+# git merge reads the branch of the TARGET repo, from the reported cwd or -C.
+run_in "$R" "git merge main"                                         ALLOW
+git -C "$R" checkout -q main
+run_in "$R" "git merge issue-1-x"                                    BLOCK
+run_in "$FIX/elsewhere" "git -C $R merge issue-1-x"                  BLOCK
+run_in "$R" "git push"                                               BLOCK
+git -C "$R" checkout -q issue-1-x
+# Naming a route is not running it.
+# shellcheck disable=SC2088
+run_in "$R" "~/.claude/bin/git-commit.sh 'fix: block gh workflow run and git push origin main'"  ALLOW
+run_in "$R" "echo 'gh api -X PUT pulls/1/merge'"                     ALLOW
+run_in "$R" "grep -rn 'gh release create' bin/"                      ALLOW
+run_in "$R" "$(printf 'cat <<EOF\ngit push origin main\nEOF')"      ALLOW
+# git-push-pr-merge.sh guards its own --base now (D12), with the repo's full
+# list; the hook no longer second-guesses its command line.
+# shellcheck disable=SC2088
+run_in "$R" "~/.claude/bin/git-push-pr-merge.sh --base main --title t --body-file /tmp/b.md"  ALLOW
 
 # --- regression: the hook's other guards must keep firing ---
 run "git push --force origin main"       BLOCK

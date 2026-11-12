@@ -202,6 +202,11 @@ second contributor, so "why is this branch protected" has one answer. Neither
 present protects nothing, which is the default; repos that commit straight to
 `main` never notice the guard exists. Names match exactly, no globbing.
 
+The list is parsed in one place, `bin/lib/protected-branches.sh`, and read by
+`git-push-pr-merge.sh` and `hook-block-destructive.sh` too. Those two refuse a
+merge or push into `develop`, `master`, `main` **plus** this list; the commit
+guard uses this list alone.
+
 **Commit the file.** Left untracked it exists only in the tree where it was
 created, so a linked worktree sees no config and the guard never fires there,
 which is the one place the mistake is most likely. Tracking it puts the same
@@ -339,7 +344,6 @@ not.
 | `settings-sync-hooks.sh` | `settings-sync-hooks.sh [--dry-run] [--settings PATH] [--template PATH]` | Add hooks from `settings-global.jsonc` that are missing in `~/.claude/settings.json`; backs up to a new `settings.json.<timestamp>.bak`; run by `install.sh` |
 | `json-find-key.sh` | `json-find-key.sh <key> <file> [--values]` | Search for a key in nested JSON files |
 | `odt2txt.sh` | `odt2txt.sh <input.odt> <output.txt>` | Convert ODT to plain text via pandoc |
-| `release.sh` | `release.sh [major\|minor\|patch]` | Create a GitHub release for a WordPress plugin |
 
 `docker-scratch.sh` exists because Docker Desktop shares `$HOME` with its VM but not `/tmp`, so a tree in the scratchpad or `/tmp` cannot be bind-mounted (`mounts denied: ... is not shared from the host`). Without a fixed alternative an agent improvises one, and whole base checkouts end up in `~/Downloads`. The location sits under `$HOME` so Docker shares it, and outside every project tree so test discovery, linters and `docker build .` never pick up a second checkout. `clean` is the reason it is a script rather than a documented path: it validates `<purpose>` as one path component, so its `rm -rf` cannot reach outside the scratch root, and it unregisters a worktree through `git worktree remove` instead of leaving it in `git worktree list`. On native Linux Docker a container running as root leaves root-owned files in the mount; `clean` then exits 1 naming the directory rather than reporting success.
 
@@ -349,7 +353,7 @@ not.
 |--------|-------|-------------|
 | `hook-auto-approve-bash.sh` | PreToolUse hook in settings.json | Thin wrapper — exec's `hook-auto-approve-bash.py` |
 | `hook-auto-approve-bash.py` | invoked by the `.sh` wrapper above | Auto-approve safe compound commands via real `shlex` tokenization (cd-prefix, `;`/`&&`/`\|`/`\|\|` chains, env-var prefixes, a model-typed `rtk`/`rtk proxy` prefix); rejects command substitution and heredocs; denies `sed`/inline-Python file reads, `sed` HTML-tag stripping (hint: `markitdown`) and `until`+`sleep` file wait loops with a hint naming the right tool; denies a command-running wrapper (`cmd-save.sh`, `repeat-cmd.sh`, `venv-run.sh`, `gh-app-token.sh`) whose inner command is not approvable, with a hint to run that command bare (for `gh-app-token.sh`: not to, since bare it would act as the user's own account; its `--print`, and a `gh auth` command under it that would print the token, are denied too) (`<wrapper> --help` alone runs nothing and is approved) |
-| `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) |
+| `hook-block-destructive.sh` | PreToolUse hook in settings.json | Block destructive Bash commands (force push, rm -rf, destructive SQL, etc.) and every route to a release: merges and pushes into a protected branch, tag pushes, releases and workflow starts |
 | `hook-block-foreign-worktree-git.sh` | PreToolUse hook in settings.json | Block `git -C <other-worktree>` checkout/restore/reset/clean/stash that would discard another worktree's uncommitted work |
 | `hook-block-toolkit-live-checkout.sh` | PreToolUse hook in settings.json | Block `git checkout`/`git switch` that takes the live toolkit checkout (the one `~/.claude/bin` points into) off its base branch; the message names the worktree route ([why](CLAUDE.md)) |
 | `hook-escalation-check.sh` | PreToolUse hook in settings.json | Deny opening a PR (`git-push-pr-merge.sh`, `gh pr create`) for an autonomous run (closed issue labeled `agent-wip`) whose diff hits an escalation category without its `approved:<key>` label; interactive sessions only get the hits on stderr ([escalation list](docs/escalation-list.md)) |
@@ -425,7 +429,6 @@ claude-code-toolkit/
 │   ├── settings-sync-hooks.sh     ← add missing template hooks to settings.json
 │   ├── json-find-key.sh           ← search for keys in nested JSON files
 │   ├── odt2txt.sh                 ← convert ODT to plain text via pandoc
-│   ├── release.sh                 ← create GitHub release for WordPress plugin
 │   ├── hook-auto-approve-bash.sh  ← PreToolUse hook: thin wrapper, exec's the .py below
 │   ├── hook-auto-approve-bash.py  ← real implementation: shlex-tokenized compound-command approval
 │   ├── test-hook-auto-approve-bash.py ← standalone tests for the above
@@ -436,6 +439,8 @@ claude-code-toolkit/
 │   ├── hook-block-toolkit-live-checkout.sh ← PreToolUse hook: keep the live toolkit checkout on main
 │   ├── test-hook-block-toolkit-live-checkout.sh ← standalone tests for the above
 │   ├── lib/live-checkout.sh       ← which tree ~/.claude/bin makes live, plus the shared worktree-list parser
+│   ├── lib/protected-branches.sh  ← a repo's protected branches (git-commit.sh, git-push-pr-merge.sh, the hook)
+│   ├── lib/release_guard.py       ← refuses release routes for hook-block-destructive.sh
 │   ├── escalation-check.sh        ← flag a branch diff that hits an escalation category
 │   ├── hook-escalation-check.sh   ← PreToolUse hook: deny an autonomous PR with unapproved hits
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
@@ -534,6 +539,8 @@ The global settings include five `PreToolUse` hooks that run **in all permission
    Each deny is deliberately narrow, so that work with no wrapper to point at keeps falling through to a normal prompt rather than being blocked: a `sed` stream edit from stdin to stdout, Python doing calculation or writing a file, and wait loops polling anything other than a file (an HTTP status, a container state, a command's exit status) are all left alone. `while` loops are not matched either: `while [ -f X ]` waits for a file to *disappear*, which `wait-for-pattern.sh` cannot express.
 
 2. **`hook-block-destructive.sh`** — Blocks destructive patterns: `rm -rf /`, `git push --force`, `git reset --hard`, `git clean -f`, `dd if=... of=/dev/`, and more. When blocked, Claude sees the reason and adjusts its approach.
+
+   It also keeps releases the human's act (#312). Agents act on GitHub as the human's own account, so no ruleset can tell them apart; this hook can. Refused, through `bin/lib/release_guard.py`: `git merge` while the target repo is on a protected branch; `git push` to a protected branch (explicit, or resolved from the current branch's push config) and every tag push; `gh pr merge` and `gh api` merges into a protected base; `gh workflow run`, `gh run rerun` and workflow dispatches; `gh release create`, publishing a draft release, and release or ref creation through the API. Protected means `develop`, `master`, `main` plus the repo's own list (the one `git-commit.sh` reads, see [Git utilities](#git-utilities)). The guard parses the command, so quoted text such as a commit message naming `git push origin main` is not a push, and it sees through `git -C`/`-c`, `env` prefixes, `cd x &&` and the wrappers `cmd-save.sh`, `repeat-cmd.sh` and `venv-run.sh`. A target it cannot resolve is refused. `git-push-pr-merge.sh` refuses a protected `--base` itself unless `--no-merge` is set.
 
    Destructive SQL is checked as a group rather than as a list of substrings, so the statements that drop a table, a database or a schema, the role-level drop, the truncate and an unqualified `DELETE` all get the same answer. That consistency is the point: when only the obvious phrasing was refused, the equivalent one became the workaround. A `DELETE` with a `WHERE` clause stays allowed, and a statement that merely appears as an argument to a read-only command (searching a file for one, or naming one in a commit message) is not treated as running it.
 

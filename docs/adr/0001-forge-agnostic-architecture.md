@@ -8,7 +8,7 @@
 
 The claude-code-toolkit is currently tightly coupled to GitHub:
 
-- **8+ shell scripts** use the `gh` CLI directly (`gh-save.sh`, `git-push-pr-merge.sh`, `batch-issue-view.sh`, `batch-issue-status.sh`, `batch-pr-for-issues.sh`, `find-tracking-pr.sh`, `gh-issues-export.sh`, `release.sh`)
+- **7+ shell scripts** use the `gh` CLI directly (`gh-save.sh`, `git-push-pr-merge.sh`, `batch-issue-view.sh`, `batch-issue-status.sh`, `batch-pr-for-issues.sh`, `find-tracking-pr.sh`, `gh-issues-export.sh`)
 - **10+ skills** assume GitHub issue/PR workflows (`/decompose`, `/implement`, `/implement-epic`, `/finish`, `/bug`, `/extend`, `/refine`, `/update-tracking`, `/sync-closes`, `/review`)
 - **Agents** reference GitHub-specific concepts (`issue-crafter`, `devops-automator`)
 - **CI/CD skills** assume GitHub Actions
