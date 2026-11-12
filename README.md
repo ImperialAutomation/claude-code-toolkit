@@ -177,6 +177,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 | `queue-claim.sh` | `queue-claim.sh [--repo DIR] claim \| [--tokens FILE] release <N> pr <url> \| ... release <N> escalated \| ... release <N> failed <file>` | Queue runner claims: `claim` adds `agent-wip` to the oldest open `agent-ready` issue without `agent-wip`, `needs-human`, `epic` or `agent-pr` and prints its number (nothing when empty); `release` drops `agent-wip` and comments with the token totals from `--tokens` (`agent-tokens.py --json`), or `tokens: unknown`. A PR swaps `agent-ready` for `agent-pr`, so the issue is not claimed again. A first failure adds `agent-failed` (one retry), a second adds `needs-human` too. Every release appends a row to `~/.claude/queue-runs.tsv` (`QUEUE_RUNS_LOG` overrides), its last column the session id |
 | `queue-budget.sh` | `queue-budget.sh gate <budget> \| idle <max> \| worked` | Stop conditions of one `/loop /queue-run`: `gate` exits 1 when `~/.claude/queue-stop` exists, `CLAUDE_CODE_SESSION_ID` is missing, or this session's releases in `queue-runs.tsv` reached the budget; `idle` counts consecutive idle iterations per session in `~/.claude/queue-idle/` and exits 1 at the limit; `worked` resets that count |
 | `agent-tokens.py` | `agent-tokens.py --agent <id> [--json]` | Token usage of a sub-agent and every agent it spawned, from the transcripts: input, cache write, cache read and output totals (deduplicated on `message.id`), agent count, models. Exit 1 when the id has no transcript, 2 when it is ambiguous or a transcript is unreadable. The queue runner's cost measurement per issue |
+| `pre-merge-verdict.py` | `pre-merge-verdict.py [--input FILE]` | The `/pre-merge` verdict: gate results and findings as JSON in, `APPROVE` / `BLOCKING` / `HUMAN` with its reasons as JSON out, by one fixed mapping (`HUMAN` over `BLOCKING`). Appends one row per `/code-review` finding (with its shadow severity) to `~/.claude/pre-merge-findings.tsv` (`PRE_MERGE_FINDINGS_LOG` overrides). Exit 2 on invalid input. Input shape: `--help` |
 | `git-push-pr-merge.sh` | `git-push-pr-merge.sh [--repo DIR] [options]` | Push, create PR, gate on CI checks (fail closed, matched to the pushed commit so a lagging PR head cannot be read as a verdict), merge, return to base (for `/implement-epic`). `--repo` targets a worktree instead of the current directory. Repos without CI need `--no-ci-wait`. A check that is red repo-wide for a cause unrelated to the diff (e.g. a dependency audit after a new advisory) is `--allow-failing-check <name>`, which keeps the rest of the gate on and records the bypass on the PASS line. `--allow-failing-check <name>=<regex>` narrows that bypass to one cause: the check's failed job log must match `<regex>`, so a *different* failure of the same check still blocks (it blocks too when the log cannot be read, or when the check is an external status with no job log). Creates the PR itself, so `gh pr create` hooks do not fire; the gate also cannot prove a check set is complete — see [failure modes](docs/git-script-failure-modes.md) |
 
 **`git-commit.sh` refuses to commit on a protected branch.** In repos where every
@@ -450,6 +451,7 @@ claude-code-toolkit/
 │   ├── test-permission-friction.py ← standalone tests for the above
 │   ├── decision-metrics.py        ← agreement with recommendations, reversals of agent decisions
 │   ├── agent-tokens.py            ← token usage of a sub-agent tree (queue runner cost)
+│   ├── pre-merge-verdict.py       ← /pre-merge verdict mapping and findings measurement log
 │   ├── run-tests.sh               ← run every test script (locally and in CI)
 │   └── tests/                     ← standalone tests for the other scripts
 ├── .github/workflows/tests.yml ← CI: bin/run-tests.sh --ci on every PR
@@ -622,7 +624,7 @@ Global permissions (git, gh, edit, file operations) are in `~/.claude/settings.j
 | `/verify` | `/verify [quick\|full\|browser]` | Runtime verification — containers, API health, migrations, browser smoke test |
 | `/review` | `/review [--staged\|--branch\|--file PATH]` | On-demand code review of current changes with automated checks |
 | `/test` | `/test [--all\|--affected]` | Smart test runner that scopes tests based on changed files |
-| `/pre-merge` | `/pre-merge` | Combined quality gate — orchestrates review, tests, verification, AC checks |
+| `/pre-merge` | `/pre-merge` | Combined quality gate (the reviewer role): `/review`, `/code-review high`, tests, runtime, AC and escalation checks, one `APPROVE` / `BLOCKING` / `HUMAN` verdict |
 | `/sync-toolkit` | `/sync-toolkit <pull\|status\|drift>` | Sync toolkit across devices from configured git sources |
 | `/stripe-testing` | `/stripe-testing` | Stripe test values — cards, declines, 3DS, disputes, refunds, SEPA/ACH, webhooks |
 
