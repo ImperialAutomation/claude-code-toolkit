@@ -39,9 +39,14 @@ Protected = develop, master, main, plus the target repo's own list
 
 A segment is judged after removing what runs a command without being it:
 VAR=value assignments, `env` and its options, `rtk` / `rtk proxy`, `time`,
-`nohup`, `command`, `exec`, `sudo`, and the command-running wrappers
-cmd-save.sh, repeat-cmd.sh, venv-run.sh and gh-app-token.sh. Quoted text is
-an argument, never a command: `echo "git push origin main"` is an echo.
+`nohup`, `command`, `exec`, `sudo`, `timeout`, `nice`, `ionice`, `stdbuf`,
+`setsid`, the shell's own leaders (`(`, `{`, `!`, `if`, `then`, `else`,
+`elif`, `do`, `while`, `until`), and the command-running wrappers
+cmd-save.sh, repeat-cmd.sh, venv-run.sh and gh-app-token.sh. The body of a
+command substitution, `$(...)` or backticks, is judged as a command of its
+own. Quoted text is an argument, never a command: `echo "git push origin
+main"` is an echo. A push whose remote or refspec is a shell expansion
+(`$B`) is refused: its target cannot be read from the text.
 
 Out of reach, as for the rest of the hook: a command run by another
 interpreter (`bash -c`, `eval`, `xargs`, `ssh`), and gh aliases.
@@ -76,6 +81,25 @@ ENV = _hook.ENV_COMMAND
 RTK = _hook.RTK_PREFIX
 # Prefixes that run the rest of the segment as the command.
 PLAIN_PREFIXES = {"time", "nohup", "command", "exec", "sudo"}
+# Prefixes that take options first, mapped to the options that take a separate
+# value; `timeout` also takes a duration before the command.
+OPTION_PREFIXES = {
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "setsid": set(),
+}
+TIMEOUT = "timeout"
+# Shell words that start a compound command or negate one; what follows them
+# in the segment is the command.
+SHELL_LEADERS = {"!", "{", "(", "if", "then", "else", "elif", "do", "while", "until"}
+# Grouping characters glued to the first or last word: `(git ...)`, `main&`.
+LEADING_GROUP_CHARS = "({!"
+TRAILING_GROUP_CHARS = ")&"
+# The body of a command substitution, innermost first.
+SUBSTITUTION_RES = (re.compile(r"\$\(([^()]*)\)"), re.compile(r"`([^`]*)`"))
+SHELL_EXPANSION_CHARS = ("$", "`")
 ENV_SPLIT_OPTION = ("-S", "--split-string")
 END_OF_OPTIONS = "--"
 
@@ -83,6 +107,8 @@ HEADS_PREFIX = "refs/heads/"
 TAGS_PREFIX = "refs/tags/"
 REFS_PREFIX = "refs/"
 HEAD = "HEAD"
+# `@` alone is git's shorthand for HEAD, in a refspec too.
+HEAD_NAMES = (HEAD, "@")
 WILDCARD = "*"
 
 # git push options that take the next argument as their value.
@@ -241,13 +267,44 @@ def _strip_env(args, cwd):
     return args[index:], cwd
 
 
+def _strip_option_prefix(name, args):
+    """`args` after the options (and a timeout's duration) of prefix `name`."""
+    value_options = OPTION_PREFIXES[name]
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        if args[index] == END_OF_OPTIONS:
+            index += 1
+            break
+        index += 2 if args[index] in value_options else 1
+    if name == TIMEOUT and index < len(args):
+        index += 1
+    return args[index:]
+
+
+def _strip_grouping(tokens):
+    """`tokens` without the subshell/brace characters glued to the first and
+    last word: `(git push origin main)` is a git push."""
+    tokens = list(tokens)
+    if tokens:
+        tokens[-1] = tokens[-1].rstrip(TRAILING_GROUP_CHARS) or tokens[-1]
+    while tokens and tokens[0][:1] in tuple(LEADING_GROUP_CHARS) and tokens[0] not in SHELL_LEADERS:
+        stripped = tokens[0].lstrip(LEADING_GROUP_CHARS)
+        tokens = ([stripped] if stripped else []) + tokens[1:]
+    return tokens
+
+
 def _unwrap(tokens, cwd):
     """The command a segment runs and its cwd, or (None, cwd) when a wrapper
     in front runs nothing (a malformed call or its --help)."""
+    tokens = _strip_grouping(tokens)
     while tokens:
         first = tokens[0]
         name = os.path.basename(first)
-        if _hook.ENV_ASSIGNMENT_RE.match(first):
+        if first in SHELL_LEADERS:
+            tokens = _strip_grouping(tokens[1:])
+        elif first in OPTION_PREFIXES:
+            tokens = _strip_option_prefix(first, tokens[1:])
+        elif _hook.ENV_ASSIGNMENT_RE.match(first):
             tokens = tokens[1:]
         elif first == ENV:
             tokens, cwd = _strip_env(tokens[1:], cwd)
@@ -390,7 +447,7 @@ def _branch_of(dst, repo):
         return dst[len(HEADS_PREFIX):]
     if dst.startswith(REFS_PREFIX):
         return None
-    if dst == HEAD:
+    if dst in HEAD_NAMES:
         current = _current_branch(repo)
         if not current:
             raise Refusal(f"'git push ... HEAD' from a detached HEAD in {repo}: cannot tell which branch it updates.")
@@ -401,7 +458,7 @@ def _branch_of(dst, repo):
 def _is_local_tag(name, repo):
     if name.startswith(TAGS_PREFIX):
         return True
-    if name.startswith(REFS_PREFIX) or name == HEAD:
+    if name.startswith(REFS_PREFIX) or name in HEAD_NAMES:
         return False
     return _ref_exists(repo, TAGS_PREFIX + name) and not _ref_exists(repo, HEADS_PREFIX + name)
 
@@ -462,6 +519,10 @@ def _judge_push(repo, args, overrides):
     for option in PUSH_EVERY_BRANCH_OPTIONS:
         if any(_is_long(arg, option) for arg in longs):
             raise Refusal(f"refusing 'git push {option}': it pushes every branch, protected ones included. {PROTECTED_HINT}")
+
+    expanded = [arg for arg in positional if any(char in arg for char in SHELL_EXPANSION_CHARS)]
+    if expanded:
+        raise Refusal(f"'git push' with a shell expansion as remote or refspec ({expanded[0]}): its target cannot be read from the command. Name the remote and branch literally.")
 
     protected = _protected(repo)
     deleting = PUSH_DELETE_SHORT in shorts or any(_is_long(arg, PUSH_DELETE_OPTION) for arg in longs)
@@ -646,12 +707,25 @@ def _judge_segment(tokens, cwd):
 
 def judge(command, cwd):
     """The reason `command`, run in `cwd`, is refused, or None when allowed."""
+    # A substitution runs its body wherever it sits, even inside double quotes
+    # or as an argument of a read-only command. Judged against the starting cwd;
+    # a body is strictly shorter than the command, so this ends.
+    for pattern in SUBSTITUTION_RES:
+        for body in pattern.findall(command):
+            reason = judge(body, cwd)
+            if reason is not None:
+                return reason
     try:
         segments = _hook.split_segments(command)
     except ValueError as exc:
         return f"could not parse the command ({exc}), so cannot check it for a push, merge or release. Rephrase it."
     try:
         for segment in segments:
+            segment = _strip_grouping(segment)
+            while segment and segment[0] in SHELL_LEADERS:
+                segment = _strip_grouping(segment[1:])
+            if not segment:
+                continue
             if segment[0] == commit_target.CD:
                 try:
                     if isinstance(cwd, Unresolvable):

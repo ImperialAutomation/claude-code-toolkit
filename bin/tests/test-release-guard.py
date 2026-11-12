@@ -271,6 +271,58 @@ class CommandForms(GuardTestCase):
             with self.subTest(command=command):
                 self.assertAllowed(command)
 
+    def test_cd_decides_the_target_repo(self):
+        # From a non-repo cwd only the cd can make these refusals: the merge
+        # needs the repo's branch, the push the repo's own list.
+        self.on("main")
+        self.assertBlocked(f"cd {self.repo} && git merge issue-1-x", cwd=self.elsewhere)
+        self.assertBlocked(f"(cd {self.repo} && git merge issue-1-x)", cwd=self.elsewhere)
+        self.on("issue-1-x")
+        git(self.repo, "config", "--add", "toolkit.protectedBranch", "release")
+        self.assertBlocked(f"cd {self.repo} && git push origin release", cwd=self.elsewhere)
+        self.assertAllowed("git push origin release", cwd=self.elsewhere)
+
+    def test_shell_grouping_and_prefixes(self):
+        for command in (
+            "(git push origin main)",
+            "{ git push origin main; }",
+            "if true; then git push origin main; fi",
+            "for b in x; do git push origin main; done",
+            "! git push origin main",
+            "git push origin main&",
+            "timeout 60 git push origin main",
+            "timeout -k 5 60 git push origin main",
+            "nice -n 10 git push origin main",
+            "stdbuf -oL git push origin main",
+            "setsid git push origin main",
+            "x=$(git push origin main)",
+            "echo $(git push origin main)",
+            "echo `git push origin main`",
+            '~/.claude/bin/git-commit.sh "fix: $(gh workflow run deploy.yml)"',
+        ):
+            with self.subTest(command=command):
+                self.assertBlocked(command)
+        for command in (
+            "(git push origin issue-1-x)",
+            "timeout 60 git push origin issue-1-x",
+            "x=$(git rev-parse HEAD)",
+            "echo $(git branch --show-current)",
+            "if git diff --quiet; then echo same; fi",
+        ):
+            with self.subTest(command=command):
+                self.assertAllowed(command)
+
+    def test_at_is_head(self):
+        self.on("main")
+        self.assertBlocked("git push origin @", contains="'main'")
+        self.on("issue-1-x")
+        self.assertAllowed("git push origin @")
+
+    def test_shell_expansion_in_push_is_blocked(self):
+        self.assertBlocked("B=main; git push origin $B", contains="shell expansion")
+        self.assertBlocked('git push origin "$(echo main)"')
+        self.assertBlocked('git push "$REMOTE" issue-1-x', contains="shell expansion")
+
     def test_wrapper_that_runs_nothing_is_allowed(self):
         self.assertAllowed("~/.claude/bin/cmd-save.sh --help")
 
