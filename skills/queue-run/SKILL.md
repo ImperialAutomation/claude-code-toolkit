@@ -183,9 +183,8 @@ stop here and report ESCALATED. Do not start Step B.
 ## Step B: implement
 
 Invoke the Skill tool with skill "implement" and args "<N> <worktree>", and
-follow it, with these answers to its stops:
+follow it, with this rule:
 
-- Phase 1 "STOP HERE and ask for confirmation": the plan is confirmed, continue.
 - Phase 4 opens the PR with `--no-merge`. Never merge anything.
 
 Escalation during implement:
