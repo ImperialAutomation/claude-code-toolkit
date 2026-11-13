@@ -112,8 +112,8 @@ SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL" "$PR_LABEL" "$REWORK_LABE
 REWORK_SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL")
 # Claim order, highest first (#309); an issue without one of them sorts last.
 PRIORITY_LABELS=("priority:critical" "priority:high" "priority:medium" "priority:low")
-# Added to an agent-ready issue that has no priority label; claim never
-# reads or removes it (#309, D1).
+# Added to an agent-ready issue that has no priority label; claimability
+# never depends on it and claim never removes it (#309, D1).
 TRIAGE_LABEL="needs-triage"
 # gh issue list returns 30 issues by default; the queue is never this long.
 GH_FETCH_LIMIT=200
@@ -350,7 +350,8 @@ do_claim() {
         fi
     done <<< "$listed"
 
-    for n in "${candidates[@]}"; do
+    # The +-guard keeps an empty list safe under set -u on bash < 4.4.
+    for n in ${candidates[@]+"${candidates[@]}"}; do
         # The list may be stale: someone may have claimed it since.
         before=$(labels_of "$n") || gh_fail "read the labels of #$n"
         claimable "$before" || continue
