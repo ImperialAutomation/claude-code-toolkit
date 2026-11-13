@@ -215,8 +215,9 @@ before reporting the gates green:
   merge**. Say so in the report, with the fix from Troubleshooting. A job
   skipped by its own `if:` is different: it reports as skipped, which passes a
   required check. On `required on <release-branch>: unknown`, read the rules
-  yourself: `gh api repos/OWNER/NAME/rules/branches/<release-branch>`, look for
-  `required_status_checks`.
+  yourself: `gh api repos/OWNER/NAME/rules/branches/<release-branch>` (rulesets)
+  and `gh api repos/OWNER/NAME/branches/<release-branch>` (classic protection),
+  look for `required_status_checks`.
 - **A run the PR did not cause is listed.** The release PR's head *is*
   `develop`, so GitHub shows every run on the head SHA, including a
   push-triggered one such as the deploy of the merge that preceded the PR. It
