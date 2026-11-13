@@ -147,7 +147,8 @@ ran against.
    entries"), for the `## Decisions made` section of the PR body. Choices that
    affect none of the three get no entry.
 
-STOP HERE and ask for confirmation before proceeding to implementation.
+Show the plan to the user, then continue with Phase 2 right away. Do not wait
+for approval: the user can interrupt after seeing the plan.
 
 ## Phase 2: Branch & TDD Implementation
 
