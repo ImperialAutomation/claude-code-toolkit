@@ -133,14 +133,14 @@ Headings describe **the problem solved**, not the PR. Past releases use
 
 ### The three notes
 
-- **Operator note**: anything a human must do around the deploy: renamed env
+- **Operator note**: anything a human must do around the deploy. Think of renamed env
   vars (with an old→new table), a new variable to set, a feature that ships
   *off* and needs turning on. Include the restart caveat where it applies: with
   a `depends_on` health gate, a plain `docker compose restart` can leave a
   service untouched, so a new env value never reaches the process. Use the
   project's own stop/start scripts instead.
-- **Migration note**: one bullet per migration: what it does, whether it is
-  additive or destructive, whether it is idempotent. Call out any drop
+- **Migration note**: one bullet per migration. Each says what it does, whether it is
+  additive or destructive, and whether it is idempotent. Call out any drop
   explicitly and say why it is safe (e.g. expand/contract split across two
   revisions so no intermediate commit is inconsistent).
 - **Deploy note**: always. State the tag (when there is one) and which deploy
@@ -294,5 +294,5 @@ The tag is annotated, tagged by `github-actions[bot]`, with message
 | `collect.sh` shows a non-merge commit on the release branch | hotfix landed directly on it | back-merge the release branch into develop before releasing |
 | `collect.sh` exits 1: `origin/<x> does not exist` | wrong `--base`/`--head`, or the default branch is not the release branch | pick the right name from the listed remote branches and pass `--base` |
 | `collect.sh` exits 1: `cannot pick a release branch` | default branch is develop and there is no master/main | pass `--base <release-branch>` |
-| Required check stuck on "Expected: Waiting for status to be reported" | its workflow has a trigger-level `paths` filter the batch does not match, so it never starts and never reports | durable, in the repo: drop `paths` from the `pull_request` trigger, add a light job that lists the PR's files (`gh api --paginate repos/OWNER/NAME/pulls/N/files`) and decides relevance, and gate the heavy jobs with a job-level `if:`, failing open when the listing fails. Test it with a throwaway draft PR whose base is the feature branch itself, so the diff holds only the probe change. One-off: a ruleset bypass, which needs a bypass actor on the ruleset first (with none, even an admin gets no "merge without waiting") |
+| Required check stuck on "Expected: Waiting for status to be reported" | its workflow has a trigger-level `paths` filter the batch does not match, so it never starts and never reports | durable, in the repo: drop `paths` from the `pull_request` trigger, add a light job that lists the PR's files (`gh api --paginate repos/OWNER/NAME/pulls/N/files`) and decides relevance, and gate the heavy jobs with a job-level `if:`, failing open when the listing fails. Test it with a throwaway draft PR whose base is the feature branch itself, so the diff holds only the probe change; a workflow whose `pull_request` trigger has a `branches:` filter that excludes the feature branch does not start on that draft, so widen the filter in the probe change or test against the real base. One-off: a ruleset bypass, which needs a bypass actor on the ruleset first (with none, even an admin gets no "merge without waiting") |
 | Check list shows a deploy run on the release PR | a push-triggered workflow ran on `develop`'s head SHA, which is the PR's head | none: the PR did not cause it; `gh run list --workflow <file> --json event,headSha` shows `event: push` |

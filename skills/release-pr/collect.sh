@@ -6,6 +6,12 @@
 # facts that decide the semver bump and the operator/migration notes.
 # Read-only: fetches and inspects, never writes a ref.
 #
+# REQUIRED CHECKS lists the status checks the merge into the release branch
+# waits for, read with two `gh api` calls: the branch's rulesets
+# (repos/OWNER/NAME/rules/branches/<base>, all pages) and its classic branch
+# protection (repos/OWNER/NAME/branches/<base>). It prints `unknown` when
+# either call fails, `none` when neither requires a check.
+#
 # Usage: collect.sh [--repo OWNER/NAME] [--base <release-branch>] [--head develop]
 #
 # --base defaults to the repo's GitHub default branch. When that is the head
@@ -116,7 +122,7 @@ echo "=== REQUIRED CHECKS (status checks the merge into $BASE waits for) ==="
 # Rulesets and classic branch protection both can require a check. A required
 # check whose workflow never starts on this PR (a trigger-level `paths` filter
 # the batch does not match) never reports, and blocks the merge.
-RULES_REQ=$(gh api "repos/$REPO/rules/branches/$BASE" \
+RULES_REQ=$(gh api --paginate "repos/$REPO/rules/branches/$BASE" \
   --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
   2>/dev/null)
 RULES_RC=$?

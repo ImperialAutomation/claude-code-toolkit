@@ -11,9 +11,12 @@
 #     $STUB/default-fail exists);
 #   - `label list` prints $STUB/labels, one label name per line;
 #   - `pr list` prints nothing (no previous release);
-#   - `api .../rules/branches/<b>` prints $STUB/rules and `api .../branches/<b>`
-#     prints $STUB/protection, one required check name per line (both fail
-#     when $STUB/api-fail exists).
+#   - `api .../rules/branches/<b>` reads the rulesets JSON in $STUB/rules
+#     (default `[]`) plus, only with --paginate, a second page in
+#     $STUB/rules-page2; `api .../branches/<b>` reads the branch JSON in
+#     $STUB/protection. The --jq filter runs through the real `jq`, per page,
+#     so the script's filters are exercised. $STUB/rules-fail and
+#     $STUB/protection-fail make the matching call fail.
 #
 # Hermetic: $HOME is a temp dir and no real `gh` or network is reached.
 #
@@ -68,10 +71,29 @@ if [[ "$1 $2" == "pr list" ]]; then
     exit 0
 fi
 if [[ "$1" == "api" ]]; then
-    [[ -e "$STUB/api-fail" ]] && { echo "gh: HTTP 403" >&2; exit 1; }
-    case "$2" in
-        */rules/branches/*) cat "$STUB/rules" 2>/dev/null; exit 0 ;;
-        */branches/*) cat "$STUB/protection" 2>/dev/null; exit 0 ;;
+    shift
+    paginate=no; filter="."; endpoint=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --paginate) paginate=yes; shift ;;
+            --jq) filter="$2"; shift 2 ;;
+            *) endpoint="$1"; shift ;;
+        esac
+    done
+    # Like gh: the --jq filter runs on each page on its own.
+    case "$endpoint" in
+        */rules/branches/*)
+            [[ -e "$STUB/rules-fail" ]] && { echo "gh: HTTP 403" >&2; exit 1; }
+            { cat "$STUB/rules" 2>/dev/null || echo '[]'; } | jq -r "$filter" || exit 1
+            if [[ "$paginate" == yes && -e "$STUB/rules-page2" ]]; then
+                jq -r "$filter" < "$STUB/rules-page2" || exit 1
+            fi
+            exit 0 ;;
+        */branches/*)
+            [[ -e "$STUB/protection-fail" ]] && { echo "gh: HTTP 403" >&2; exit 1; }
+            { cat "$STUB/protection" 2>/dev/null || echo '{"protected":false}'; } \
+                | jq -r "$filter" || exit 1
+            exit 0 ;;
     esac
 fi
 echo "unexpected gh call: $*" >&2
@@ -104,7 +126,8 @@ make_repo() {
     git clone -q "$ORIGIN" "$CLONE"
     WORK="$work"
     echo "$default" > "$STUB/default"
-    rm -f "$STUB/default-fail" "$STUB/labels" "$STUB/rules" "$STUB/protection" "$STUB/api-fail"
+    rm -f "$STUB/default-fail" "$STUB/labels" "$STUB/rules" "$STUB/rules-page2" \
+        "$STUB/protection" "$STUB/rules-fail" "$STUB/protection-fail"
 }
 
 run() { # args... -> RC, OUT (stdout+stderr)
@@ -210,16 +233,36 @@ make_repo main main develop
 run
 check "section present" "yes" "$(contains "$OUT" "=== REQUIRED CHECKS")"
 check "none when nothing is required" "yes" "$(contains "$OUT" "required on main: none")"
-printf 'backend-tests\nvitest\n' > "$STUB/rules"
-printf 'vitest\ndependency-audit\n' > "$STUB/protection"
+cat > "$STUB/rules" <<'JSON'
+[{"type":"pull_request","parameters":{}},
+ {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"backend-tests"},{"context":"vitest"}]}}]
+JSON
+cat > "$STUB/protection" <<'JSON'
+{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["vitest","dependency-audit"]}}}
+JSON
 run
 check "exit 0" "0" "$RC"
 check "rulesets and protection merged, deduplicated" "yes" \
     "$(contains "$OUT" "required on main: backend-tests dependency-audit vitest")"
-touch "$STUB/api-fail"
+cat > "$STUB/rules-page2" <<'JSON'
+[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"e2e"}]}}]
+JSON
 run
-check "exit 0 when gh api fails" "0" "$RC"
-check "unknown when gh api fails" "yes" "$(contains "$OUT" "required on main: unknown")"
+check "rule on the second page read (--paginate)" "yes" \
+    "$(contains "$OUT" "required on main: backend-tests dependency-audit e2e vitest")"
+touch "$STUB/rules-fail"
+run
+check "exit 0 when the rulesets call fails" "0" "$RC"
+check "unknown when only the rulesets call fails" "yes" "$(contains "$OUT" "required on main: unknown")"
+rm -f "$STUB/rules-fail"
+touch "$STUB/protection-fail"
+run
+check "exit 0 when the protection call fails" "0" "$RC"
+check "unknown when only the protection call fails" "yes" "$(contains "$OUT" "required on main: unknown")"
+check "no list on failure" "no" "$(contains "$OUT" "required on main: backend-tests")"
+touch "$STUB/rules-fail"
+run
+check "unknown when both calls fail" "yes" "$(contains "$OUT" "required on main: unknown")"
 check "no none on failure" "no" "$(contains "$OUT" "required on main: none")"
 
 echo "== 13. SKILL.md carries no em-dash =="
