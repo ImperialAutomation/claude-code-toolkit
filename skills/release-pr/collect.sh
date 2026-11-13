@@ -6,6 +6,12 @@
 # facts that decide the semver bump and the operator/migration notes.
 # Read-only: fetches and inspects, never writes a ref.
 #
+# REQUIRED CHECKS lists the status checks the merge into the release branch
+# waits for, read with two `gh api` calls: the branch's rulesets
+# (repos/OWNER/NAME/rules/branches/<base>, all pages) and its classic branch
+# protection (repos/OWNER/NAME/branches/<base>). It prints `unknown` when
+# either call fails, `none` when neither requires a check.
+#
 # Usage: collect.sh [--repo OWNER/NAME] [--base <release-branch>] [--head develop]
 #
 # --base defaults to the repo's GitHub default branch. When that is the head
@@ -110,6 +116,28 @@ elif [ -n "$RELEASE_LABELS" ] && [ -n "$SEMVER_WF" ]; then
 else
   echo "semver: absent -- skip the release label and tag steps"
 fi
+
+echo
+echo "=== REQUIRED CHECKS (status checks the merge into $BASE waits for) ==="
+# Rulesets and classic branch protection both can require a check. A required
+# check whose workflow never starts on this PR (a trigger-level `paths` filter
+# the batch does not match) never reports, and blocks the merge.
+RULES_REQ=$(gh api --paginate "repos/$REPO/rules/branches/$BASE" \
+  --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+  2>/dev/null)
+RULES_RC=$?
+PROT_REQ=$(gh api "repos/$REPO/branches/$BASE" \
+  --jq '.protection.required_status_checks.contexts[]?' 2>/dev/null)
+PROT_RC=$?
+if [ "$RULES_RC" -ne 0 ] || [ "$PROT_RC" -ne 0 ]; then
+  echo "required on $BASE: unknown (gh api failed; check the branch's rulesets and protection by hand)"
+else
+  REQUIRED=$(printf '%s\n%s\n' "$RULES_REQ" "$PROT_REQ" | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  echo "required on $BASE: ${REQUIRED:-none}"
+fi
+echo "A required check that is absent from the PR blocks the merge; an absent"
+echo "check that is not required is normal when the batch touches no file its"
+echo "workflow's paths filter matches."
 
 echo
 echo "=== CURRENT VERSION ==="
