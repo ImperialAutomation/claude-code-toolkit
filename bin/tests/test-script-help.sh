@@ -45,6 +45,7 @@ declare -A MUST_SAY=(
     [docker-scratch.sh]=$'not /tmp\nOnly for what a container must mount\nPaste the printed path literally\nno $(...)\nhook-block-destructive.sh\nreport it, and do not'
     [wait-for-pattern.sh]=$'--newer-than <epoch>\ndate +%s\nneed not exist yet\nwait-for-healthy.sh <container>'
     [venv-run.sh]=$'--repo <dir>\npip or python3 prompt\n.venv/bin/'
+    [run-tests.sh]=$'--repo <dir>\nlinked worktrees\nabsolute path into a linked worktree'
 )
 
 for script in "${!MUST_SAY[@]}"; do

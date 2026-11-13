@@ -39,6 +39,12 @@ git -C ~/Projects/claude-code-toolkit worktree add --no-track \
     -b issue-<N>-<slug> ~/Projects/claude-code-toolkit-<N> origin/main
 ```
 
+**Testing the worktree:** `~/.claude/bin/run-tests.sh --repo
+~/Projects/claude-code-toolkit-<N> [<test-name>...]` runs that tree's tests
+without a prompt. Not `bash <worktree>/bin/tests/test-*.sh`, which prompts. A
+change to `run-tests.sh` itself is tested with `<worktree>/bin/run-tests.sh`
+until it is on `main`.
+
 **After merge:** `/cleanup` (`git-cleanup-merged-branch.sh`), from the linked
 worktree or from the live checkout, fast-forwards the live checkout to
 `origin/main`, removes the worktree and deletes the branch. It checks first and
