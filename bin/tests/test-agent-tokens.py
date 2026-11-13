@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "agent-tokens.py"
@@ -287,6 +288,14 @@ r = run("--agent", "root", "--since", "2026-11-11T10:00:00Z")
 check("--since without --session: exit 2", r.returncode == 2)
 r = run("--agent", "root", "--session", "runner1")
 check("--agent and --session together: exit 2", r.returncode == 2)
+r = run("--session", "")
+check("empty --session: usage error exit 2", r.returncode == 2 and "--session" in r.stderr)
+r = run("--session", "", "--since", "2026-11-11T10:00:00Z")
+check("empty --session with --since: names --session, not --since",
+      r.returncode == 2 and "needs a session id" in r.stderr)
+check("parse_time: Z suffix is UTC",
+      at.parse_time("2026-11-11T10:00:00Z") == datetime(2026, 11, 11, 10, tzinfo=timezone.utc))
+check("parse_time: no timestamp is None", at.parse_time(None) is None)
 (PROJECTS / "-proj-b" / "badsess.jsonl").write_bytes(b"\xff\xfe not utf-8\n")
 r = run("--session", "badsess")
 check("unreadable session transcript: exit 2", r.returncode == 2)

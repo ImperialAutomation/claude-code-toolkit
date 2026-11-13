@@ -774,8 +774,10 @@ done
 unset TMPDIR
 
 echo "== 12b. log-runner: the runner session's own row (#270) =="
+# log-runner takes no --repo, which run always passes.
+run_lr() { OUT=$(bash "$QC" "$@" 2>"$T/stderr"); RC=$?; ERR=$(cat "$T/stderr"); }
 reset_stub
-run --tokens "$TOK" log-runner
+run_lr --tokens "$TOK" log-runner
 check "log-runner: exit 0" "0" "$RC"
 check "log-runner: prints nothing" "" "$OUT"
 check "log-runner: header written" "$TSV_HEADER" "$(head -1 "$QUEUE_RUNS_LOG" 2>/dev/null)"
@@ -793,18 +795,29 @@ check "log-runner without --tokens: unknown tokens" \
 
 reset_stub
 printf '%s\n' "$TSV_HEADER_V2" > "$QUEUE_RUNS_LOG"
-run --tokens "$TOK" log-runner
+run_lr --tokens "$TOK" log-runner
 check "log-runner on an older log: header extended" "$TSV_HEADER" "$(head -1 "$QUEUE_RUNS_LOG")"
 
 reset_stub
-run log-runner extra
+mkdir -p "$T/log-is-a-dir"
+OUT=$(QUEUE_RUNS_LOG="$T/log-is-a-dir" bash "$QC" --tokens "$TOK" log-runner 2>"$T/stderr"); RC=$?
+check "log-runner, log not writable: exit 1" "1" "$RC"
+check "log-runner, log not writable: says so" "yes" "$(contains "$(cat "$T/stderr")" "could not append")"
+rmdir "$T/log-is-a-dir"
+
+reset_stub
+run_lr log-runner extra
 check "log-runner with an argument: exit 2" "2" "$RC"
-run --review APPROVE log-runner
+run_lr --review APPROVE log-runner
 check "log-runner with --review: exit 2" "2" "$RC"
-run --fix-tokens "$TOK" log-runner
+run_lr --fix-tokens "$TOK" log-runner
 check "log-runner with --fix-tokens: exit 2" "2" "$RC"
-run --tokens "$T/nope.json" log-runner
+run_lr --tokens "$T/nope.json" log-runner
 check "log-runner with a missing tokens file: exit 2" "2" "$RC"
+run --tokens "$TOK" log-runner
+check "log-runner with --repo: exit 2" "2" "$RC"
+run_lr --tokens "$TOK" claim
+check "claim with --tokens: error names log-runner" "yes" "$(contains "$ERR" "also to log-runner")"
 check "log-runner usage errors wrote no log row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
 
 echo "== 13. usage errors =="

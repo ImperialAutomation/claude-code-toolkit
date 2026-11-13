@@ -134,10 +134,13 @@ def tree(root, parent_of):
 
 def parse_time(text):
     """An ISO 8601 timestamp as an aware datetime (UTC when it names no zone),
-    or None when it does not parse."""
+    or None when it does not parse. A trailing `Z` is rewritten first:
+    fromisoformat accepts it only from Python 3.11 on."""
+    if not isinstance(text, str):
+        return None
     try:
-        stamp = datetime.fromisoformat(text)
-    except (TypeError, ValueError):
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
         return None
     return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
@@ -274,9 +277,11 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", help="print one JSON object")
     args = parser.parse_args(argv)
 
+    if args.session == "":
+        parser.error("--session needs a session id")
     since = None
     if args.since is not None:
-        if not args.session:
+        if args.session is None:
             parser.error("--since belongs to --session")
         since = parse_time(args.since)
         if since is None:
@@ -291,7 +296,7 @@ def main(argv=None):
         print(json.dumps(report) if args.json else format_text(report))
         return EXIT_FOUND
 
-    if args.session:
+    if args.session is not None:
         kind, wanted = "session", args.session
         found = find_session_transcripts(args.session)
     else:
@@ -307,7 +312,7 @@ def main(argv=None):
             print(f"  {path}", file=sys.stderr)
         return EXIT_ERROR
     try:
-        report = measure_session(found[0], since) if args.session else measure(found[0])
+        report = measure_session(found[0], since) if args.session is not None else measure(found[0])
     except Unreadable as exc:
         print(f"agent-tokens: unreadable: {exc}", file=sys.stderr)
         return EXIT_ERROR

@@ -96,12 +96,14 @@
 #           the four token totals and agent count from --tokens (the
 #           `agent-tokens.py --session --json` output; `unknown` without it),
 #           the session id, empty review and fix columns. Takes no other
-#           option. queue-budget.sh stop calls it when a loop stops, and its
-#           gate does not count this row as a release.
+#           option (not even --repo). queue-budget.sh stop calls it when a
+#           loop stops, and its gate does not count this row as a release.
+#           Unlike a release, a log that cannot be written is an error here.
 #
 # Exit codes:
 #   0  done (claim: a number, or nothing for an empty queue)
-#   1  gh failed (stderr says which call); the labels may be half-changed
+#   1  gh failed (stderr says which call); the labels may be half-changed.
+#      log-runner: the run log could not be written
 #   2  usage error or <dir> is not usable
 
 set -uo pipefail
@@ -255,7 +257,7 @@ case "$command" in
         elif [[ $# -ne 0 ]]; then
             usage
         fi
-        $release_options && { echo "error: --tokens, --review* and --fix-tokens belong to release" >&2; usage; }
+        $release_options && { echo "error: --tokens, --review* and --fix-tokens belong to release (--tokens also to log-runner)" >&2; usage; }
         ;;
     release)
         [[ $# -ge 2 ]] || usage
@@ -286,7 +288,7 @@ case "$command" in
         ;;
     log-runner)
         [[ $# -eq 0 ]] || usage
-        [[ -z "$review$review_final$review_findings$review_tokens_file$fix_tokens_file" ]] \
+        [[ -z "$repo$review$review_final$review_findings$review_tokens_file$fix_tokens_file" ]] \
             || { echo "error: log-runner takes only --tokens" >&2; usage; }
         issue=""; outcome="$RUNNER_OUTCOME"; pr_url=""
         parse_tokens_option
@@ -474,7 +476,8 @@ do_release() {
 
     gh issue edit "$issue" "${edit_args[@]}" >/dev/null \
         || gh_fail "update the labels of #$issue"
-    log_run
+    # For a release an unwritable log is only a warning.
+    log_run || true
 }
 
 # join_tab <field>...: the fields joined by tabs; empty fields are kept.
@@ -495,7 +498,8 @@ prefixed_token_columns() {
 # log_run: one row in the run log, the header first when the file is new. A
 # log from before the session column (#251) or the review columns (#297) gets
 # its header extended; its old rows keep their nine or ten fields, so a
-# nine-field row never matches a session.
+# nine-field row never matches a session. Returns 1, after a warning, when the
+# log cannot be written.
 log_run() {
     local row header first header_v1 header_v2 tmp
     local -a review_names fix_names
@@ -519,11 +523,11 @@ log_run() {
             cat "$tmp" > "$RUNS_LOG" && rm -f "$tmp"
         fi &&
         printf '%s\n' "$row" >> "$RUNS_LOG"
-    } 2>/dev/null || echo "warning: could not append to the run log '$RUNS_LOG'" >&2
+    } 2>/dev/null || { echo "warning: could not append to the run log '$RUNS_LOG'" >&2; return 1; }
 }
 
 case "$command" in
     claim) do_claim ;;
     release) do_release ;;
-    log-runner) log_run ;;
+    log-runner) log_run || exit 1 ;;
 esac

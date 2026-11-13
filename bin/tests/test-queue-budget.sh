@@ -117,6 +117,13 @@ check "first gate writes the loop start" "yes" \
 echo "2026-11-11T10:00:00Z" > "$START"
 run gate 3
 check "a later gate leaves the start unchanged" "2026-11-11T10:00:00Z" "$(cat "$START")"
+: > "$START"
+run gate 3
+check "an empty start is rewritten" "yes" \
+    "$(grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' "$START" 2>/dev/null && echo yes || echo no)"
+echo "garbled" > "$START"
+run gate 3
+check "a garbled start is rewritten" "no" "$(grep -q garbled "$START" && echo yes || echo no)"
 reset
 touch "$QUEUE_STOP_FILE"
 run gate 3
@@ -238,8 +245,10 @@ runner_rows() { awk -F'\t' 'NR > 1 && $3 == "runner"' "$QUEUE_RUNS_LOG" 2>/dev/n
 reset
 mkdir -p "$QUEUE_IDLE_DIR"
 echo "2026-11-11T10:00:00Z" > "$START"
+echo 5 > "$QUEUE_IDLE_DIR/sess-1"
 run stop
 check "stop: exit 0" "0" "$RC"
+check "stop: removes the idle count" "no" "$([[ -e "$QUEUE_IDLE_DIR/sess-1" ]] && echo yes || echo no)"
 check "stop: prints the runner summary" "runner: in 0.0k / cw 0.3k / cr 3.0k / out 0.0k, 1 agent" "$OUT"
 check "stop: one runner row, window only, each message once" \
     $'\trunner\t\t3\t300\t3000\t30\t1\tsess-1' "$(runner_rows | cut -f2-10)"
@@ -270,8 +279,23 @@ check "stop, no transcript: removes the loop start" "no" \
 check "stop, no transcript: other session's start kept" "yes" "$([[ -e "$START" ]] && echo yes || echo no)"
 
 reset
+mkdir -p "$QUEUE_IDLE_DIR"
+echo "2026-11-11T10:00:00Z" > "$START"
+mkdir -p "$T/log-is-a-dir"
+OUT=$(QUEUE_RUNS_LOG="$T/log-is-a-dir" bash "$QB" stop 2>/dev/null); RC=$?
+check "stop, row not written: exit 0" "0" "$RC"
+check "stop, row not written: says so" "yes" "$(contains "$OUT" "runner tokens: not logged")"
+check "stop, row not written: no success line" "no" "$(contains "$OUT" "runner: ")"
+check "stop, row not written: keeps the loop start" "yes" "$([[ -e "$START" ]] && echo yes || echo no)"
+rmdir "$T/log-is-a-dir"
+
+reset
 OUT=$(env -u CLAUDE_CODE_SESSION_ID bash "$QB" stop 2>/dev/null); RC=$?
-check "stop without session id: exit 1" "1" "$RC"
+check "stop without session id: exit 0" "0" "$RC"
+check "stop without session id: documented form" "yes" \
+    "$(contains "$OUT" "runner tokens: unknown (CLAUDE_CODE_SESSION_ID")"
+check "stop without session id: one line" "1" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
+check "stop without session id: writes no row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
 
 echo "== 6. usage errors =="
 reset

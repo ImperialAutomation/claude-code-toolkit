@@ -423,8 +423,10 @@ next one runs (#188, D6).
 
   It appends one `runner` row to `queue-runs.tsv` (this session's main
   transcript since the loop start; the sub-agents are already in the issue
-  rows) and prints `runner: <summary>` or `runner tokens: unknown (<why>)`.
-  Put that line in the stop report (Step 7). It never fails the stop.
+  rows), resets the session's idle count and prints `runner: <summary>`,
+  `runner tokens: unknown (<why>)`, or `runner tokens: not logged (<why>)`
+  when the row could not be written. Put that line in the stop report
+  (Step 7). It always exits 0 and never fails the stop.
 
 ## What this skill does not do
 
