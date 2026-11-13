@@ -103,6 +103,11 @@ REWORK_LABEL="agent-rework"
 SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL" "$PR_LABEL" "$REWORK_LABEL")
 # Labels that make an agent-rework issue unclaimable (#300, D4).
 REWORK_SKIP_LABELS=("$WIP_LABEL" "$HUMAN_LABEL" "$EPIC_LABEL")
+# Claim order, highest first (#309); an issue without one of them sorts last.
+PRIORITY_LABELS=("priority:critical" "priority:high" "priority:medium" "priority:low")
+# Added to an agent-ready issue that has no priority label; claim never
+# reads or removes it (#309, D1).
+TRIAGE_LABEL="needs-triage"
 # gh issue list returns 30 issues by default; the queue is never this long.
 GH_FETCH_LIMIT=200
 COMMENT_MARKER="<!-- queue-runner -->"
@@ -205,9 +210,12 @@ case "$command" in
     claim)
         claim_label="$READY_LABEL"
         claim_skip=("${SKIP_LABELS[@]}")
+        # A human set agent-rework, which is triage enough (#309, D3).
+        needs_priority=true
         if [[ $# -eq 1 && "$1" == "--rework" ]]; then
             claim_label="$REWORK_LABEL"
             claim_skip=("${REWORK_SKIP_LABELS[@]}")
+            needs_priority=false
         elif [[ $# -ne 0 ]]; then
             usage
         fi
@@ -281,27 +289,75 @@ claimable() {
     return 0
 }
 
+# prioritized <labels-of-output>: has one of PRIORITY_LABELS.
+prioritized() {
+    local p
+    for p in "${PRIORITY_LABELS[@]}"; do
+        grep -qxF -- "$p" <<< "$1" && return 0
+    done
+    return 1
+}
+
+# json_array <value>...: the values as a JSON array of strings.
+json_array() {
+    local a
+    a=$(printf '"%s",' "$@")
+    echo "[${a%,}]"
+}
+
+# triage <N> <has-triage-label>: report an agent-ready issue without a
+# priority label and add TRIAGE_LABEL when it is missing (#309, D2).
+triage() {
+    echo "skipped #$1: no priority label; it needs '$TRIAGE_LABEL'" >&2
+    [[ "$2" == true ]] && return 0
+    gh issue edit "$1" --add-label "$TRIAGE_LABEL" >/dev/null \
+        || gh_fail "add '$TRIAGE_LABEL' to #$1"
+}
+
 do_claim() {
-    local skip_filter candidates n before after
-    skip_filter=$(printf '"%s",' "${claim_skip[@]}"); skip_filter="[${skip_filter%,}]"
-    candidates=$(gh issue list --state open --label "$claim_label" \
+    local skip_filter priorities listed n rank triaged before after
+    local -a candidates=()
+    skip_filter=$(json_array "${claim_skip[@]}")
+    priorities=$(json_array "${PRIORITY_LABELS[@]}")
+    # One line per issue: number, rank (index of its first priority label,
+    # past the end without one) and whether it has TRIAGE_LABEL.
+    listed=$(gh issue list --state open --label "$claim_label" \
             --search "sort:created-asc" --limit "$GH_FETCH_LIMIT" \
             --json number,createdAt,labels \
-            --jq "map(select([.labels[].name] - $skip_filter == [.labels[].name]))
-                  | sort_by(.createdAt, .number) | .[].number") \
+            --jq "$priorities as \$p
+                  | map(select([.labels[].name] - $skip_filter == [.labels[].name])
+                        | [.labels[].name] as \$l
+                        | .rank = ([\$p | to_entries[] | select(.value as \$v | \$l | index([\$v])) | .key] | first // (\$p | length))
+                        | .triaged = (\$l | index([\"$TRIAGE_LABEL\"]) != null))
+                  | sort_by(.rank, .createdAt, .number)
+                  | .[] | \"\(.number) \(.rank) \(.triaged)\"") \
         || gh_fail "list the open '$claim_label' issues"
 
-    for n in $candidates; do
+    # Every untriaged issue is flagged now, not only once the queue reaches it.
+    while read -r n rank triaged; do
+        [[ -n "$n" ]] || continue
+        if $needs_priority && (( rank == ${#PRIORITY_LABELS[@]} )); then
+            triage "$n" "$triaged"
+        else
+            candidates+=("$n")
+        fi
+    done <<< "$listed"
+
+    for n in "${candidates[@]}"; do
         # The list may be stale: someone may have claimed it since.
         before=$(labels_of "$n") || gh_fail "read the labels of #$n"
         claimable "$before" || continue
+        if $needs_priority && ! prioritized "$before"; then
+            continue
+        fi
 
         gh issue edit "$n" --add-label "$WIP_LABEL" >/dev/null \
             || gh_fail "add '$WIP_LABEL' to #$n"
 
         after=$(labels_of "$n") || gh_fail "re-read the labels of #$n after claiming it"
         # Our own agent-wip is expected now; judge the rest.
-        if claimable "$(grep -vxF -- "$WIP_LABEL" <<< "$after")"; then
+        if claimable "$(grep -vxF -- "$WIP_LABEL" <<< "$after")" \
+                && { ! $needs_priority || prioritized "$after"; }; then
             echo "$n"
             return 0
         fi
