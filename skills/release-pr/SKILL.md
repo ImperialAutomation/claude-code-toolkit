@@ -40,6 +40,7 @@ release branch every later step uses. Output sections:
 | Section | What it decides |
 |---|---|
 | RELEASE MACHINERY | whether the label, tag and AGENT-REVIEW steps apply (Step 1b) |
+| REQUIRED CHECKS | which absent checks block the merge (Step 5) |
 | CURRENT VERSION | the three candidate tags; you pick one |
 | SIZE | the "N merged PRs, N commits, N files, +N/−N" opening line |
 | BEHIND CHECK | **stop condition**, see below |
@@ -200,6 +201,29 @@ are `Validate release label`, `agent-pr-checklist`, `agent-pr-label`, `vitest`,
 `Playwright E2E` skip on release PRs; that is normal, not a failure. A repo
 without the machinery has none of the label or checklist checks.
 
+The check list can differ from that expectation in three ways. Tell them apart
+before reporting the gates green:
+
+- **A check is absent and not required.** A workflow with a trigger-level
+  `paths` filter (frontend tests, type-check, backend tests) does not start when
+  the batch touches no matching file. Absent with no matching changes is normal;
+  absent with matching changes is a CI problem to investigate.
+- **A check is absent and required.** Compare the absent checks with the
+  `required on <release-branch>:` line of REQUIRED CHECKS. A workflow its `paths`
+  filter keeps from starting never reports, so a required check sits on
+  "Expected: Waiting for status to be reported" forever and **the PR cannot
+  merge**. Say so in the report, with the fix from Troubleshooting. A job
+  skipped by its own `if:` is different: it reports as skipped, which passes a
+  required check. On `required on <release-branch>: unknown`, read the rules
+  yourself: `gh api repos/OWNER/NAME/rules/branches/<release-branch>`, look for
+  `required_status_checks`.
+- **A run the PR did not cause is listed.** The release PR's head *is*
+  `develop`, so GitHub shows every run on the head SHA, including a
+  push-triggered one such as the deploy of the merge that preceded the PR. It
+  needs no action. Confirm with
+  `gh run list --workflow <file> --json event,headSha`: `event: push` on the
+  PR's head SHA.
+
 To wait for them without polling by hand:
 
 ```bash
@@ -269,3 +293,5 @@ The tag is annotated, tagged by `github-actions[bot]`, with message
 | `collect.sh` shows a non-merge commit on the release branch | hotfix landed directly on it | back-merge the release branch into develop before releasing |
 | `collect.sh` exits 1: `origin/<x> does not exist` | wrong `--base`/`--head`, or the default branch is not the release branch | pick the right name from the listed remote branches and pass `--base` |
 | `collect.sh` exits 1: `cannot pick a release branch` | default branch is develop and there is no master/main | pass `--base <release-branch>` |
+| Required check stuck on "Expected: Waiting for status to be reported" | its workflow has a trigger-level `paths` filter the batch does not match, so it never starts and never reports | durable, in the repo: drop `paths` from the `pull_request` trigger, add a light job that lists the PR's files (`gh api --paginate repos/OWNER/NAME/pulls/N/files`) and decides relevance, and gate the heavy jobs with a job-level `if:`, failing open when the listing fails. Test it with a throwaway draft PR whose base is the feature branch itself, so the diff holds only the probe change. One-off: a ruleset bypass, which needs a bypass actor on the ruleset first (with none, even an admin gets no "merge without waiting") |
+| Check list shows a deploy run on the release PR | a push-triggered workflow ran on `develop`'s head SHA, which is the PR's head | none: the PR did not cause it; `gh run list --workflow <file> --json event,headSha` shows `event: push` |
