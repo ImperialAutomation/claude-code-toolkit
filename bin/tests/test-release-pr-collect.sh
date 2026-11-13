@@ -10,7 +10,10 @@
 #   - `repo view ... defaultBranchRef` prints $STUB/default (fails when
 #     $STUB/default-fail exists);
 #   - `label list` prints $STUB/labels, one label name per line;
-#   - `pr list` prints nothing (no previous release).
+#   - `pr list` prints nothing (no previous release);
+#   - `api .../rules/branches/<b>` prints $STUB/rules and `api .../branches/<b>`
+#     prints $STUB/protection, one required check name per line (both fail
+#     when $STUB/api-fail exists).
 #
 # Hermetic: $HOME is a temp dir and no real `gh` or network is reached.
 #
@@ -64,6 +67,13 @@ fi
 if [[ "$1 $2" == "pr list" ]]; then
     exit 0
 fi
+if [[ "$1" == "api" ]]; then
+    [[ -e "$STUB/api-fail" ]] && { echo "gh: HTTP 403" >&2; exit 1; }
+    case "$2" in
+        */rules/branches/*) cat "$STUB/rules" 2>/dev/null; exit 0 ;;
+        */branches/*) cat "$STUB/protection" 2>/dev/null; exit 0 ;;
+    esac
+fi
 echo "unexpected gh call: $*" >&2
 exit 1
 EOF
@@ -94,7 +104,7 @@ make_repo() {
     git clone -q "$ORIGIN" "$CLONE"
     WORK="$work"
     echo "$default" > "$STUB/default"
-    rm -f "$STUB/default-fail" "$STUB/labels"
+    rm -f "$STUB/default-fail" "$STUB/labels" "$STUB/rules" "$STUB/protection" "$STUB/api-fail"
 }
 
 run() { # args... -> RC, OUT (stdout+stderr)
@@ -195,7 +205,24 @@ check "workflow list present" "yes" "$(contains "$OUT" "workflows on main: semve
 check "template present" "yes" "$(contains "$OUT" "AGENT-REVIEW template: .github/PULL_REQUEST_TEMPLATE.md")"
 check "semver verdict present" "yes" "$(contains "$OUT" "semver: present")"
 
-echo "== 12. SKILL.md carries no em-dash =="
+echo "== 12. required checks on the release branch =="
+make_repo main main develop
+run
+check "section present" "yes" "$(contains "$OUT" "=== REQUIRED CHECKS")"
+check "none when nothing is required" "yes" "$(contains "$OUT" "required on main: none")"
+printf 'backend-tests\nvitest\n' > "$STUB/rules"
+printf 'vitest\ndependency-audit\n' > "$STUB/protection"
+run
+check "exit 0" "0" "$RC"
+check "rulesets and protection merged, deduplicated" "yes" \
+    "$(contains "$OUT" "required on main: backend-tests dependency-audit vitest")"
+touch "$STUB/api-fail"
+run
+check "exit 0 when gh api fails" "0" "$RC"
+check "unknown when gh api fails" "yes" "$(contains "$OUT" "required on main: unknown")"
+check "no none on failure" "no" "$(contains "$OUT" "required on main: none")"
+
+echo "== 13. SKILL.md carries no em-dash =="
 # The global style rule forbids em-dashes in PR titles and bodies; the skill's
 # templates and prose are what agents copy into them (#226).
 SKILL_MD="$(dirname "$COLLECT")/SKILL.md"

@@ -112,6 +112,28 @@ else
 fi
 
 echo
+echo "=== REQUIRED CHECKS (status checks the merge into $BASE waits for) ==="
+# Rulesets and classic branch protection both can require a check. A required
+# check whose workflow never starts on this PR (a trigger-level `paths` filter
+# the batch does not match) never reports, and blocks the merge.
+RULES_REQ=$(gh api "repos/$REPO/rules/branches/$BASE" \
+  --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+  2>/dev/null)
+RULES_RC=$?
+PROT_REQ=$(gh api "repos/$REPO/branches/$BASE" \
+  --jq '.protection.required_status_checks.contexts[]?' 2>/dev/null)
+PROT_RC=$?
+if [ "$RULES_RC" -ne 0 ] || [ "$PROT_RC" -ne 0 ]; then
+  echo "required on $BASE: unknown (gh api failed; check the branch's rulesets and protection by hand)"
+else
+  REQUIRED=$(printf '%s\n%s\n' "$RULES_REQ" "$PROT_REQ" | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  echo "required on $BASE: ${REQUIRED:-none}"
+fi
+echo "A required check that is absent from the PR blocks the merge; an absent"
+echo "check that is not required is normal when the batch touches no file its"
+echo "workflow's paths filter matches."
+
+echo
 echo "=== CURRENT VERSION ==="
 LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
 if [ -z "$LATEST" ]; then
