@@ -196,6 +196,7 @@ check "--help names claim --rework" "yes" "$(contains "$OUT" "claim --rework")"
 check "--help names release rework" "yes" "$(contains "$OUT" "rework <url>")"
 check "--help names --tokens" "yes" "$(contains "$OUT" "--tokens")"
 check "--help names QUEUE_RUNS_LOG" "yes" "$(contains "$OUT" "QUEUE_RUNS_LOG")"
+check "--help names log-runner" "yes" "$(contains "$OUT" "log-runner")"
 for opt in --review --review-final --review-findings --review-tokens --fix-tokens; do
     check "--help names $opt" "yes" "$(contains "$OUT" "$opt ")"
 done
@@ -771,6 +772,40 @@ for outcome in pr rework escalated failed; do
     check "$outcome: no temp file left" "" "$(ls -A "$TMPDIR")"
 done
 unset TMPDIR
+
+echo "== 12b. log-runner: the runner session's own row (#270) =="
+reset_stub
+run --tokens "$TOK" log-runner
+check "log-runner: exit 0" "0" "$RC"
+check "log-runner: prints nothing" "" "$OUT"
+check "log-runner: header written" "$TSV_HEADER" "$(head -1 "$QUEUE_RUNS_LOG" 2>/dev/null)"
+check "log-runner: empty issue and PR, outcome runner, tokens, agents, session" \
+    $'\trunner\t\t42\t94872\t1470008\t14878\t3\tsess-1' "$(log_rows)"
+check "log-runner: review columns empty" "$NO_REVIEW" "$(review_rows)"
+check "log-runner: row has the full field count" "23" "$(tail -1 "$QUEUE_RUNS_LOG" | awk -F'\t' '{ print NF }')"
+check "log-runner: calls no gh" "no" "$([[ -e "$STUB/calls" ]] && echo yes || echo no)"
+
+reset_stub
+OUT=$(bash "$QC" log-runner 2>/dev/null); RC=$?
+check "log-runner without --tokens or --repo: exit 0" "0" "$RC"
+check "log-runner without --tokens: unknown tokens" \
+    $'\trunner\t\tunknown\tunknown\tunknown\tunknown\tunknown\tsess-1' "$(log_rows)"
+
+reset_stub
+printf '%s\n' "$TSV_HEADER_V2" > "$QUEUE_RUNS_LOG"
+run --tokens "$TOK" log-runner
+check "log-runner on an older log: header extended" "$TSV_HEADER" "$(head -1 "$QUEUE_RUNS_LOG")"
+
+reset_stub
+run log-runner extra
+check "log-runner with an argument: exit 2" "2" "$RC"
+run --review APPROVE log-runner
+check "log-runner with --review: exit 2" "2" "$RC"
+run --fix-tokens "$TOK" log-runner
+check "log-runner with --fix-tokens: exit 2" "2" "$RC"
+run --tokens "$T/nope.json" log-runner
+check "log-runner with a missing tokens file: exit 2" "2" "$RC"
+check "log-runner usage errors wrote no log row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
 
 echo "== 13. usage errors =="
 reset_stub

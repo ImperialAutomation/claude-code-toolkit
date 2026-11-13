@@ -7,6 +7,7 @@
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> rework <url> [<message-file>]
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> escalated
 #   queue-claim.sh [--repo <dir>] [<release-options>] release <N> failed <message-file>
+#   queue-claim.sh [--tokens <json-file>] log-runner
 #
 # Works on the GitHub repository of <dir> (default: the current directory).
 # The labels are described in docs/escalation-list.md.
@@ -90,6 +91,13 @@
 #                          the issue returns to the queue for one retry. When
 #                          it already has `agent-failed`: adds `needs-human`
 #                          as well, so no later claim takes it (#188, D5).
+# log-runner  Appends the runner session's own row to the run log (#270),
+#           without any gh call: empty issue and PR URL, outcome `runner`,
+#           the four token totals and agent count from --tokens (the
+#           `agent-tokens.py --session --json` output; `unknown` without it),
+#           the session id, empty review and fix columns. Takes no other
+#           option. queue-budget.sh stop calls it when a loop stops, and its
+#           gate does not count this row as a release.
 #
 # Exit codes:
 #   0  done (claim: a number, or nothing for an empty queue)
@@ -133,9 +141,12 @@ REVIEW_COLUMNS=(review review_final review_findings)
 REVIEW_PREFIX="review_"
 FIX_PREFIX="fix_"
 REVIEW_VERDICTS=(APPROVE BLOCKING HUMAN error)
+# Outcome of the runner session's own row (#270); queue-budget.sh does not
+# count it as a release.
+RUNNER_OUTCOME="runner"
 
 usage() {
-    echo "usage: $(basename "$0") [--repo <dir>] claim [--rework] | [<release-options>] release <N> pr|rework <url> [<message-file>] | ... release <N> escalated | ... release <N> failed <message-file> (see --help)" >&2
+    echo "usage: $(basename "$0") [--repo <dir>] claim [--rework] | [<release-options>] release <N> pr|rework <url> [<message-file>] | ... release <N> escalated | ... release <N> failed <message-file> | [--tokens <json-file>] log-runner (see --help)" >&2
     exit 2
 }
 
@@ -209,6 +220,24 @@ phase_token_columns() {
     for (( i = 0; i < n; i++ )); do phase_columns+=(""); done
 }
 
+# parse_tokens_option: sets tokens_line (for the comment) and token_columns
+# (the four totals and the agent count) from --tokens, `unknown` without it.
+# A missing or malformed file is a usage error.
+parse_tokens_option() {
+    local key parsed
+    local -a parsed_lines
+    tokens_line="tokens: $UNKNOWN"
+    token_columns=()
+    for key in "${TOKEN_KEYS[@]}" "$AGENTS_KEY"; do token_columns+=("$UNKNOWN"); done
+    [[ -n "$tokens_file" ]] || return 0
+    [[ -f "$tokens_file" ]] || { echo "error: tokens file not found: '$tokens_file'" >&2; exit 2; }
+    parsed=$(read_tokens "$tokens_file") \
+        || { echo "error: not agent-tokens.py --json output: '$tokens_file'" >&2; exit 2; }
+    mapfile -t parsed_lines <<< "$parsed"
+    token_columns=("${parsed_lines[@]:0:${#token_columns[@]}}")
+    tokens_line="tokens: ${parsed_lines[-1]}"
+}
+
 [[ $# -ge 1 ]] || usage
 command="$1"; shift
 
@@ -242,18 +271,7 @@ case "$command" in
                        [[ -f "$message_file" ]] || { echo "error: message file not found: '$message_file'" >&2; exit 2; } ;;
             *) echo "unknown outcome: $outcome" >&2; usage ;;
         esac
-        # Token line for the comment and the five log columns.
-        tokens_line="tokens: $UNKNOWN"
-        token_columns=()
-        for key in "${TOKEN_KEYS[@]}" "$AGENTS_KEY"; do token_columns+=("$UNKNOWN"); done
-        if [[ -n "$tokens_file" ]]; then
-            [[ -f "$tokens_file" ]] || { echo "error: tokens file not found: '$tokens_file'" >&2; exit 2; }
-            parsed=$(read_tokens "$tokens_file") \
-                || { echo "error: not agent-tokens.py --json output: '$tokens_file'" >&2; exit 2; }
-            mapfile -t parsed_lines <<< "$parsed"
-            token_columns=("${parsed_lines[@]:0:${#token_columns[@]}}")
-            tokens_line="tokens: ${parsed_lines[-1]}"
-        fi
+        parse_tokens_option
         valid_verdict "$review" \
             || { echo "error: --review must be one of ${REVIEW_VERDICTS[*]}: '$review'" >&2; usage; }
         valid_verdict "$review_final" \
@@ -264,6 +282,16 @@ case "$command" in
         phase_token_columns review "$review_tokens_file"
         review_token_columns=("${phase_columns[@]}")
         phase_token_columns fix "$fix_tokens_file"
+        fix_token_columns=("${phase_columns[@]}")
+        ;;
+    log-runner)
+        [[ $# -eq 0 ]] || usage
+        [[ -z "$review$review_final$review_findings$review_tokens_file$fix_tokens_file" ]] \
+            || { echo "error: log-runner takes only --tokens" >&2; usage; }
+        issue=""; outcome="$RUNNER_OUTCOME"; pr_url=""
+        parse_tokens_option
+        phase_token_columns review ""
+        review_token_columns=("${phase_columns[@]}")
         fix_token_columns=("${phase_columns[@]}")
         ;;
     *) echo "unknown command: $command" >&2; usage ;;
@@ -497,4 +525,5 @@ log_run() {
 case "$command" in
     claim) do_claim ;;
     release) do_release ;;
+    log-runner) log_run ;;
 esac
