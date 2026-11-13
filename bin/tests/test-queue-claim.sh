@@ -177,6 +177,10 @@ log_rows() { tail -n +2 "$QUEUE_RUNS_LOG" 2>/dev/null | cut -f2-10; }
 review_rows() { tail -n +2 "$QUEUE_RUNS_LOG" 2>/dev/null | cut -f11-; }
 log_lines() { wc -l < "$QUEUE_RUNS_LOG" 2>/dev/null | tr -d ' ' || echo 0; }
 
+# Plain claim only takes an issue with a priority label (#309); fixtures that
+# are not about priority all get this one.
+P="priority:medium"
+
 OUT=""; RC=0; ERR=""
 run() { OUT=$(bash "$QC" --repo "$R" "$@" 2>"$T/stderr"); RC=$?; ERR=$(cat "$T/stderr"); }
 
@@ -210,9 +214,9 @@ check "no agent-ready issue: untouched" "bug" "$(labels_of 7)"
 
 echo "== 2. oldest first =="
 reset_stub
-issue 5 2026-01-03 agent-ready
-issue 3 2026-01-02 agent-ready
-issue 9 2026-01-01 agent-ready
+issue 5 2026-01-03 agent-ready "$P"
+issue 3 2026-01-02 agent-ready "$P"
+issue 9 2026-01-01 agent-ready "$P"
 run claim
 check "oldest: exit 0" "0" "$RC"
 check "oldest: prints the oldest (by creation date)" "9" "$OUT"
@@ -223,6 +227,78 @@ calls=$(cat "$STUB/calls")
 check "gh ran in the --repo directory" "yes" "$(contains "$calls" "$R|")"
 check "gh listed open issues" "yes" "$(contains "$calls" "--state open")"
 
+echo "== 2b. priority first (#309) =="
+reset_stub
+issue 1 2026-01-01 agent-ready priority:medium
+issue 2 2026-01-02 agent-ready priority:high
+run claim
+check "priority: a newer high beats an older medium" "2" "$OUT"
+check "priority: the medium one untouched" "no" "$(has 1 agent-wip)"
+
+reset_stub
+issue 1 2026-01-01 agent-ready priority:low
+issue 2 2026-01-02 agent-ready priority:medium
+issue 3 2026-01-03 agent-ready priority:high
+issue 4 2026-01-04 agent-ready priority:critical
+run claim
+check "priority: critical first" "4" "$OUT"
+run claim
+check "priority: then high" "3" "$OUT"
+run claim
+check "priority: then medium" "2" "$OUT"
+run claim
+check "priority: low last" "1" "$OUT"
+
+reset_stub
+issue 5 2026-01-03 agent-ready priority:high
+issue 9 2026-01-01 agent-ready priority:high
+issue 7 2026-01-02 agent-ready priority:low
+run claim
+check "priority: oldest first within one priority" "9" "$OUT"
+
+echo "== 2c. no priority label: needs-triage, not claimed (#309) =="
+reset_stub
+issue 1 2026-01-01 agent-ready
+issue 2 2026-01-02 agent-ready priority:low
+run claim
+check "untriaged: exit 0" "0" "$RC"
+check "untriaged: the prioritized issue is claimed" "2" "$OUT"
+check "untriaged: not claimed" "no" "$(has 1 agent-wip)"
+check "untriaged: gets needs-triage" "agent-ready needs-triage" "$(labels_of 1)"
+check "untriaged: stderr names it" "yes" "$(contains "$ERR" "#1")"
+
+reset_stub
+issue 1 2026-01-01 agent-ready
+issue 2 2026-01-02 agent-ready needs-triage
+run claim
+check "only untriaged: prints nothing" "" "$OUT"
+check "only untriaged: exit 0" "0" "$RC"
+check "only untriaged: #1 gets needs-triage" "agent-ready needs-triage" "$(labels_of 1)"
+check "only untriaged: #2 keeps its single needs-triage" "agent-ready needs-triage" "$(labels_of 2)"
+check "only untriaged: no edit on an issue that already has needs-triage" "no" \
+    "$(contains "$(cat "$STUB/calls")" "issue edit 2 ")"
+
+reset_stub
+issue 1 2026-01-01 agent-ready needs-triage priority:high
+run claim
+check "priority and needs-triage: claimed" "1" "$OUT"
+check "priority and needs-triage: needs-triage left alone" "yes" "$(has 1 needs-triage)"
+
+reset_stub
+issue 1 2026-01-01 agent-ready
+touch "$STUB/fail-edit"
+run claim
+check "needs-triage edit fails: exit 1" "1" "$RC"
+check "needs-triage edit fails: nothing on stdout" "" "$OUT"
+
+reset_stub
+issue 3 2026-01-01 agent-ready "$P"
+# A human drops the priority while we add agent-wip.
+hook after-claim-3 "sed -i '/^priority:/d' \"\$STUB/issues/3/labels\""
+run claim
+check "priority removed while claiming: prints nothing" "" "$OUT"
+check "priority removed while claiming: no claim left" "no" "$(has 3 agent-wip)"
+
 echo "== 3. skip filters =="
 reset_stub
 issue 1 2026-01-01 agent-ready agent-wip
@@ -230,8 +306,8 @@ issue 2 2026-01-02 agent-ready needs-human
 issue 3 2026-01-03 agent-ready epic
 issue 4 2026-01-04 enhancement
 issue 5 2026-01-05 agent-ready agent-failed agent-wip
-issue 6 2026-01-06 agent-ready agent-failed
-issue 8 2026-01-08 agent-ready
+issue 6 2026-01-06 agent-ready agent-failed "$P"
+issue 8 2026-01-08 agent-ready "$P"
 run claim
 check "filters: claims the first claimable one" "6" "$OUT"
 check "filters: agent-wip issue keeps its single claim" "agent-ready agent-wip" "$(labels_of 1)"
@@ -256,8 +332,8 @@ check "closed issue: nothing claimed" "" "$OUT"
 
 echo "== 4. lost race before the claim =="
 reset_stub
-issue 3 2026-01-01 agent-ready
-issue 4 2026-01-02 agent-ready
+issue 3 2026-01-01 agent-ready "$P"
+issue 4 2026-01-02 agent-ready "$P"
 # Another runner claims #3 between our list and our edit.
 hook after-list "echo agent-wip >> \"\$STUB/issues/3/labels\""
 run claim
@@ -268,8 +344,8 @@ check "race before: #4 claimed" "yes" "$(has 4 agent-wip)"
 
 echo "== 5. lost race after the claim =="
 reset_stub
-issue 3 2026-01-01 agent-ready
-issue 4 2026-01-02 agent-ready
+issue 3 2026-01-01 agent-ready "$P"
+issue 4 2026-01-02 agent-ready "$P"
 # While we add agent-wip, #3 is escalated by someone else.
 hook after-claim-3 "echo needs-human >> \"\$STUB/issues/3/labels\""
 run claim
@@ -279,7 +355,7 @@ check "race after: #3 keeps needs-human" "yes" "$(has 3 needs-human)"
 check "race after: #4 claimed" "yes" "$(has 4 agent-wip)"
 
 reset_stub
-issue 3 2026-01-01 agent-ready
+issue 3 2026-01-01 agent-ready "$P"
 hook after-claim-3 "echo epic >> \"\$STUB/issues/3/labels\""
 run claim
 check "every candidate lost: prints nothing" "" "$OUT"
@@ -296,7 +372,7 @@ check "list fails: nothing on stdout" "" "$OUT"
 check "list fails: gh's error on stderr" "yes" "$(contains "$ERR" "network down")"
 
 reset_stub
-issue 3 2026-01-01 agent-ready
+issue 3 2026-01-01 agent-ready "$P"
 touch "$STUB/fail-edit"
 run claim
 check "edit fails: exit 1" "1" "$RC"
@@ -364,7 +440,7 @@ check "pr without a message: no needs-human" "no" "$(has 3 needs-human)"
 reset_stub
 # A human puts agent-ready back (PR closed unmerged) but leaves agent-pr.
 issue 3 2026-01-01 agent-ready agent-pr
-issue 4 2026-01-02 agent-ready
+issue 4 2026-01-02 agent-ready "$P"
 run claim
 check "agent-pr is a skip label: claims the next issue" "4" "$OUT"
 check "agent-pr is a skip label: #3 untouched" "agent-pr agent-ready" "$(labels_of 3)"
@@ -392,10 +468,10 @@ check "escalated without --tokens: comment says tokens: unknown" "yes" "$(contai
 
 echo "== 9. release failed: first failure =="
 reset_stub
-issue 3 2026-01-01 agent-ready agent-wip
+issue 3 2026-01-01 agent-ready agent-wip "$P"
 run release 3 failed "$MSG"
 check "first failure: exit 0" "0" "$RC"
-check "first failure: agent-failed added, agent-wip dropped" "agent-failed agent-ready" "$(labels_of 3)"
+check "first failure: agent-failed added, agent-wip dropped" "agent-failed agent-ready $P" "$(labels_of 3)"
 check "first failure: no needs-human" "no" "$(has 3 needs-human)"
 check "first failure: comment holds the error" "yes" "$(contains "$(comments_of 3)" "CI red on test-foo.sh")"
 check "first failure: comment holds what was tried" "yes" "$(contains "$(comments_of 3)" "Tried: two fixes")"
@@ -409,7 +485,7 @@ run --tokens "$TOK" release 3 failed "$MSG"
 check "second failure: exit 0" "0" "$RC"
 check "failed with --tokens: comment carries the totals" "yes" "$(contains "$(tail -n +4 "$STUB/comments/3")" "$TOK_LINE")"
 check "failed: two releases, two rows under one header" "3" "$(log_lines)"
-check "second failure: agent-failed and needs-human, no agent-wip" "agent-failed agent-ready needs-human" "$(labels_of 3)"
+check "second failure: agent-failed and needs-human, no agent-wip" "agent-failed agent-ready needs-human $P" "$(labels_of 3)"
 check "second failure: two error comments" "2" "$(grep -c '^----$' "$STUB/comments/3")"
 run claim
 check "second failure: no later iteration claims it" "" "$OUT"
@@ -563,6 +639,18 @@ check "rework, none waiting: exit 0" "0" "$RC"
 check "rework, none waiting: agent-ready issue untouched" "agent-ready" "$(labels_of 4)"
 
 reset_stub
+issue 1 2026-01-01 agent-rework agent-pr
+issue 2 2026-01-02 agent-rework agent-pr priority:low
+issue 3 2026-01-03 agent-rework agent-pr priority:high
+run claim --rework
+check "rework, priority: high first" "3" "$OUT"
+run claim --rework
+check "rework, priority: then low" "2" "$OUT"
+run claim --rework
+check "rework, no priority: still claimed, after the prioritized ones" "1" "$OUT"
+check "rework, no priority: no needs-triage" "no" "$(has 1 needs-triage)"
+
+reset_stub
 issue 3 2026-01-01 agent-rework agent-pr
 issue 4 2026-01-02 agent-rework agent-pr
 hook after-list "echo agent-wip >> \"\$STUB/issues/3/labels\""
@@ -588,7 +676,7 @@ echo "== 11e. plain claim never takes agent-rework =="
 reset_stub
 issue 1 2026-01-01 agent-ready agent-rework
 issue 2 2026-01-02 agent-rework agent-pr
-issue 3 2026-01-03 agent-ready
+issue 3 2026-01-03 agent-ready "$P"
 run claim
 check "plain claim skips an agent-rework issue" "3" "$OUT"
 check "plain claim: agent-rework issue untouched" "no" "$(has 1 agent-wip)"
