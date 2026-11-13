@@ -78,6 +78,9 @@ It checks, between issues only, the three conditions that end the loop:
   loop fails closed (D8);
 - this session's releases in `~/.claude/queue-runs.tsv` reached `<budget>`.
 
+The first gate that lets the loop go on records the loop start; "Stop the
+loop" measures this session's own tokens from there (#270).
+
 - exit 0: prints `budget <used>/<budget>`; note `<used>` for Step 7, continue.
 - exit 1: claim nothing, stop the loop (see "Pacing") and report the printed
   line.
@@ -385,7 +388,7 @@ measure.
 - `queue: #<N> escalated (needs-human) (<summary>) [budget 3/10]`
 - `queue: #<N> failed (first failure, back in queue) (<summary>) [budget 3/10]` or `(second failure, needs-human) (<summary>) [budget 3/10]`
 - `queue: idle (empty queue) [idle 2/16]` or `queue: idle (WIP limit <open>/<limit>) [idle 2/16]`
-- `queue: stopped (<the line of queue-budget.sh>)`, e.g. `queue: stopped (stop: budget used up (10/10))`
+- `queue: stopped (<why>) [<the line of queue-budget.sh stop>]`, e.g. `queue: stopped (stop: budget used up (10/10)) [runner: in 0.0k / cw 32k / cr 2.47M / out 13k, 1 agent]`
 
 ## Pacing
 
@@ -411,6 +414,17 @@ next one runs (#188, D6).
   - the arguments are invalid;
   - `queue-claim.sh` exits 1, or Step 6 finds the starting checkout on another
     branch. These need a human before the next claim.
+
+  On every one of these, first measure this session's own tokens (#270):
+
+  ```bash
+  ~/.claude/bin/queue-budget.sh stop
+  ```
+
+  It appends one `runner` row to `queue-runs.tsv` (this session's main
+  transcript since the loop start; the sub-agents are already in the issue
+  rows) and prints `runner: <summary>` or `runner tokens: unknown (<why>)`.
+  Put that line in the stop report (Step 7). It never fails the stop.
 
 ## What this skill does not do
 
