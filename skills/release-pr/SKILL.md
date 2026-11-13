@@ -17,7 +17,7 @@ ships a wrong version number; a missing label fails the merge.
 **You do not create the tag.** Do not run `git tag`. The workflow does it, or,
 in a repo without one, nobody does as part of this skill.
 
-## Step 1 — Collect the facts
+## Step 1: Collect the facts
 
 ```bash
 bash ~/.claude/skills/release-pr/collect.sh --repo OWNER/NAME [--base <release-branch>] [--head develop]
@@ -40,9 +40,9 @@ release branch every later step uses. Output sections:
 | Section | What it decides |
 |---|---|
 | RELEASE MACHINERY | whether the label, tag and AGENT-REVIEW steps apply (Step 1b) |
-| CURRENT VERSION | the three candidate tags — you pick one |
+| CURRENT VERSION | the three candidate tags; you pick one |
 | SIZE | the "N merged PRs, N commits, N files, +N/−N" opening line |
-| BEHIND CHECK | **stop condition** — see below |
+| BEHIND CHECK | **stop condition**, see below |
 | MERGED PRs IN THIS BATCH | the list you write the body from |
 | SEMVER SIGNALS | migrations, lockfiles, env vars, API surface |
 
@@ -64,7 +64,7 @@ Read the RELEASE MACHINERY section:
 Never apply a `release:*` label nothing reads, and never create the labels or
 workflows from this skill: that is a separate decision for the repo owner.
 
-## Step 2 — Decide the bump
+## Step 2: Decide the bump
 
 Skip this step when Step 1b found `semver: absent`: no workflow turns a bump
 into a tag, so there is nothing to decide.
@@ -74,7 +74,7 @@ not do before?**
 
 | Bump | When | Real example |
 |---|---|---|
-| `major` | breaking change consumers must react to — removed/renamed route or response field, a migration dropping data still in use, a config rename with no fallback | a response field consumers still read is renamed with no fallback |
+| `major` | breaking change consumers must react to: removed/renamed route or response field, a migration dropping data still in use, a config rename with no fallback | a response field consumers still read is renamed with no fallback |
 | `minor` | new capability that did not exist in the previous tag | a kill-switch that lets an operator disable registration at runtime |
 | `patch` | fixes, refactors, docs, dependency bumps, tests. No new capability | backups produced archives that could not be restored; "fixes a path that was already supposed to work" |
 
@@ -82,9 +82,9 @@ Mixed batch → the highest bump present wins. A batch with one new feature and
 twelve fixes is `minor`.
 
 If the argument (`$ARGUMENTS`) names a bump, use it. Otherwise decide from the
-signals and **state the reasoning in the PR body** — every past release does.
+signals and **state the reasoning in the PR body**, as every past release does.
 
-## Step 3 — Write the body
+## Step 3: Write the body
 
 Write to `/tmp/<project>-pr-body-release-<version>.md` with the Write tool
 (never a heredoc), then pass it as `--body-file`.
@@ -97,7 +97,7 @@ Structure, consistent across every release since v1.5.0:
 Promotes the current `develop` batch (N merged PRs, N commits, N files,
 +N/−N) to `<release-branch>`, tagging a semver release and deploying to **staging**.
 
-`release:<bump>` — <one paragraph justifying the bump, naming what is new or
+`release:<bump>`: <one paragraph justifying the bump, naming what is new or
 what class of thing is fixed, and explicitly noting what is NOT affected:
 "no breaking API change and no schema change".>
 
@@ -108,7 +108,7 @@ a changelog. Group related PRs under one heading.>
 
 ### Also in this batch
 
-- **<Short label>** (#n) — one or two lines each for the smaller items.
+- **<Short label>** (#n): one or two lines each for the smaller items.
 
 ## Operator note          ← only if a human must DO something
 ## Migration note         ← only if migrations changed
@@ -132,13 +132,13 @@ Headings describe **the problem solved**, not the PR. Past releases use
 
 ### The three notes
 
-- **Operator note** — anything a human must do around the deploy: renamed env
+- **Operator note**: anything a human must do around the deploy: renamed env
   vars (with an old→new table), a new variable to set, a feature that ships
   *off* and needs turning on. Include the restart caveat where it applies: with
   a `depends_on` health gate, a plain `docker compose restart` can leave a
-  service untouched, so a new env value never reaches the process — use the
+  service untouched, so a new env value never reaches the process. Use the
   project's own stop/start scripts instead.
-- **Migration note** — one bullet per migration: what it does, whether it is
+- **Migration note**: one bullet per migration: what it does, whether it is
   additive or destructive, whether it is idempotent. Call out any drop
   explicitly and say why it is safe (e.g. expand/contract split across two
   revisions so no intermediate commit is inconsistent).
@@ -152,10 +152,10 @@ Only when RELEASE MACHINERY lists an AGENT-REVIEW template. Then it is mandatory
 when the PR carries `agent-authored` (auto-applied). The
 `agent-pr-checklist` gate fails if the section is missing or any box is
 unticked. Copy the six items from `.github/PULL_REQUEST_TEMPLATE.md` and tick
-each with a **specific justification for this batch** — not a bare `[x]`:
+each with a **specific justification for this batch**, not a bare `[x]`:
 
 ```
-- [x] No destructive ops added without a second barrier — `20260812002` drops
+- [x] No destructive ops added without a second barrier: `20260812002` drops
       `<table>.<old_column>`, deliberately split into its own revision so it
       runs only after the data moved to `<other_table>.<new_column>`
 ```
@@ -163,7 +163,7 @@ each with a **specific justification for this batch** — not a bare `[x]`:
 If an item genuinely does not apply, say why it does not apply. Never tick a
 box you have not checked.
 
-## Step 4 — Create the PR
+## Step 4: Create the PR
 
 `--base` is the release branch from the `=== REPO ===` line (`master` in the
 example). With semver machinery, apply the label **at creation**, so
@@ -172,11 +172,12 @@ example). With semver machinery, apply the label **at creation**, so
 ```bash
 gh pr create --repo OWNER/NAME --base master --head develop \
   --label "release:minor" \
-  --title "release: v1.9.0 — <headline item> (#123), <second item> (#124), <third item> (#125)" \
+  --title "release: v1.9.0: <headline item> (#123), <second item> (#124), <third item> (#125)" \
   --body-file /tmp/<project>-pr-body-release-190.md
 ```
 
-Title format: `release: vX.Y.Z — <2-3 headline items with issue numbers>`.
+Title format: `release: vX.Y.Z: <2-3 headline items with issue numbers>`. No
+em-dash, in the title or the body: the global style rule forbids it.
 
 Without semver machinery, drop `--label` and the version:
 
@@ -186,7 +187,7 @@ gh pr create --repo OWNER/NAME --base main --head develop \
   --body-file /tmp/<project>-pr-body-release-<date>.md
 ```
 
-## Step 5 — Verify the gates
+## Step 5: Verify the gates
 
 ```bash
 gh pr view <PR> --repo OWNER/NAME --json labels,statusCheckRollup \
@@ -214,7 +215,7 @@ while true; do
 done
 ```
 
-## Step 6 — Stop
+## Step 6: Stop
 
 **Do not merge.** No server-side protection on the free tier makes merging to
 the release branch the user's call. Report the PR URL, the bump and its
@@ -242,7 +243,7 @@ The tag is annotated, tagged by `github-actions[bot]`, with message
   `opened`, so creating unlabelled fires one red check before the label lands.
 - **An unlabelled PR to the release branch fails the tag job after the merge has landed.**
   PR #2205 (ad-hoc hotfix, pre-convention) merged fine, then `Semver Tag` ran
-  and **failed** — `Expected exactly one release:* label, found 0`. The commit
+  and **failed**: `Expected exactly one release:* label, found 0`. The commit
   is on master, untagged, and the failure is only visible in the Actions tab.
   The `skip` branch covers only a *direct push* with no PR behind it, never an
   unlabelled PR. Label before merging, always.
@@ -263,7 +264,7 @@ The tag is annotated, tagged by `github-actions[bot]`, with message
 |---|---|---|
 | `Validate release label` fails: "no release label" | created without `--label` | `gh pr edit <PR> --add-label release:minor` |
 | `agent-pr-checklist` fails | AGENT-REVIEW section missing, or a box left `[ ]` | restore from `.github/PULL_REQUEST_TEMPLATE.md`, tick every box with a justification |
-| `dependency-audit` fails | a time-boxed exception expired | check `docs/governance/audit-exceptions.yml`; take the fix if past cooldown, otherwise re-date to the cooldown end — never override the cooldown for a security label |
+| `dependency-audit` fails | a time-boxed exception expired | check `docs/governance/audit-exceptions.yml`; take the fix if past cooldown, otherwise re-date to the cooldown end; never override the cooldown for a security label |
 | No tag after merge | label removed before merge, or direct push | check the `Semver Tag` run; re-tagging by hand needs care since it becomes the base for the next release |
 | `collect.sh` shows a non-merge commit on the release branch | hotfix landed directly on it | back-merge the release branch into develop before releasing |
 | `collect.sh` exits 1: `origin/<x> does not exist` | wrong `--base`/`--head`, or the default branch is not the release branch | pick the right name from the listed remote branches and pass `--base` |

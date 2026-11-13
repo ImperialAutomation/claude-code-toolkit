@@ -195,6 +195,13 @@ check "workflow list present" "yes" "$(contains "$OUT" "workflows on main: semve
 check "template present" "yes" "$(contains "$OUT" "AGENT-REVIEW template: .github/PULL_REQUEST_TEMPLATE.md")"
 check "semver verdict present" "yes" "$(contains "$OUT" "semver: present")"
 
+echo "== 12. SKILL.md carries no em-dash =="
+# The global style rule forbids em-dashes in PR titles and bodies; the skill's
+# templates and prose are what agents copy into them (#226).
+SKILL_MD="$(dirname "$COLLECT")/SKILL.md"
+check "SKILL.md exists" "yes" "$([[ -f "$SKILL_MD" ]] && echo yes || echo no)"
+check "no em-dash in SKILL.md" "0" "$(grep -c $'—' "$SKILL_MD")"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
