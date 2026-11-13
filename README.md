@@ -829,7 +829,7 @@ Create draft PR and sub-issues? (A/B/C)
 | Aspect | /implement | /implement-epic |
 |--------|-----------|-----------------|
 | Scope | Single issue | All sub-issues of an epic |
-| Confirmation | Shows the plan, then continues | Runs autonomously |
+| Confirmation | Shows the plan, then continues | Shows the overview, then continues |
 | PRs | One PR against base branch | One PR per sub-issue against feature branch |
 | Failure | Stops on failure | Creates bug issue, skips dependents, continues |
 | Verification | CLAUDE.md pattern-based (only when Docker files changed) | Always runs full verification |

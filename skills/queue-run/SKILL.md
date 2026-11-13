@@ -183,9 +183,7 @@ stop here and report ESCALATED. Do not start Step B.
 ## Step B: implement
 
 Invoke the Skill tool with skill "implement" and args "<N> <worktree>", and
-follow it, with this rule:
-
-- Phase 4 opens the PR with `--no-merge`. Never merge anything.
+follow it. Phase 4 opens the PR with `--no-merge`: never merge anything.
 
 Escalation during implement:
 - If a decision falls in a category of `docs/escalation-list.md`, or would
