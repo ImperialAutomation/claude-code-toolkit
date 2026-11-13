@@ -7,12 +7,20 @@
 # "CI is green" and "run-tests.sh is green" mean the same set of scripts.
 #
 # Usage:
-#   run-tests.sh [--ci] [--list] [<test-script>...]
+#   run-tests.sh [--ci] [--list] [--repo <dir>] [<test-script>...]
 #
 #   --ci     also apply CI_SKIP below: tests that need something a stock
 #            runner lacks. Implied when $CI is "true" (GitHub Actions sets it).
 #   --list   print the scripts that would run, and the skips, then exit 0.
-#   <test-script>  run only these (paths or basenames); default: all.
+#   --repo <dir>  run the tests of that tree instead of the tree this script
+#            lives in. <dir> must be the top level of a checkout of this same
+#            repository: the live checkout or one of its linked worktrees,
+#            e.g. ~/.claude/bin/run-tests.sh --repo ../claude-code-toolkit-<N>
+#   <test-script>  run only these (paths or basenames); default: all. An
+#            absolute path into a linked worktree selects that tree, as
+#            --repo would; it must not contradict --repo.
+#
+# Each test runs with its tree's top level as working directory.
 #
 # Skips are never silent: each one prints "SKIP <script>: <reason>" and is
 # repeated in the summary. A missing prerequisite tool (PREREQS below) stops
@@ -25,13 +33,15 @@
 # Exit codes:
 #   0    every script that ran passed
 #   1    at least one script failed
-#   2    usage error, a named script does not exist, or a PREREQS tool is
-#        missing
+#   2    usage error, a named script does not exist, a PREREQS tool is
+#        missing, or --repo or a test path is not a checkout of this
+#        repository
 
 set -uo pipefail
 
-BIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO_DIR=$(dirname "$BIN_DIR")
+# Physical path: through the ~/.claude/bin symlink this is the live checkout.
+SELF_BIN_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SELF_REPO_DIR=$(dirname "$SELF_BIN_DIR")
 
 # Tests skipped under --ci, keyed by path relative to the repo, with the reason
 # printed in the job log, e.g.
@@ -48,24 +58,86 @@ declare -A CI_SKIP=(
 PREREQS=(git python3 jq curl openssl)
 
 usage() {
-    echo "usage: $(basename "$0") [--ci] [--list] [<test-script>...]" >&2
+    echo "usage: $(basename "$0") [--ci] [--list] [--repo <dir>] [<test-script>...]" >&2
     exit 2
 }
 
 CI_MODE=false
 [[ "${CI:-}" == "true" ]] && CI_MODE=true
 LIST_ONLY=false
+REPO_ARG=""
 SELECTED=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
         --ci) CI_MODE=true ;;
         --list) LIST_ONLY=true ;;
+        --repo)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "--repo needs a directory" >&2; usage; }
+            REPO_ARG="$2"; shift ;;
         -*) echo "unknown option: $1" >&2; usage ;;
         *) SELECTED+=("$1") ;;
     esac
     shift
 done
+
+for tool in "${PREREQS[@]}"; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "required tool not on PATH: $tool" >&2; exit 2; }
+done
+
+# The git common dir of <dir>, as an absolute physical path; fails outside git.
+common_dir() {
+    local d
+    d=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    realpath -e "$d"
+}
+
+# The top level of the checkout holding <dir>, refused (exit 2) unless it is
+# a checkout of the repository this script lives in. Only this repository's
+# own trees run without a prompt, never an arbitrary toolkit-shaped directory.
+checkout_of_self() {
+    local dir="$1" what="$2" top own theirs
+    top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) \
+        || { echo "$what is not inside a git checkout: $dir" >&2; exit 2; }
+    top=$(realpath -e "$top")
+    own=$(common_dir "$SELF_REPO_DIR") \
+        || { echo "cannot determine the repository of $SELF_REPO_DIR" >&2; exit 2; }
+    theirs=$(common_dir "$top") || theirs=""
+    if [[ "$own" != "$theirs" ]]; then
+        echo "$what is not a checkout of $SELF_REPO_DIR or one of its worktrees: $dir" >&2
+        exit 2
+    fi
+    echo "$top"
+}
+
+REPO_DIR="$SELF_REPO_DIR"
+if [[ -n "$REPO_ARG" ]]; then
+    [[ -d "$REPO_ARG" ]] || { echo "--repo is not a directory: $REPO_ARG" >&2; exit 2; }
+    REPO_DIR=$(checkout_of_self "$REPO_ARG" "--repo") || exit 2
+    if [[ "$REPO_DIR" != "$(realpath -e "$REPO_ARG")" ]]; then
+        echo "--repo must be the top level of a checkout ($REPO_DIR), not $REPO_ARG" >&2
+        exit 2
+    fi
+fi
+
+# An absolute test path names its tree; every such path must agree with
+# --repo, or, without --repo, with each other.
+PATH_TREE=""
+for s in "${SELECTED[@]}"; do
+    [[ "$s" == /* ]] || continue
+    parent=$(dirname "$s")
+    [[ -d "$parent" ]] || { echo "no such test script: $s" >&2; exit 2; }
+    tree=$(checkout_of_self "$parent" "test path") || exit 2
+    if [[ -n "$REPO_ARG" && "$tree" != "$REPO_DIR" ]]; then
+        echo "test path is not in --repo $REPO_DIR: $s" >&2; exit 2
+    fi
+    if [[ -n "$PATH_TREE" && "$tree" != "$PATH_TREE" ]]; then
+        echo "test paths name two trees: $PATH_TREE and $tree" >&2; exit 2
+    fi
+    PATH_TREE="$tree"
+done
+[[ -n "$PATH_TREE" ]] && REPO_DIR="$PATH_TREE"
+BIN_DIR="$REPO_DIR/bin"
 
 # All test scripts, as paths relative to the repo, in a stable order.
 discover() {
@@ -93,10 +165,6 @@ skip_reason() {
         echo "${CI_SKIP[$1]}"
     fi
 }
-
-for tool in "${PREREQS[@]}"; do
-    command -v "$tool" >/dev/null 2>&1 || { echo "required tool not on PATH: $tool" >&2; exit 2; }
-done
 
 mapfile -t ALL < <(discover)
 TESTS=()
