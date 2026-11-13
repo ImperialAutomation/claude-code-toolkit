@@ -237,8 +237,10 @@ def at_time(entry, ts, sidechain=False):
 
 (RUNNER / "runner1.jsonl").write_text("\n".join(json.dumps(e) for e in [
     at_time(line("r1", (1000, 1000, 1000, 1000)), "2026-11-11T09:59:59.999Z"),  # before the window
+    # Only r2 sits on the boundary, both of its lines, so an exclusive window
+    # start (`>` instead of `>=`) loses it and the totals change.
     at_time(line("r2", (1, 10, 100, 1)), "2026-11-11T10:00:00.000Z"),           # on the boundary
-    at_time(line("r2", (1, 10, 100, 1)), "2026-11-11T10:00:01.000Z"),           # same message again
+    at_time(line("r2", (1, 10, 100, 1)), "2026-11-11T10:00:00.000Z"),           # same message again
     at_time(line("r3", (500, 500, 500, 500)), "2026-11-11T10:30:00Z", sidechain=True),
     line("r5", (7, 7, 7, 7)),                                                   # no timestamp
     at_time(line("r4", (2, 20, 200, 2), SONNET), "2026-11-11T12:00:00Z"),
