@@ -5,6 +5,7 @@
 #   queue-budget.sh gate <budget>
 #   queue-budget.sh idle <max-idle>
 #   queue-budget.sh worked
+#   queue-budget.sh stop
 #
 # A /loop runs in one Claude Code session, so the session id
 # ($CLAUDE_CODE_SESSION_ID) identifies the loop.
@@ -21,13 +22,24 @@
 #                  when its `session` column (the 10th, written by
 #                  queue-claim.sh) equals the session id. Rows from before
 #                  that column have nine fields and never count; the review
-#                  columns (#297) come after it and do not move it.
-#                Otherwise prints `budget <used>/<budget>` and exits 0.
+#                  columns (#297) come after it and do not move it. A
+#                  `runner` row (the session's own tokens, #270) is not a
+#                  release and never counts.
+#                Otherwise prints `budget <used>/<budget>` and exits 0. The
+#                first such gate of a session records the loop start in
+#                ~/.claude/queue-idle/<session-id>.start; later gates leave it.
 # idle <max>     An iteration that claimed nothing. Adds one to this session's
 #                idle count in ~/.claude/queue-idle/<session-id> and prints
 #                `idle <count>/<max>`; exit 1 when the count reached <max>
 #                (stop the loop), 0 otherwise.
 # worked         An iteration that released an issue: resets the idle count.
+# stop           The loop stops: measures this session's main transcript since
+#                the loop start (`agent-tokens.py --session --since`), appends
+#                one `runner` row with `queue-claim.sh log-runner`, removes the
+#                start and prints `runner: <summary>`. A failed measurement
+#                writes the row with unknown tokens and prints
+#                `runner tokens: unknown (<why>)`; without a recorded start it
+#                writes nothing and says so. Exit 0 either way.
 #
 # QUEUE_RUNS_LOG, QUEUE_STOP_FILE and QUEUE_IDLE_DIR override the three paths.
 #
@@ -46,9 +58,19 @@ SESSION_FIELD=10
 # The id becomes a file name: no slashes, no dot-only names.
 SESSION_ID_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+# Column of the outcome; rows with the runner outcome (queue-claim.sh
+# RUNNER_OUTCOME) are not releases (#270).
+OUTCOME_FIELD=3
+RUNNER_OUTCOME="runner"
+# The loop start, next to the idle count: <idle-dir>/<session-id>.start.
+START_SUFFIX=".start"
+# Sibling scripts that `stop` calls.
+BIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+AGENT_TOKENS="$BIN_DIR/agent-tokens.py"
+QUEUE_CLAIM="$BIN_DIR/queue-claim.sh"
 
 usage() {
-    echo "usage: $(basename "$0") gate <budget> | idle <max-idle> | worked" >&2
+    echo "usage: $(basename "$0") gate <budget> | idle <max-idle> | worked | stop" >&2
     exit 2
 }
 
@@ -62,7 +84,7 @@ command="$1"; shift
 
 case "$command" in
     gate|idle) [[ $# -eq 1 ]] && positive "$1" || usage; limit="$1" ;;
-    worked)    [[ $# -eq 0 ]] || usage ;;
+    worked|stop) [[ $# -eq 0 ]] || usage ;;
     *) echo "unknown command: $command" >&2; usage ;;
 esac
 
@@ -75,6 +97,7 @@ session_ok() {
 }
 
 idle_file() { echo "$IDLE_DIR/$SESSION_ID"; }
+start_file() { echo "$IDLE_DIR/$SESSION_ID$START_SUFFIX"; }
 
 do_gate() {
     if [[ -e "$STOP_FILE" ]]; then
@@ -85,13 +108,52 @@ do_gate() {
     local used=0
     if [[ -f "$RUNS_LOG" ]]; then
         used=$(awk -F'\t' -v s="$SESSION_ID" -v f="$SESSION_FIELD" \
-            'NR > 1 && NF >= f && $f == s { n++ } END { print n + 0 }' "$RUNS_LOG")
+            -v of="$OUTCOME_FIELD" -v runner="$RUNNER_OUTCOME" \
+            'NR > 1 && NF >= f && $f == s && $of != runner { n++ } END { print n + 0 }' "$RUNS_LOG")
     fi
     if (( used >= limit )); then
         echo "stop: budget used up ($used/$limit)"
         return 1
     fi
+    record_start
     echo "budget $used/$limit"
+}
+
+# record_start: the loop start, written by the first gate that lets the loop
+# go on; a later gate leaves it. Not writable is a warning: the budget still
+# works, only the runner's own tokens stay unknown at stop.
+record_start() {
+    local file
+    file=$(start_file)
+    [[ -e "$file" ]] && return 0
+    { mkdir -p "$IDLE_DIR" && date -u +%Y-%m-%dT%H:%M:%SZ > "$file"; } 2>/dev/null \
+        || echo "warning: cannot write the loop start '$file'" >&2
+}
+
+# do_stop: the runner session's own tokens since the loop start, as one
+# `runner` row in the run log (#270). A failed measurement still writes the
+# row, with unknown tokens. Always exit 0 once the session id is usable.
+do_stop() {
+    session_ok || return 1
+    local file since tokens err reason
+    file=$(start_file)
+    if [[ ! -f "$file" ]]; then
+        echo "runner tokens: unknown (no loop start recorded; nothing measured)"
+        return 0
+    fi
+    since=$(< "$file")
+    tokens=$(mktemp)
+    err=$(mktemp)
+    if "$AGENT_TOKENS" --session "$SESSION_ID" --since "$since" --json > "$tokens" 2> "$err"; then
+        "$QUEUE_CLAIM" --tokens "$tokens" log-runner
+        echo "runner: $(jq -r .summary "$tokens")"
+    else
+        reason=$(head -1 "$err")
+        "$QUEUE_CLAIM" log-runner
+        echo "runner tokens: unknown (${reason:-agent-tokens.py failed})"
+    fi
+    rm -f "$tokens" "$err" "$file"
+    return 0
 }
 
 do_idle() {
@@ -121,4 +183,5 @@ case "$command" in
     gate)   do_gate ;;
     idle)   do_idle ;;
     worked) do_worked ;;
+    stop)   do_stop ;;
 esac
