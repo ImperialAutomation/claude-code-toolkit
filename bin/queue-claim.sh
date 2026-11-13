@@ -96,7 +96,8 @@
 #           the four token totals and agent count from --tokens (the
 #           `agent-tokens.py --session --json` output; `unknown` without it),
 #           the session id, empty review and fix columns. Takes no other
-#           option (not even --repo). queue-budget.sh stop calls it when a
+#           option (not even --repo); an empty or unset CLAUDE_CODE_SESSION_ID
+#           is a usage error. queue-budget.sh stop calls it when a
 #           loop stops, and its gate does not count this row as a release.
 #           Unlike a release, a log that cannot be written is an error here.
 #
@@ -290,6 +291,9 @@ case "$command" in
         [[ $# -eq 0 ]] || usage
         [[ -z "$repo$review$review_final$review_findings$review_tokens_file$fix_tokens_file" ]] \
             || { echo "error: log-runner takes only --tokens" >&2; usage; }
+        # The row is tied to its loop only through the session column.
+        [[ -n "$SESSION_ID" ]] \
+            || { echo "error: log-runner needs CLAUDE_CODE_SESSION_ID (the row would belong to no loop)" >&2; exit 2; }
         issue=""; outcome="$RUNNER_OUTCOME"; pr_url=""
         parse_tokens_option
         phase_token_columns review ""

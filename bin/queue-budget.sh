@@ -38,8 +38,9 @@
 #                its main transcript since the loop start (`agent-tokens.py
 #                --session --since`), appends one `runner` row with
 #                `queue-claim.sh log-runner`, removes the start and prints
-#                `runner: <summary>`. A failed measurement writes the row with
-#                unknown tokens and prints `runner tokens: unknown (<why>)`;
+#                `runner: <summary>`. A failed measurement (also a start that
+#                holds no valid timestamp) writes the row with unknown tokens
+#                and prints `runner tokens: unknown (<why>)`;
 #                without a recorded start or a usable session id it writes
 #                nothing and says so in that form. When the row cannot be
 #                written it prints `runner tokens: not logged (<why>)` and
@@ -161,7 +162,9 @@ do_stop() {
     err=$(mktemp)
     # Expanded now: the EXIT trap fires after these locals are gone (set -u).
     trap "rm -f '$tokens' '$err'" EXIT
-    if "$AGENT_TOKENS" --session "$SESSION_ID" --since "$since" --json > "$tokens" 2> "$err"; then
+    if [[ ! "$since" =~ $START_PATTERN ]]; then
+        line="runner tokens: unknown (loop start '$since' in $file is not a UTC timestamp)"
+    elif "$AGENT_TOKENS" --session "$SESSION_ID" --since "$since" --json > "$tokens" 2> "$err"; then
         line="runner: $(jq -r .summary "$tokens")"
         token_args=(--tokens "$tokens")
     else

@@ -48,6 +48,7 @@ Exit codes:
 """
 
 import argparse
+import glob
 import json
 import sys
 from datetime import datetime, timezone
@@ -208,7 +209,8 @@ def measure(transcript):
 
 
 def find_session_transcripts(session_id, projects_dir=PROJECTS_DIR):
-    return sorted(projects_dir.glob(f"*/{SESSION_PATTERN.format(session_id)}"))
+    # Escaped: a `*` or `[` in the id must not match other sessions' transcripts.
+    return sorted(projects_dir.glob(f"*/{SESSION_PATTERN.format(glob.escape(session_id))}"))
 
 
 def measure_session(transcript, since=None):

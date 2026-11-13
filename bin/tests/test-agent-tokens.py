@@ -278,6 +278,11 @@ check("session output is accepted by --sum",
 
 r = run("--session", "nosuch")
 check("unknown session: exit 1", r.returncode == 1 and "nosuch" in r.stderr)
+# Unescaped, `runner?` and `runner[1]` would glob-match runner1.jsonl.
+for pattern in ("runner?", "runner[1]", "*"):
+    r = run("--session", pattern)
+    check(f"glob characters in --session '{pattern}' match no other session: exit 1",
+          r.returncode == 1 and r.stdout == "")
 (PROJECTS / "-proj-b" / "runner1.jsonl").write_text("")
 r = run("--session", "runner1")
 check("session in two project dirs: exit 2", r.returncode == 2)

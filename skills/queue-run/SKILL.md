@@ -32,7 +32,8 @@ escalation; `/refine` and the escalation hook raise it.
 | `--model <model>` | the session's | Model of the sub-agents of Steps 4 and 4c (D3) |
 
 A value that is not a positive integer (or, for `--model`, empty) or an
-unknown argument: claim nothing, stop the loop and report the usage.
+unknown argument: claim nothing, stop the loop (see "Pacing") and report the
+usage.
 
 `<budget>`, `<max-prs>`, `<max-idle>` and `<model>` below are these values.
 
@@ -345,7 +346,7 @@ adds `needs-human` too (#188, D5). The worktree and branch of a failed run stay
 in place: a retry reuses them, and a human may want to look.
 
 A non-zero exit from `queue-claim.sh release` leaves labels half-changed:
-report its stderr and stop the loop.
+report its stderr and stop the loop (see "Pacing").
 
 After a release, reset the idle count:
 
@@ -361,7 +362,8 @@ git -C <repo> branch --show-current
 
 It must still print the branch noted in Step 1. If it does not, something
 switched the checkout the session started in (in the toolkit repo, the live
-one). Stop the loop and report it; do not switch it back yourself.
+one). Stop the loop (see "Pacing") and report it; do not switch it back
+yourself.
 
 ### Step 7: Report
 
@@ -406,16 +408,20 @@ next one runs (#188, D6).
 - **Idle** (empty queue, WIP limit reached, or WIP count unknown): run
   `~/.claude/bin/queue-budget.sh idle <max-idle>`. Exit 0: schedule the next
   iteration after 30 minutes; the queue and the review backlog change slowly.
-  Exit 1 (the limit is reached) or 2: stop the loop.
-- **Stop the loop** (schedule nothing, report why) when:
+  Exit 1 (the limit is reached) or 2: stop the loop (see "Stop the loop").
+- **Stop the loop** (schedule nothing, report why). One rule covers every
+  stop: whenever this skill, or a reference it reads, says to stop the loop,
+  for whatever reason, the loop ends here. The stops include:
   - Step 0 exits 1: the stop file exists, the session id is missing, or the
     budget is used up;
-  - `queue-budget.sh idle` reaches `<max-idle>`;
+  - `queue-budget.sh idle` exits 1 (`<max-idle>` reached) or 2;
   - the arguments are invalid;
-  - `queue-claim.sh` exits 1, or Step 6 finds the starting checkout on another
-    branch. These need a human before the next claim.
+  - `queue-claim.sh` exits non-zero on a claim or a release, or Step 6 finds
+    the starting checkout on another branch. These need a human before the
+    next claim.
 
-  On every one of these, first measure this session's own tokens (#270):
+  On every stop, whether listed here or not, first measure this session's
+  own tokens (#270):
 
   ```bash
   ~/.claude/bin/queue-budget.sh stop

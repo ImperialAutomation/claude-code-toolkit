@@ -289,6 +289,20 @@ check "stop, row not written: no success line" "no" "$(contains "$OUT" "runner: 
 check "stop, row not written: keeps the loop start" "yes" "$([[ -e "$START" ]] && echo yes || echo no)"
 rmdir "$T/log-is-a-dir"
 
+for bad in "" "garbled"; do
+    reset
+    mkdir -p "$QUEUE_IDLE_DIR"
+    echo "$bad" > "$START"
+    run stop
+    check "stop, start '$bad': exit 0" "0" "$RC"
+    check "stop, start '$bad': readable reason, not the argparse usage" "yes" \
+        "$(contains "$OUT" "runner tokens: unknown (loop start '$bad'")"
+    check "stop, start '$bad': no usage line" "no" "$(contains "$OUT" "usage:")"
+    check "stop, start '$bad': row with unknown tokens" \
+        $'\trunner\t\tunknown\tunknown\tunknown\tunknown\tunknown\tsess-1' "$(runner_rows | cut -f2-10)"
+    check "stop, start '$bad': removes the loop start" "no" "$([[ -e "$START" ]] && echo yes || echo no)"
+done
+
 reset
 OUT=$(env -u CLAUDE_CODE_SESSION_ID bash "$QB" stop 2>/dev/null); RC=$?
 check "stop without session id: exit 0" "0" "$RC"

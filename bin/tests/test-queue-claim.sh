@@ -816,6 +816,11 @@ run_lr --tokens "$T/nope.json" log-runner
 check "log-runner with a missing tokens file: exit 2" "2" "$RC"
 run --tokens "$TOK" log-runner
 check "log-runner with --repo: exit 2" "2" "$RC"
+OUT=$(env -u CLAUDE_CODE_SESSION_ID bash "$QC" --tokens "$TOK" log-runner 2>"$T/stderr"); RC=$?
+check "log-runner without a session id: exit 2" "2" "$RC"
+check "log-runner without a session id: says so" "yes" "$(contains "$(cat "$T/stderr")" "CLAUDE_CODE_SESSION_ID")"
+OUT=$(CLAUDE_CODE_SESSION_ID="" bash "$QC" --tokens "$TOK" log-runner 2>/dev/null); RC=$?
+check "log-runner with an empty session id: exit 2" "2" "$RC"
 run_lr --tokens "$TOK" claim
 check "claim with --tokens: error names log-runner" "yes" "$(contains "$ERR" "also to log-runner")"
 check "log-runner usage errors wrote no log row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
