@@ -84,7 +84,9 @@ number, never the matched text, so the hit can be quoted in a public issue.
 
 | Label | Meaning |
 |---|---|
-| `agent-ready` | An agent may pick this up |
+| `agent-ready` | An agent may pick this up. The queue runner claims the highest `priority:*` label first (`critical`, `high`, `medium`, `low`), the oldest first within one priority |
+| `priority:*` | Required for a claim: an `agent-ready` issue without one is never claimed |
+| `needs-triage` | Missing a type or priority label. The queue runner adds it to an `agent-ready` issue without a priority label; it never removes it, and only the priority label decides whether an issue is claimed |
 | `agent-backlog` | Triaged as agent-doable, but not released to the queue: the runner ignores it. Release by swapping it for `agent-ready`; this is how the human meters the queue's token spend |
 | `agent-wip` | Claimed by a session; others skip it |
 | `needs-human` | Blocked on a decision; a comment, or the review of a `HUMAN` verdict, holds the question, the options and the recommendation. The review also puts it on the PR |

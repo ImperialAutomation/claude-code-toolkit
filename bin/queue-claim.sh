@@ -40,10 +40,16 @@
 # labels are updated; a log that cannot be written is a warning, not a failed
 # release.
 #
-# claim     Takes the oldest open `agent-ready` issue (by creation date) that
-#           has none of `agent-wip`, `needs-human`, `epic`, `agent-pr` or
-#           `agent-rework`, adds `agent-wip` and prints its number. Prints
-#           nothing when the queue is empty.
+# claim     Takes the open `agent-ready` issue with the highest priority
+#           label (`priority:critical`, `high`, `medium`, `low`), the oldest
+#           by creation date within one priority, that has none of
+#           `agent-wip`, `needs-human`, `epic`, `agent-pr` or `agent-rework`,
+#           adds `agent-wip` and prints its number. Prints nothing when the
+#           queue is empty.
+#           An issue without a priority label is never claimed: it gets
+#           `needs-triage` (when missing) and a line on stderr. Only the
+#           priority label decides; `needs-triage` itself is ignored and never
+#           removed (#309).
 #           Labels are not atomic, so each candidate is re-read right before
 #           and right after the claim: claimed by someone else in between,
 #           skip it; no longer claimable after our claim (closed, escalated,
@@ -51,9 +57,10 @@
 #           candidate is tried. An `agent-failed` issue is claimable: that is
 #           its one retry.
 # claim --rework
-#           The same, for the oldest open `agent-rework` issue that has none
+#           The same order, for the open `agent-rework` issues that have none
 #           of `agent-wip`, `needs-human`, `epic` (#300, D4). Only a human sets
-#           `agent-rework`, on an issue whose agent PR needs another round.
+#           `agent-rework`, on an issue whose agent PR needs another round, so
+#           one without a priority label is still claimed, after the others.
 # release   Ends a claim; every outcome drops `agent-wip`:
 #   pr <url>               comments with the PR link and swaps `agent-ready`
 #                          for `agent-pr`, so no later claim opens a second

@@ -1,6 +1,6 @@
 ---
 name: queue-run
-description: One iteration of the local queue runner - claim the oldest agent-ready issue, refine and implement it in a sub-agent, release it. Driven by /loop
+description: One iteration of the local queue runner - claim the highest-priority agent-ready issue, refine and implement it in a sub-agent, release it. Driven by /loop
 argument-hint: "[--budget N] [--max-prs N] [--max-idle N] [--model <model>]"
 user-invocable: true
 ---
@@ -94,7 +94,8 @@ of adding one (#300, D4).
 ~/.claude/bin/queue-claim.sh --repo <repo> claim --rework
 ```
 
-It prints `<N>` of the oldest `agent-rework` issue, or nothing. A number:
+It prints `<N>` of the highest-priority `agent-rework` issue (oldest first
+within a priority), or nothing. A number:
 follow `~/.claude/skills/queue-run/references/rework.md` (Read it now)
 instead of Steps 2 to 5, then Steps 6 and 7. Exit 1: as for Step 2.
 Nothing: check capacity.
@@ -114,8 +115,10 @@ Nothing: check capacity.
 ```
 
 It prints the claimed issue number `<N>`, or nothing when the queue is empty.
-Epics, issues with `needs-human` and issues already claimed are never
-claimed. Empty output: go to "Pacing" (idle). Exit 1: `gh` failed; nothing
+The highest `priority:*` label goes first, the oldest first within one
+priority. Epics, issues with `needs-human` and issues already claimed are
+never claimed; neither is an issue without a priority label, which gets
+`needs-triage` instead (a line on stderr per issue). Empty output: go to "Pacing" (idle). Exit 1: `gh` failed; nothing
 was claimed or the claim may be half-set; report the stderr and stop the loop
 (see "Pacing").
 
