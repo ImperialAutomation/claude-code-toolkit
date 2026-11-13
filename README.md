@@ -387,7 +387,7 @@ bin/run-tests.sh --ci                   # as in CI: also apply the CI skip list
 ~/.claude/bin/run-tests.sh ~/Projects/claude-code-toolkit-<N>/bin/tests/test-git-commit.sh
 ```
 
-`--repo` and an absolute test path select the tree whose tests run, and each test runs with that tree as working directory. Only this repository's own trees qualify (the live checkout and its linked worktrees, same git common dir); any other directory, a subdirectory, or a path that contradicts `--repo` is refused with exit 2.
+`--repo` and an absolute test path select the tree whose tests run, and each test runs with that tree as working directory; a relative path that exists from the current directory counts as its absolute path. The first output line names the tree. Only this repository's own trees qualify (the live checkout and the linked worktrees `git worktree list` registers for it); any other directory, a subdirectory, a repeated `--repo`, or a path that contradicts `--repo` is refused with exit 2.
 
 It prints one `PASS`/`FAIL` line per script, shows a failing script's full output framed by its name, and ends with a summary naming every failing script. It needs `git`, `python3`, `jq` and `curl` on PATH and stops before any test when one is missing. The tests are hermetic: they build their fixtures in temp dirs and derive `~/Projects` from `$HOME`, so they pass on a machine without the toolkit installed.
 

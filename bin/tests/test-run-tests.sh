@@ -41,6 +41,10 @@ contains() { # haystack needle -> yes/no
 export HOME="$T/home"
 mkdir -p "$HOME"
 export GIT_CONFIG_NOSYSTEM=1
+# Pinned explicitly: an exported GIT_CONFIG_GLOBAL would otherwise win over
+# $HOME and the writes below would land in the user's real global config.
+export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+unset GIT_DIR GIT_WORK_TREE
 git config --global user.name test
 git config --global user.email test@example.com
 git config --global init.defaultBranch main
@@ -61,8 +65,9 @@ EOF
 
 # make_repo <dir>: a toolkit-shaped repo with run-tests.sh and one passing test.
 make_repo() {
-    mkdir -p "$1/bin/tests"
+    mkdir -p "$1/bin/tests" "$1/bin/lib"
     cp "$RUNNER" "$1/bin/run-tests.sh"
+    cp "$(dirname "$RUNNER")/lib/live-checkout.sh" "$1/bin/lib/"
     stub "$1/bin/tests/test-alpha.sh" 0 "alpha says hello"
     git -C "$1" init -q
     git -C "$1" add -A
@@ -140,6 +145,25 @@ check "--repo of a non-git directory exits 2" "2" "$STATUS"
 run "$LIVE" --repo
 check "--repo without a value exits 2" "2" "$STATUS"
 
+run "$LIVE" --repo "$WT" --repo "$MAIN"
+check "a repeated --repo exits 2" "2" "$STATUS"
+check "nothing ran on a repeated --repo" "" "$(ran)"
+
+# A directory whose .git file points at the main repository is not one of
+# its registered worktrees.
+FAKE="$T/fake"
+make_repo "$FAKE"
+rm -rf "$FAKE/.git"
+echo "gitdir: $MAIN/.git" > "$FAKE/.git"
+run "$LIVE" --repo "$FAKE"
+check "--repo of a dir with a .git file into the repo exits 2" "2" "$STATUS"
+check "nothing ran for the .git-file dir" "" "$(ran)"
+
+rm -f "$MARK"
+OUT=$(env -C "$T" GIT_DIR="$MAIN/.git" bash "$LIVE" --repo "$OTHER" 2>&1); STATUS=$?
+check "an exported GIT_DIR does not admit an unrelated repository" "2" "$STATUS"
+check "nothing ran under an exported GIT_DIR" "" "$(ran)"
+
 echo "== absolute path to a test =="
 run "$LIVE" "$WT/bin/tests/test-alpha.sh"
 check "an absolute worktree path runs that tree's test" "0" "$STATUS"
@@ -164,6 +188,22 @@ check "paths into two trees exit 2" "2" "$STATUS"
 
 run "$LIVE" --repo "$WT" "$WT/bin/tests/test-alpha.sh"
 check "--repo and a path in the same tree run it" "test-alpha.sh $WT" "$(ran)"
+
+echo "== relative path and tree name =="
+rm -f "$MARK"
+OUT=$(env -C "$WT" bash "$LIVE" bin/tests/test-alpha.sh 2>&1); STATUS=$?
+check "a relative path from inside the worktree runs the worktree's test" "test-alpha.sh $WT" "$(ran)"
+check "the output names the worktree" "yes" "$(contains "$OUT" "Tree: $WT")"
+
+run "$LIVE" test-alpha.sh
+check "a bare run names the tree it uses" "yes" "$(contains "$OUT" "Tree: $MAIN")"
+
+echo "== copy without .git =="
+COPY="$T/copy"
+mkdir -p "$COPY"
+cp -r "$MAIN/bin" "$COPY/"
+run "$COPY/bin/run-tests.sh" "$COPY/bin/tests/test-alpha.sh"
+check "an absolute path into the runner's own tree works without .git" "test-alpha.sh $COPY" "$(ran)"
 
 echo "== --help =="
 run "$LIVE" --help
