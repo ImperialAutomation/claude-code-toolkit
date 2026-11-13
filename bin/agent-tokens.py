@@ -4,6 +4,7 @@ Token usage of one sub-agent and every agent it spawned, from the transcripts.
 
 Usage:
   agent-tokens.py --agent <id> [--json]
+  agent-tokens.py --session <id> [--since <iso-timestamp>] [--json]
   agent-tokens.py --sum <json-file>... [--json]
 
 Finds ~/.claude/projects/*/*/subagents/agent-<id>.jsonl, takes the agents in
@@ -22,6 +23,14 @@ of a completion notice is roughly the final context size, not this.
 An agent without a meta file has no parent. A meta file that does not parse
 makes the tree undeterminable, so it is an error.
 
+--session measures one session's main transcript,
+~/.claude/projects/*/<id>.jsonl, alone: the queue runner's own session (#270).
+Its sub-agents have their own transcripts and are not added; sidechain lines
+(`isSidechain`) never count. --since counts only lines whose `timestamp` is at
+or after it (a time without a zone is UTC); a line without a timestamp is then
+left out. The --json output has the --agent shape, with the session id as
+agent_id and one agent.
+
 --sum adds up earlier --json outputs (of --agent or of --sum) into one, in
 the same format: the totals and agent counts added, the models merged, and
 `agent_ids` listing every measured root. The queue runner measures each
@@ -32,14 +41,17 @@ measurement failed is left out by the caller, never guessed here.
 Exit codes:
   0  found, totals printed
   1  no transcript for <id>
-  2  usage error, <id> found in more than one place, or a transcript or meta
-     file of the session is unreadable; with --sum, a file that is missing or
-     not --json output of this script
+  2  usage error (also --since without --session, or one that does not
+     parse), <id> found in more than one place, or a transcript or meta file
+     of the session is unreadable; with --sum, a file that is missing or not
+     --json output of this script
 """
 
 import argparse
+import glob
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -47,6 +59,9 @@ SUBAGENTS_DIR = "subagents"
 TRANSCRIPT_PATTERN = "agent-{}.jsonl"
 META_SUFFIX = ".meta.json"
 PARENT_KEY = "parentAgentId"
+SESSION_PATTERN = "{}.jsonl"
+TIMESTAMP_KEY = "timestamp"
+SIDECHAIN_KEY = "isSidechain"
 
 CATEGORIES = (
     "input_tokens",
@@ -118,9 +133,33 @@ def tree(root, parent_of):
     return members
 
 
-def usage_by_message(transcript):
-    """message.id -> (model, usage) for every assistant line; the last line of
-    a message wins."""
+def parse_time(text):
+    """An ISO 8601 timestamp as an aware datetime (UTC when it names no zone),
+    or None when it does not parse. A trailing `Z` is rewritten first:
+    fromisoformat accepts it only from Python 3.11 on."""
+    if not isinstance(text, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def in_window(entry, since):
+    """A main-transcript line counts when it is not a sub-agent's (sidechain)
+    and, with a window start, carries a timestamp at or after it."""
+    if entry.get(SIDECHAIN_KEY):
+        return False
+    if since is None:
+        return True
+    stamp = parse_time(entry.get(TIMESTAMP_KEY))
+    return stamp is not None and stamp >= since
+
+
+def usage_by_message(transcript, keep=None):
+    """message.id -> (model, usage) for every assistant line that `keep`
+    accepts (all without one); the last line of a message wins."""
     try:
         text = transcript.read_text()
     except (OSError, UnicodeDecodeError) as exc:
@@ -134,17 +173,15 @@ def usage_by_message(transcript):
         msg = entry.get("message") if isinstance(entry, dict) else None
         if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict) or not msg.get("id"):
             continue
+        if keep is not None and not keep(entry):
+            continue
         found[msg["id"]] = (msg.get("model"), msg["usage"])
     return found
 
 
-def measure(transcript):
-    subagents_dir = transcript.parent
-    root = agent_id_of(transcript)
-    members = tree(root, parents(subagents_dir))
-    messages = {}
-    for aid in sorted(members):
-        messages.update(usage_by_message(subagents_dir / TRANSCRIPT_PATTERN.format(aid)))
+def report_of(root, messages, agents):
+    """The --json report of one measurement: `messages` as usage_by_message
+    returns it, `agents` the number of transcripts it came from."""
     totals = {c: 0 for c in CATEGORIES}
     models = set()
     for model, usage in messages.values():
@@ -155,10 +192,31 @@ def measure(transcript):
     return {
         "agent_id": root,
         "totals": totals,
-        "agents": len(members),
+        "agents": agents,
         "models": sorted(models),
-        "summary": summary(totals, len(members)),
+        "summary": summary(totals, agents),
     }
+
+
+def measure(transcript):
+    subagents_dir = transcript.parent
+    root = agent_id_of(transcript)
+    members = tree(root, parents(subagents_dir))
+    messages = {}
+    for aid in sorted(members):
+        messages.update(usage_by_message(subagents_dir / TRANSCRIPT_PATTERN.format(aid)))
+    return report_of(root, messages, len(members))
+
+
+def find_session_transcripts(session_id, projects_dir=PROJECTS_DIR):
+    # Escaped: a `*` or `[` in the id must not match other sessions' transcripts.
+    return sorted(projects_dir.glob(f"*/{SESSION_PATTERN.format(glob.escape(session_id))}"))
+
+
+def measure_session(transcript, since=None):
+    """The main transcript of a session alone, from `since` on: one agent."""
+    messages = usage_by_message(transcript, lambda entry: in_window(entry, since))
+    return report_of(transcript.stem, messages, 1)
 
 
 def roots_of(report):
@@ -213,10 +271,23 @@ def main(argv=None):
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--agent", help="agent id (from `agentId: <id>`)")
+    source.add_argument("--session", help="session id: its main transcript alone")
     source.add_argument("--sum", nargs="+", metavar="JSON_FILE",
                         help="add up earlier --json outputs")
+    parser.add_argument("--since", metavar="ISO_TIMESTAMP",
+                        help="with --session: count only lines at or after this time")
     parser.add_argument("--json", action="store_true", help="print one JSON object")
     args = parser.parse_args(argv)
+
+    if args.session == "":
+        parser.error("--session needs a session id")
+    since = None
+    if args.since is not None:
+        if args.session is None:
+            parser.error("--since belongs to --session")
+        since = parse_time(args.since)
+        if since is None:
+            parser.error(f"--since is not an ISO 8601 timestamp: '{args.since}'")
 
     if args.sum:
         try:
@@ -227,18 +298,23 @@ def main(argv=None):
         print(json.dumps(report) if args.json else format_text(report))
         return EXIT_FOUND
 
-    found = find_transcripts(args.agent)
+    if args.session is not None:
+        kind, wanted = "session", args.session
+        found = find_session_transcripts(args.session)
+    else:
+        kind, wanted = "agent", args.agent
+        found = find_transcripts(args.agent)
     if not found:
-        print(f"agent-tokens: no transcript for agent '{args.agent}' under {PROJECTS_DIR}",
+        print(f"agent-tokens: no transcript for {kind} '{wanted}' under {PROJECTS_DIR}",
               file=sys.stderr)
         return EXIT_NOT_FOUND
     if len(found) > 1:
-        print(f"agent-tokens: agent '{args.agent}' found in more than one place:", file=sys.stderr)
+        print(f"agent-tokens: {kind} '{wanted}' found in more than one place:", file=sys.stderr)
         for path in found:
             print(f"  {path}", file=sys.stderr)
         return EXIT_ERROR
     try:
-        report = measure(found[0])
+        report = measure_session(found[0], since) if args.session is not None else measure(found[0])
     except Unreadable as exc:
         print(f"agent-tokens: unreadable: {exc}", file=sys.stderr)
         return EXIT_ERROR
