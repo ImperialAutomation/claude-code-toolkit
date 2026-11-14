@@ -34,6 +34,8 @@
       "Bash(ls *)",
       "Bash(wc *)",
       "Bash(sort *)",
+      // cut only reads and writes stdout; it has no output-file form.
+      "Bash(cut *)",
       "Bash(echo *)",
       "Bash(printf *)",
       // jq only reads JSON. The rtk form is listed too: the RTK hook rewrites
