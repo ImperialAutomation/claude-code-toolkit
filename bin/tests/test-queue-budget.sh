@@ -99,6 +99,36 @@ check "a rework row counts toward the budget" "budget 2/3" "$OUT"
 run gate 2
 check "a rework row can use up the budget: exit 1" "1" "$RC"
 
+reset
+new_log
+# The runner session's own row (#270) is not a release.
+row 1 pr sess-1
+row "" runner sess-1
+row "" runner sess-1
+run gate 2
+check "runner rows do not count toward the budget" "budget 1/2" "$OUT"
+
+echo "== 1b. gate: loop start marker (#270) =="
+START="$QUEUE_IDLE_DIR/sess-1.start"
+reset
+run gate 3
+check "first gate writes the loop start" "yes" \
+    "$(grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' "$START" 2>/dev/null && echo yes || echo no)"
+echo "2026-11-11T10:00:00Z" > "$START"
+run gate 3
+check "a later gate leaves the start unchanged" "2026-11-11T10:00:00Z" "$(cat "$START")"
+: > "$START"
+run gate 3
+check "an empty start is rewritten" "yes" \
+    "$(grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' "$START" 2>/dev/null && echo yes || echo no)"
+echo "garbled" > "$START"
+run gate 3
+check "a garbled start is rewritten" "no" "$(grep -q garbled "$START" && echo yes || echo no)"
+reset
+touch "$QUEUE_STOP_FILE"
+run gate 3
+check "a gate that stops the loop writes no start" "no" "$([[ -e "$START" ]] && echo yes || echo no)"
+
 echo "== 2. gate: log written before the session column =="
 reset
 printf '%s\n' "$OLD_HEADER" > "$QUEUE_RUNS_LOG"
@@ -196,6 +226,91 @@ reset
 OUT=$(env -u CLAUDE_CODE_SESSION_ID bash "$QB" idle 3 2>/dev/null); RC=$?
 check "idle without session id: exit 1" "1" "$RC"
 
+echo "== 5b. stop: the runner session's own row (#270) =="
+# A main transcript as Claude Code writes it, under the temp $HOME.
+TRANSCRIPT="$HOME/.claude/projects/-proj/sess-1.jsonl"
+mkdir -p "$(dirname "$TRANSCRIPT")"
+msg() { # msg <id> <timestamp> <in> <cw> <cr> <out>
+    printf '{"type":"assistant","timestamp":"%s","message":{"id":"%s","model":"claude-opus-5-5","usage":{"input_tokens":%s,"cache_creation_input_tokens":%s,"cache_read_input_tokens":%s,"output_tokens":%s}}}\n' \
+        "$2" "$1" "$3" "$4" "$5" "$6"
+}
+{
+    msg m0 2026-11-11T09:00:00Z 900 900 900 900   # before the loop
+    msg m1 2026-11-11T10:00:05Z 1 100 1000 10
+    msg m1 2026-11-11T10:00:06Z 1 100 1000 10     # same message again
+    msg m2 2026-11-11T11:00:00Z 2 200 2000 20
+} > "$TRANSCRIPT"
+runner_rows() { awk -F'\t' 'NR > 1 && $3 == "runner"' "$QUEUE_RUNS_LOG" 2>/dev/null; }
+
+reset
+mkdir -p "$QUEUE_IDLE_DIR"
+echo "2026-11-11T10:00:00Z" > "$START"
+echo 5 > "$QUEUE_IDLE_DIR/sess-1"
+run stop
+check "stop: exit 0" "0" "$RC"
+check "stop: removes the idle count" "no" "$([[ -e "$QUEUE_IDLE_DIR/sess-1" ]] && echo yes || echo no)"
+check "stop: prints the runner summary" "runner: in 0.0k / cw 0.3k / cr 3.0k / out 0.0k, 1 agent" "$OUT"
+check "stop: one runner row, window only, each message once" \
+    $'\trunner\t\t3\t300\t3000\t30\t1\tsess-1' "$(runner_rows | cut -f2-10)"
+check "stop: removes the loop start" "no" "$([[ -e "$START" ]] && echo yes || echo no)"
+run gate 1
+check "stop: its row does not use up the budget" "budget 0/1" "$OUT"
+
+reset
+run stop
+check "stop without a loop start: exit 0" "0" "$RC"
+check "stop without a loop start: says so" "yes" "$(contains "$OUT" "no loop start")"
+check "stop without a loop start: writes no row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
+
+reset
+mkdir -p "$QUEUE_IDLE_DIR"
+echo "2026-11-11T10:00:00Z" > "$START"
+OUT=$(CLAUDE_CODE_SESSION_ID="sess-9" bash "$QB" stop 2>/dev/null); RC=$?
+check "stop, other session without a start: no row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
+mkdir -p "$QUEUE_IDLE_DIR"
+echo "2026-11-11T10:00:00Z" > "$QUEUE_IDLE_DIR/sess-9.start"
+OUT=$(CLAUDE_CODE_SESSION_ID="sess-9" bash "$QB" stop 2>/dev/null); RC=$?
+check "stop, no transcript: exit 0" "0" "$RC"
+check "stop, no transcript: tokens unknown" "yes" "$(contains "$OUT" "runner tokens: unknown")"
+check "stop, no transcript: row with unknown tokens" \
+    $'\trunner\t\tunknown\tunknown\tunknown\tunknown\tunknown\tsess-9' "$(runner_rows | cut -f2-10)"
+check "stop, no transcript: removes the loop start" "no" \
+    "$([[ -e "$QUEUE_IDLE_DIR/sess-9.start" ]] && echo yes || echo no)"
+check "stop, no transcript: other session's start kept" "yes" "$([[ -e "$START" ]] && echo yes || echo no)"
+
+reset
+mkdir -p "$QUEUE_IDLE_DIR"
+echo "2026-11-11T10:00:00Z" > "$START"
+mkdir -p "$T/log-is-a-dir"
+OUT=$(QUEUE_RUNS_LOG="$T/log-is-a-dir" bash "$QB" stop 2>/dev/null); RC=$?
+check "stop, row not written: exit 0" "0" "$RC"
+check "stop, row not written: says so" "yes" "$(contains "$OUT" "runner tokens: not logged")"
+check "stop, row not written: no success line" "no" "$(contains "$OUT" "runner: ")"
+check "stop, row not written: keeps the loop start" "yes" "$([[ -e "$START" ]] && echo yes || echo no)"
+rmdir "$T/log-is-a-dir"
+
+for bad in "" "garbled"; do
+    reset
+    mkdir -p "$QUEUE_IDLE_DIR"
+    echo "$bad" > "$START"
+    run stop
+    check "stop, start '$bad': exit 0" "0" "$RC"
+    check "stop, start '$bad': readable reason, not the argparse usage" "yes" \
+        "$(contains "$OUT" "runner tokens: unknown (loop start '$bad'")"
+    check "stop, start '$bad': no usage line" "no" "$(contains "$OUT" "usage:")"
+    check "stop, start '$bad': row with unknown tokens" \
+        $'\trunner\t\tunknown\tunknown\tunknown\tunknown\tunknown\tsess-1' "$(runner_rows | cut -f2-10)"
+    check "stop, start '$bad': removes the loop start" "no" "$([[ -e "$START" ]] && echo yes || echo no)"
+done
+
+reset
+OUT=$(env -u CLAUDE_CODE_SESSION_ID bash "$QB" stop 2>/dev/null); RC=$?
+check "stop without session id: exit 0" "0" "$RC"
+check "stop without session id: documented form" "yes" \
+    "$(contains "$OUT" "runner tokens: unknown (CLAUDE_CODE_SESSION_ID")"
+check "stop without session id: one line" "1" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
+check "stop without session id: writes no row" "no" "$([[ -e "$QUEUE_RUNS_LOG" ]] && echo yes || echo no)"
+
 echo "== 6. usage errors =="
 reset
 run
@@ -214,6 +329,8 @@ run idle -1
 check "idle -1: exit 2" "2" "$RC"
 run worked extra
 check "worked with an argument: exit 2" "2" "$RC"
+run stop extra
+check "stop with an argument: exit 2" "2" "$RC"
 check "usage errors made no idle file" "no" "$([[ -e "$QUEUE_IDLE_DIR" ]] && echo yes || echo no)"
 
 echo

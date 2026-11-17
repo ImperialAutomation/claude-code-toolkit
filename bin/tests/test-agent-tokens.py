@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "agent-tokens.py"
@@ -222,6 +223,87 @@ r = run("--sum", str(root_json), str(bad), "--json")
 check("sum with a malformed part: exit 2, names the file", r.returncode == 2 and "bad.json" in r.stderr)
 r = run("--agent", "root", "--sum", str(root_json))
 check("--agent and --sum together: usage error exit 2", r.returncode == 2)
+
+print("--- --session (runner main transcript, #270) ---")
+RUNNER = PROJECTS / "-proj-c"
+RUNNER.mkdir(parents=True)
+
+
+def at_time(entry, ts, sidechain=False):
+    entry = dict(entry, timestamp=ts)
+    if sidechain:
+        entry["isSidechain"] = True
+    return entry
+
+
+(RUNNER / "runner1.jsonl").write_text("\n".join(json.dumps(e) for e in [
+    at_time(line("r1", (1000, 1000, 1000, 1000)), "2026-11-11T09:59:59.999Z"),  # before the window
+    # Only r2 sits on the boundary, both of its lines, so an exclusive window
+    # start (`>` instead of `>=`) loses it and the totals change.
+    at_time(line("r2", (1, 10, 100, 1)), "2026-11-11T10:00:00.000Z"),           # on the boundary
+    at_time(line("r2", (1, 10, 100, 1)), "2026-11-11T10:00:00.000Z"),           # same message again
+    at_time(line("r3", (500, 500, 500, 500)), "2026-11-11T10:30:00Z", sidechain=True),
+    line("r5", (7, 7, 7, 7)),                                                   # no timestamp
+    at_time(line("r4", (2, 20, 200, 2), SONNET), "2026-11-11T12:00:00Z"),
+]) + "\n{partly written")
+# The runner's sub-agents are measured with --agent; --session never adds them.
+agent(RUNNER / "runner1", "spawned", [line("x1", (9000, 9000, 9000, 9000))])
+
+r = run("--session", "runner1", "--since", "2026-11-11T10:00:00Z", "--json")
+check("session with --since: exit 0", r.returncode == 0)
+ses = json.loads(r.stdout) if r.returncode == 0 else {}
+check("session with --since: only the window, each message.id once, no sidechain",
+      ses.get("totals") == {"input_tokens": 3, "cache_creation_input_tokens": 30,
+                            "cache_read_input_tokens": 300, "output_tokens": 3})
+check("session: one agent, the session itself", ses.get("agents") == 1)
+check("session: id echoed as agent_id", ses.get("agent_id") == "runner1")
+check("session: models of the window", ses.get("models") == [OPUS, SONNET])
+check("session: summary", ses.get("summary") == at.summary(ses.get("totals", {}), 1))
+
+r = run("--session", "runner1", "--since", "2026-11-11T11:00:00+01:00", "--json")
+off = json.loads(r.stdout) if r.returncode == 0 else {}
+check("session: --since with an offset compares as UTC",
+      off.get("totals", {}).get("input_tokens") == 3)
+
+r = run("--session", "runner1", "--json")
+whole = json.loads(r.stdout) if r.returncode == 0 else {}
+check("session without --since: the whole main transcript, still no sidechain",
+      whole.get("totals", {}).get("input_tokens") == 1000 + 1 + 7 + 2)
+
+session_json = PARTS / "runner.json"
+session_json.write_text(run("--session", "runner1", "--since", "2026-11-11T10:00:00Z", "--json").stdout)
+r = run("--sum", str(session_json), str(child2_json), "--json")
+check("session output is accepted by --sum",
+      r.returncode == 0 and json.loads(r.stdout).get("agent_ids") == ["runner1", "child2"])
+
+r = run("--session", "nosuch")
+check("unknown session: exit 1", r.returncode == 1 and "nosuch" in r.stderr)
+# Unescaped, `runner?` and `runner[1]` would glob-match runner1.jsonl.
+for pattern in ("runner?", "runner[1]", "*"):
+    r = run("--session", pattern)
+    check(f"glob characters in --session '{pattern}' match no other session: exit 1",
+          r.returncode == 1 and r.stdout == "")
+(PROJECTS / "-proj-b" / "runner1.jsonl").write_text("")
+r = run("--session", "runner1")
+check("session in two project dirs: exit 2", r.returncode == 2)
+(PROJECTS / "-proj-b" / "runner1.jsonl").unlink()
+r = run("--session", "runner1", "--since", "yesterday")
+check("unparseable --since: exit 2", r.returncode == 2 and r.stdout == "")
+r = run("--agent", "root", "--since", "2026-11-11T10:00:00Z")
+check("--since without --session: exit 2", r.returncode == 2)
+r = run("--agent", "root", "--session", "runner1")
+check("--agent and --session together: exit 2", r.returncode == 2)
+r = run("--session", "")
+check("empty --session: usage error exit 2", r.returncode == 2 and "--session" in r.stderr)
+r = run("--session", "", "--since", "2026-11-11T10:00:00Z")
+check("empty --session with --since: names --session, not --since",
+      r.returncode == 2 and "needs a session id" in r.stderr)
+check("parse_time: Z suffix is UTC",
+      at.parse_time("2026-11-11T10:00:00Z") == datetime(2026, 11, 11, 10, tzinfo=timezone.utc))
+check("parse_time: no timestamp is None", at.parse_time(None) is None)
+(PROJECTS / "-proj-b" / "badsess.jsonl").write_bytes(b"\xff\xfe not utf-8\n")
+r = run("--session", "badsess")
+check("unreadable session transcript: exit 2", r.returncode == 2)
 
 print("--- CLI ---")
 r = run("--help")
