@@ -66,6 +66,67 @@ labels_json() { # <N>
     fi
 }
 state_of() { cat "$I/$1/state" 2>/dev/null || echo OPEN; }
+P="$STUB/prs"
+file_labels_json() { # <labels-file>
+    if [[ -s "$1" ]]; then jq -R '{name: .}' "$1" | jq -s .; else echo '[]'; fi
+}
+case "$1" in
+    repo)
+        echo "o/r"; exit 0 ;;
+    api)
+        shift
+        [[ -e "$STUB/fail-api" ]] && { echo "gh: network down" >&2; exit 1; }
+        path=""
+        for a in "$@"; do [[ "$a" == repos/* ]] && path="$a"; done
+        case "$path" in
+            repos/o/r/issues/*/comments*)
+                n=${path#repos/o/r/issues/}; n=${n%%/*}
+                if [[ -f "$P/$n/comments.json" ]]; then cat "$P/$n/comments.json"
+                elif [[ -f "$I/$n/comments.json" ]]; then cat "$I/$n/comments.json"
+                else echo '[]'; fi ;;
+            repos/o/r/issues\?*)
+                want=${path#*labels=}; want=${want%%&*}
+                out='[]'
+                for d in $(ls "$I" 2>/dev/null); do
+                    [[ "$(state_of "$d")" == "OPEN" ]] || continue
+                    ok=true
+                    for l in ${want//,/ }; do has_label "$d" "$l" || ok=false; done
+                    $ok || continue
+                    out=$(jq --argjson n "$d" --argjson l "$(labels_json "$d")" \
+                        '. + [{number: $n, labels: $l}]' <<< "$out")
+                done
+                echo "$out" ;;
+            *) echo "unexpected gh api call: $*" >&2; exit 1 ;;
+        esac
+        exit 0 ;;
+    pr)
+        cmd="$2"; shift 2
+        [[ -e "$STUB/fail-pr-$cmd" ]] && { echo "gh: network down" >&2; exit 1; }
+        case "$cmd" in
+            list)
+                out='[]'
+                for p in $(ls "$P" 2>/dev/null); do
+                    [[ "$(cat "$P/$p/state" 2>/dev/null || echo OPEN)" == "OPEN" ]] || continue
+                    out=$(jq --argjson n "$p" --argjson l "$(file_labels_json "$P/$p/labels")" \
+                            --argjson c "$(jq -R 'select(length > 0) | {number: tonumber}' "$P/$p/closes" | jq -s .)" \
+                            '. + [{number: $n, url: "https://github.com/o/r/pull/\($n)", labels: $l, closingIssuesReferences: $c}]' <<< "$out")
+                done
+                echo "$out" ;;
+            edit)
+                p="$1"; shift
+                [[ -d "$P/$p" ]] || { echo "no PR $p" >&2; exit 1; }
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --add-label) grep -qxF -- "$2" "$P/$p/labels" || echo "$2" >> "$P/$p/labels"; shift 2 ;;
+                        --remove-label) grep -vxF -- "$2" "$P/$p/labels" > "$P/$p/labels.new"
+                                        mv "$P/$p/labels.new" "$P/$p/labels"; shift 2 ;;
+                        *) echo "unexpected pr edit arg: $1" >&2; exit 1 ;;
+                    esac
+                done ;;
+            *) echo "unexpected gh pr call: $cmd $*" >&2; exit 1 ;;
+        esac
+        exit 0 ;;
+esac
 [[ "$1" == "issue" ]] || { echo "unexpected gh call: $*" >&2; exit 1; }
 cmd="$2"; shift 2
 [[ -e "$STUB/fail-$cmd" ]] && { echo "gh: network down" >&2; exit 1; }
@@ -139,7 +200,27 @@ export PATH="$STUB/bin:$PATH"
 
 export QUEUE_RUNS_LOG="$T/queue-runs.tsv"
 export CLAUDE_CODE_SESSION_ID="sess-1"
-reset_stub() { rm -rf "$STUB/issues" "$STUB/comments" "$STUB"/after-* "$STUB"/fail-* "$STUB/calls" "$QUEUE_RUNS_LOG"; mkdir -p "$STUB/issues"; }
+reset_stub() { rm -rf "$STUB/issues" "$STUB/prs" "$STUB/comments" "$STUB"/after-* "$STUB"/fail-* "$STUB/calls" "$QUEUE_RUNS_LOG"; mkdir -p "$STUB/issues"; }
+# pr <P> <closes> [label...]: an open PR closing the comma-separated issues
+pr() {
+    local p="$1" closes="$2"; shift 2
+    mkdir -p "$STUB/prs/$p"
+    tr ',' '\n' <<< "$closes" > "$STUB/prs/$p/closes"
+    : > "$STUB/prs/$p/labels"
+    local l; for l in "$@"; do echo "$l" >> "$STUB/prs/$p/labels"; done
+    echo '[]' > "$STUB/prs/$p/comments.json"
+}
+pr_labels() { sort "$STUB/prs/$1/labels" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+# add_comment <json-file> <id> <created> <updated> <user-type> <body>
+add_comment() {
+    [[ -f "$1" ]] || echo '[]' > "$1"
+    jq --argjson id "$2" --arg c "$3" --arg u "$4" --arg t "$5" --arg b "$6" \
+        '. + [{id: $id, html_url: "https://github.com/o/r/pull/42#issuecomment-\($id)",
+               created_at: $c, updated_at: $u, user: {login: "jan", type: $t}, body: $b}]' \
+        "$1" > "$1.new" && mv "$1.new" "$1"
+}
+pr_comment() { add_comment "$STUB/prs/$1/comments.json" "${@:2}"; }
+issue_api_comment() { add_comment "$STUB/issues/$1/comments.json" "${@:2}"; }
 # issue <N> <created-date> [label...]
 issue() {
     local n="$1" c="$2"; shift 2
@@ -752,6 +833,177 @@ check "rework escalated: not claimed until the human removes needs-human" "" "$O
 grep -vxF needs-human "$STUB/issues/3/labels" > "$T/l"; mv "$T/l" "$STUB/issues/3/labels"
 run claim --rework
 check "rework escalated, needs-human removed (D3 route): claimed again" "3" "$OUT"
+
+echo "== 11h. rework handed back on the PR (#377) =="
+# The decision card of queue-decision-card.py: two questions, A/B and A/B/C.
+CARD=$'<!-- queue-runner -->\n<!-- queue-runner:decisions -->\n## Queue runner: decision card\n\n<!-- queue-runner:decisions-data {"version": 1, "answer": "choices", "questions": [{"n": 1, "options": ["A", "B"], "recommendation": "A"}, {"n": 2, "options": ["A", "B", "C"], "recommendation": null}]} -->'
+GO_CARD=$'<!-- queue-runner -->\n<!-- queue-runner:decisions -->\n## Queue runner: decision card\n\n<!-- queue-runner:decisions-data {"version": 1, "answer": "go", "questions": []} -->'
+REPLY_URL="https://github.com/o/r/pull/42#issuecomment-101"
+# waiting_fixture: #17 waits on the human for PR #42, whose card was created on
+# 01-01 and last edited on 01-02.
+waiting_fixture() {
+    reset_stub
+    issue 17 2026-01-01 agent-pr needs-human
+    pr 42 17 needs-human
+    pr_comment 42 100 2026-01-01T10:00:00Z 2026-01-02T10:00:00Z User "$CARD"
+}
+
+waiting_fixture
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User "1A 2C"
+run claim --rework
+check "reply after the card: exit 0" "0" "$RC"
+check "reply after the card: the issue is claimed" "17" "$OUT"
+check "reply after the card: needs-human off the issue, agent-rework on, claimed" \
+    "agent-pr agent-rework agent-wip" "$(labels_of 17)"
+check "reply after the card: needs-human off the PR" "" "$(pr_labels 42)"
+check "reply after the card: stderr names the PR and the reply" "yes yes" \
+    "$(contains "$ERR" "PR #42") $(contains "$ERR" "$REPLY_URL")"
+check "reply in the answer format: no warning" "no" "$(contains "$ERR" "warning")"
+run claim --rework
+check "reply after the card, next claim: nothing (needs-human is gone)" "" "$OUT"
+check "reply after the card, next claim: labels unchanged" "agent-pr agent-rework agent-wip" "$(labels_of 17)"
+
+waiting_fixture
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User "please do whatever you think best"
+run claim --rework
+check "free-text reply: still a go signal" "17" "$OUT"
+check "free-text reply: warns that it is not in the answer format" "yes" "$(contains "$ERR" "warning")"
+
+waiting_fixture
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User "1A 3B"
+run claim --rework
+check "reply naming an unknown question: claimed" "17" "$OUT"
+check "reply naming an unknown question: the warning names it" "yes" "$(contains "$ERR" "no question 3")"
+
+waiting_fixture
+printf '[]' > "$STUB/prs/42/comments.json"
+pr_comment 42 100 2026-01-01T10:00:00Z 2026-01-01T10:00:00Z User "$GO_CARD"
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User "go"
+run claim --rework
+check "go on a go card: claimed without a warning" "17 no" "$OUT $(contains "$ERR" "warning")"
+
+waiting_fixture
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User $'<!-- queue-runner -->\n## Queue runner: rework round'
+run claim --rework
+check "marker comment after the card: nothing claimed" "" "$OUT"
+check "marker comment after the card: issue untouched" "agent-pr needs-human" "$(labels_of 17)"
+check "marker comment after the card: PR untouched" "needs-human" "$(pr_labels 42)"
+
+waiting_fixture
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z Bot "Coverage report: 91%"
+run claim --rework
+check "bot comment after the card: nothing claimed" "" "$OUT"
+
+waiting_fixture
+pr_comment 42 101 2026-01-02T09:00:00Z 2026-01-02T09:00:00Z User "1A 2C"
+run claim --rework
+check "reply before the card's last edit: nothing claimed" "" "$OUT"
+check "reply before the card's last edit: issue untouched" "agent-pr needs-human" "$(labels_of 17)"
+
+waiting_fixture
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User "1A 2C"
+# A later loop comment on the issue (a failed rework) answered the reply already.
+issue_api_comment 17 900 2026-01-04T10:00:00Z 2026-01-04T10:00:00Z User $'<!-- queue-runner -->\n## Queue runner: second failure, needs a human'
+run claim --rework
+check "reply before the loop's last issue comment: nothing claimed" "" "$OUT"
+check "reply before the loop's last issue comment: needs-human kept" "agent-pr needs-human" "$(labels_of 17)"
+
+reset_stub
+issue 17 2026-01-01 agent-pr
+pr 42 17
+pr_comment 42 100 2026-01-01T10:00:00Z 2026-01-02T10:00:00Z User "$CARD"
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User "LGTM, merging"
+run claim --rework
+check "reply while nothing waits on the human (no needs-human): nothing claimed" "" "$OUT"
+check "reply while nothing waits: issue untouched" "agent-pr" "$(labels_of 17)"
+
+reset_stub
+issue 17 2026-01-01 agent-pr needs-human
+pr 42 17 needs-human
+pr_comment 42 101 2026-01-03T10:00:00Z 2026-01-03T10:00:00Z User "1A"
+run claim --rework
+check "reply on a PR without a decision card: nothing claimed" "" "$OUT"
+
+echo "== 11i. agent-rework on the PR (#377) =="
+reset_stub
+issue 17 2026-01-01 agent-pr
+pr 42 17 agent-rework
+run claim --rework
+check "PR label: the closing issue is claimed" "17" "$OUT"
+check "PR label: moved to the issue" "agent-pr agent-rework agent-wip" "$(labels_of 17)"
+check "PR label: removed from the PR" "" "$(pr_labels 42)"
+check "PR label: stderr names the PR" "yes" "$(contains "$ERR" "PR #42")"
+run claim --rework
+check "PR label: not claimed twice" "" "$OUT"
+
+reset_stub
+issue 17 2026-01-01 agent-pr needs-human agent-failed
+issue 18 2026-01-02 agent-pr needs-human
+pr 42 17,18 agent-rework needs-human
+run claim --rework
+check "PR label, two closing issues: the older is claimed" "17" "$OUT"
+check "PR label, two closing issues: needs-human off #17" "agent-failed agent-pr agent-rework agent-wip" "$(labels_of 17)"
+check "PR label, two closing issues: #18 moved too" "agent-pr agent-rework" "$(labels_of 18)"
+check "PR label: needs-human and agent-rework off the PR" "" "$(pr_labels 42)"
+
+reset_stub
+issue 17 2026-01-01 agent-pr agent-wip
+pr 42 17 agent-rework
+run claim --rework
+check "PR label, issue claimed by a running round: nothing claimed" "" "$OUT"
+check "PR label, issue claimed: PR label kept for later" "agent-rework" "$(pr_labels 42)"
+check "PR label, issue claimed: issue untouched" "agent-pr agent-wip" "$(labels_of 17)"
+
+reset_stub
+issue 17 2026-01-01 agent-ready
+pr 42 17 agent-rework
+run claim --rework
+check "PR label on a PR whose issue is no agent PR: nothing claimed" "" "$OUT"
+check "PR label on a non-agent PR: issue untouched" "agent-ready" "$(labels_of 17)"
+
+reset_stub
+issue 17 2026-01-01 agent-pr epic
+pr 42 17 agent-rework
+run claim --rework
+check "PR label on an epic's PR: nothing claimed" "" "$OUT"
+
+echo "== 11j. hand-back: retry and failures (#377) =="
+reset_stub
+issue 17 2026-01-01 agent-pr needs-human
+pr 42 17 agent-rework needs-human
+touch "$STUB/fail-pr-edit"
+run claim --rework
+check "PR edit fails: exit 1" "1" "$RC"
+check "PR edit fails: nothing on stdout" "" "$OUT"
+check "PR edit fails: PR keeps its labels" "agent-rework needs-human" "$(pr_labels 42)"
+rm -f "$STUB/fail-pr-edit"
+run claim --rework
+check "retry after a failed PR edit: claimed" "17" "$OUT"
+check "retry after a failed PR edit: issue labels moved once" "agent-pr agent-rework agent-wip" "$(labels_of 17)"
+check "retry after a failed PR edit: PR cleared" "" "$(pr_labels 42)"
+
+reset_stub
+issue 17 2026-01-01 agent-pr
+pr 42 17 agent-rework
+touch "$STUB/fail-api"
+run claim --rework
+check "hand-back scan fails: exit 1" "1" "$RC"
+check "hand-back scan fails: nothing claimed" "" "$OUT"
+check "hand-back scan fails: stderr says so" "yes" "$(contains "$ERR" "handed back")"
+check "hand-back scan fails: PR untouched" "agent-rework" "$(pr_labels 42)"
+
+reset_stub
+issue 17 2026-01-01 agent-pr agent-rework
+pr 42 17
+run claim --rework
+check "issue-side agent-rework with an open PR: still claimed" "17" "$OUT"
+
+reset_stub
+issue 17 2026-01-01 agent-pr
+pr 42 17 agent-rework
+run claim
+check "plain claim never reads the PRs" "no" "$(contains "$(cat "$STUB/calls")" "pr list")"
+check "plain claim leaves the PR label" "agent-rework" "$(pr_labels 42)"
 
 echo "== 12. release: exit 0 and no temp file left, every outcome =="
 # The comment body is a mktemp file; its EXIT trap must still find it once
