@@ -429,7 +429,7 @@ do_release() {
                 what="opened $pr_url for this issue"
             else
                 edit_args+=(--remove-label "$REWORK_LABEL" --add-label "$PR_LABEL")
-                what="reworked $pr_url; the round is listed in its last queue-runner comment on the PR"
+                what="reworked $pr_url; the round is listed in its last \"Queue runner: rework round\" comment on the PR"
             fi
             {
                 printf '%s\nQueue runner %s.\n\n' "$COMMENT_MARKER" "$what"
