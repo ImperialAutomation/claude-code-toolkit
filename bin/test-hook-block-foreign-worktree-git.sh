@@ -56,6 +56,114 @@ check 2 "clean -fd in sibling worktree"         "git -C $BASE/wt clean -fd"
 check 2 "bare stash in sibling worktree"        "git -C $BASE/wt stash"
 check 2 "destructive command later in a chain"  "cd /tmp && git -C $BASE/wt reset --hard"
 
+# --- Judged by meaning, not word order (#322, #125) -------------------------
+#
+# The hook parses each git invocation: global options are skipped, the first
+# remaining word is the subcommand, and only that subcommand's own arguments
+# are judged. A branch that exists in the repo but is not checked out anywhere
+# gives the "switch to an existing branch" cases something to switch to.
+git -C "$BASE/main" branch -q spare
+git -C "$BASE/main" update-ref refs/remotes/origin/develop HEAD
+
+# Allowed: creating or switching branches never discards work (D2, D3).
+check 0 "checkout --no-track -b (option before -b)" "git -C $BASE/wt checkout --no-track -b issue-1-x origin/develop"
+check 0 "checkout -b --no-track (option after -b)"  "git -C $BASE/wt checkout -b issue-1-x --no-track origin/develop"
+check 0 "switch --no-track -c"                      "git -C $BASE/wt switch --no-track -c issue-1-x origin/develop"
+check 0 "checkout --detach"                         "git -C $BASE/wt checkout --detach origin/develop"
+check 0 "checkout --orphan"                         "git -C $BASE/wt checkout --orphan x"
+check 0 "checkout --track remote branch"            "git -C $BASE/wt checkout --track origin/develop"
+check 0 "checkout existing branch (D2)"             "git -C $BASE/wt checkout spare"
+check 0 "switch existing branch (D2)"               "git -C $BASE/wt switch spare"
+check 0 "checkout DWIM remote-only branch (D2)"     "git -C $BASE/wt checkout develop"
+check 0 "checkout - (previous branch)"              "git -C $BASE/wt checkout -"
+check 0 "checkout -B (D3)"                          "git -C $BASE/wt checkout -B x origin/develop"
+check 0 "switch -C (D3)"                            "git -C $BASE/wt switch -C x origin/develop"
+
+# Allowed: a verb word outside the subcommand position (#125).
+check 0 "add a path containing 'restore'"           "git -C $BASE/wt add docs/restore-runbook.md"
+check 0 "grep for 'reset'"                          "git -C $BASE/wt grep -e reset"
+check 0 "log --grep=clean"                          "git -C $BASE/wt log --grep=clean"
+check 0 "show a path containing 'stash'"            "git -C $BASE/wt show HEAD:x/stash.sh"
+check 0 "diff -- a path containing 'stash'"         "git -C $BASE/wt diff -- src/stash/"
+check 0 "-c value containing a verb"                "git -C $BASE/wt -c alias.x=reset status"
+
+# Blocked: checkout forms that restore paths or force (D4).
+check 2 "checkout HEAD -- files"                    "git -C $BASE/wt checkout HEAD -- f.txt"
+check 2 "checkout --force"                          "git -C $BASE/wt checkout --force"
+check 2 "checkout -f with a branch"                 "git -C $BASE/wt checkout -f spare"
+check 2 "checkout -qf (short cluster)"              "git -C $BASE/wt checkout -qf spare"
+check 2 "checkout --forc (abbreviated --force)"     "git -C $BASE/wt checkout --forc spare"
+check 2 "checkout -B with --force"                  "git -C $BASE/wt checkout -B x --force origin/develop"
+check 2 "checkout a path, no ref (D4)"              "git -C $BASE/wt checkout f.txt"
+check 2 "checkout <ref> <path> (D4)"                "git -C $BASE/wt checkout HEAD f.txt"
+check 2 "checkout . (D4)"                           "git -C $BASE/wt checkout ."
+check 2 "checkout -p (interactive path restore)"    "git -C $BASE/wt checkout -p"
+check 2 "switch -f"                                 "git -C $BASE/wt switch -f spare"
+check 2 "switch --force"                            "git -C $BASE/wt switch --force spare"
+check 2 "switch --discard-changes"                  "git -C $BASE/wt switch --discard-changes spare"
+check 2 "stash push"                                "git -C $BASE/wt stash push"
+check 2 "stash -u (implicit push)"                  "git -C $BASE/wt stash -u"
+check 2 "stash clear"                               "git -C $BASE/wt stash clear"
+
+# Blocked: judged per invocation, so a chain or global options do not hide it.
+check 2 "destructive second invocation in a chain"  "git -C $BASE/wt add x && git -C $BASE/wt reset --hard"
+check 2 "harmless first target, foreign second"     "git -C $BASE/main reset --hard; git -C $BASE/wt reset --hard"
+check 2 "global options before the subcommand"      "git -C $BASE/wt -c core.x=y --no-pager reset --hard"
+check 2 "quoted -C target"                          "git -C \"$BASE/wt\" reset --hard"
+check 2 "inside a command substitution"             "echo \$(git -C $BASE/wt reset --hard)"
+check 2 "backslash-newline continuation"            "git -C $BASE/wt \\
+  reset --hard"
+check 0 "foreign harmless, own destructive"         "git -C $BASE/wt status && git -C $BASE/main reset --hard"
+check 0 "make -C is not git"                        "make -C $BASE/wt clean"
+check 2 "inside backticks"                          "echo \`git -C $BASE/wt reset --hard\`"
+check 2 "subshell closed with );"                   "(git -C $BASE/wt reset --hard);ls"
+
+# PR #365 review: globs, inline aliases, abbreviations, redirects, variables.
+check 2 "checkout '*' is a pathspec glob, not a remote branch (D7)" "git -C $BASE/wt checkout '*'"
+check 2 "checkout 'dev*' is a pathspec glob (D7)"   "git -C $BASE/wt checkout 'dev*'"
+check 2 "inline alias for reset --hard"             "git -C $BASE/wt -c alias.x='reset --hard' x"
+check 2 "inline alias, name in other case"          "git -C $BASE/wt -c Alias.X='reset --hard' x"
+check 2 "inline shell alias"                        "git -C $BASE/wt -c alias.x='!git reset --hard' x"
+check 0 "inline alias for a branch switch"          "git -C $BASE/wt -c alias.co=checkout co spare"
+check 2 "checkout --pathspec-fr (abbreviated)"      "git -C $BASE/wt checkout --pathspec-fr=list.txt"
+check 2 "checkout --pathspec-from-file"             "git -C $BASE/wt checkout --pathspec-from-file list.txt"
+check 0 "checkout branch with 2>&1"                 "git -C $BASE/wt checkout spare 2>&1"
+check 0 "checkout branch with >/dev/null"           "git -C $BASE/wt checkout spare >/dev/null"
+check 2 "reset --hard with a redirect"              "git -C $BASE/wt reset --hard 2>/dev/null"
+export FOREIGN_WT_TEST_DIR=$BASE/wt
+check 2 "-C target via \$VAR"                       "git -C \"\$FOREIGN_WT_TEST_DIR\" reset --hard"
+check 2 "-C target via \${VAR}"                     "git -C \${FOREIGN_WT_TEST_DIR} reset --hard"
+
+# PR #365 second review: fail closed when the split cannot be trusted.
+check 2 "# comment line before the git call"        "# restore sibling
+git -C $BASE/wt checkout -- ."
+check 2 "# inside a word swallows the rest"         "echo \${#a[@]}; git -C $BASE/wt reset --hard"
+check 2 "\$(...) inside double quotes"              "echo \"\$(git -C $BASE/wt reset --hard)\""
+check 2 "backticks inside double quotes"            "echo \"\`git -C $BASE/wt reset --hard\`\""
+check 2 "unbalanced quote in a heredoc body"        "git -C $BASE/wt reset --hard && cat <<EOF
+don't
+EOF"
+check 0 "uncertain split, no destructive verb"      "# note
+git -C $BASE/wt status"
+check 0 "uncertain split, own tree only"            "# note
+git -C $BASE/main reset --hard"
+
+# PR #365 second review: abbreviations, trailing --, redirects, more verbs.
+check 2 "checkout --f (shortest --force)"           "git -C $BASE/wt checkout --f spare"
+check 2 "switch --f (shortest --force)"             "git -C $BASE/wt switch --f spare"
+check 0 "checkout <branch> -- (disambiguation, D2)" "git -C $BASE/wt checkout spare --"
+check 0 "subshell with a clustered )>"              "(git -C $BASE/wt checkout spare)>/dev/null"
+check 2 "subshell )> with a destructive call"       "(git -C $BASE/wt reset --hard)>/dev/null"
+check 2 "process substitution <(...)"               "cat <(git -C $BASE/wt reset --hard)"
+check 2 "read-tree -u --reset"                      "git -C $BASE/wt read-tree -u --reset HEAD"
+check 0 "read-tree --reset without -u"              "git -C $BASE/wt read-tree --reset HEAD"
+check 2 "checkout-index -f -a"                      "git -C $BASE/wt checkout-index -f -a"
+check 2 "checkout-index -af (cluster)"              "git -C $BASE/wt checkout-index -af"
+check 0 "checkout-index without force"              "git -C $BASE/wt checkout-index -a"
+check 2 "worktree remove --force"                   "git -C $BASE/wt worktree remove --force $BASE/wt"
+check 0 "worktree remove without force"             "git -C $BASE/wt worktree remove $BASE/wt"
+check 0 "worktree list"                             "git -C $BASE/wt worktree list"
+
 # Allowed: read-only stash verbs.
 check 0 "stash list is read-only"               "git -C $BASE/wt stash list"
 check 0 "stash show is read-only"               "git -C $BASE/wt stash show"
@@ -110,6 +218,21 @@ check 0 "target path does not exist"            "git -C $BASE/nope reset --hard"
 # git will report "No stash entries found" itself. Checked in the unrelated repo,
 # which never had a stash raised in it.
 check 0 "pop with an empty stash stack"        "git -C $BASE/unrelated stash pop"
+
+# The short form `stash pop N` names stash@{N}. Fixture: raise an entry on the
+# main tree's own branch on top of the one raised in wt, so stash@{0} is the
+# caller's and stash@{1} belongs to the other branch.
+(
+  cd "$BASE/main" || exit 1
+  echo changed >> f.txt
+  git stash push -q -m "raised-in-main"
+) >/dev/null 2>&1
+
+check 0 "pop the own top entry"                 "git -C $BASE/main stash pop"
+check 2 "pop 1: short form of another branch's entry" "git -C $BASE/main stash pop 1"
+check 2 "apply --index 1: short form after a flag"    "git -C $BASE/main stash apply --index 1"
+check 2 "pop 1 >/dev/null: 1 is the entry, not an fd" "git -C $BASE/main stash pop 1 >/dev/null"
+check 0 "pop 1>/dev/null: 1 is an fd"                 "git -C $BASE/main stash pop 1>/dev/null"
 
 if [ $fail -eq 0 ]; then
   echo "all tests passed"
