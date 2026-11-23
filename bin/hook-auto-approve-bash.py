@@ -1306,6 +1306,65 @@ def command_has_until_sleep_wait_loop(command):
     return False
 
 
+# --- for-loops over gh issue searches -----------------------------------------
+# A duplicate check written as `for q in ...; do gh issue list --search "$q"; done`
+# starts with `for`, so permission matching never sees `gh` and every such check
+# prompts. batch-issue-search.sh runs the same searches as one command (#345).
+#
+# Only a loop whose body runs `gh issue list` with a search is matched: other
+# `for` loops have no wrapper that replaces them, and a hint naming the wrong
+# tool is worse than the prompt.
+
+_ISSUE_SEARCH_FLAGS = ("--search", "-S")
+
+
+def _is_gh_issue_search(tokens):
+    """True for `gh issue list ... --search|-S <query>` (also `--search=<q>`)."""
+    tokens = strip_rtk_prefix(strip_env_prefix(tokens))
+    if tokens[:3] != ["gh", "issue", "list"]:
+        return False
+    return any(
+        token in _ISSUE_SEARCH_FLAGS or token.startswith("--search=")
+        for token in tokens[3:]
+    )
+
+
+def _loop_body_has_issue_search(segments, start):
+    """True if the loop body starting at `segments[start]` runs a gh issue
+    search before the `done` that closes it. Same body walk as
+    _loop_body_sleeps."""
+    for index in range(start, len(segments)):
+        tokens = segments[index]
+        body = tokens[1:] if index == start and tokens[:1] == ["do"] else tokens
+        if body[:1] == ["done"]:
+            return False
+        if _is_gh_issue_search(body):
+            return True
+        if "done" in body:
+            return False
+    return False
+
+
+def command_has_for_issue_search_loop(command):
+    """True if `command` contains `for ...; do ... gh issue list --search ...; done`.
+
+    Never raises: on unparseable input the caller falls through to the normal
+    prompt.
+    """
+    try:
+        segments = split_segments(command)
+    except ValueError:
+        return False
+
+    for index, tokens in enumerate(segments):
+        if tokens[:1] != ["for"]:
+            continue
+        if _loop_body_has_issue_search(segments, index + 1):
+            return True
+
+    return False
+
+
 # --- cd-prefixed chains -------------------------------------------------------
 # `cd <dir> && <cmd>` is the single most common cause of permission prompts:
 # matching only looks at the first word, so the rule that would allow <cmd>
@@ -1545,6 +1604,26 @@ def main():
                     "modify — they are allowlisted and need no permission "
                     "prompt. Python for calculation or data transformation "
                     "with no file access stays fine."
+                ),
+            }
+        }
+        print(json.dumps(output))
+        return 0
+
+    if command_has_for_issue_search_loop(command):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Hook: a `for` loop over `gh issue list --search` starts "
+                    "with `for`, so permission matching never sees `gh` and it "
+                    "prompts every time. Use ~/.claude/bin/batch-issue-search.sh "
+                    "[--repo <owner/repo>] [--state open|closed|all] [--limit N] "
+                    "<query> [query...] instead: one call for all queries, "
+                    "grouped per query, with a summary of the issues several "
+                    "queries found (the likeliest duplicates). It defaults to "
+                    "--state all and matches Bash(~/.claude/bin/*)."
                 ),
             }
         }
