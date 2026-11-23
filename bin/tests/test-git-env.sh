@@ -33,7 +33,7 @@ leftover() { # [PATH override]
     for v in "${EXPECTED[@]}"; do assigns+=("$v=/redirected"); done
     # Builtins only in the child: with PATH overridden, no external tool runs.
     # shellcheck disable=SC2016 # expanded by the child, not here
-    env "${assigns[@]}" ${1:+PATH="$1"} "$BASH" -c '
+    env "${assigns[@]}" ${1:+"PATH=$1"} "$BASH" -c '
         . "$1"; shift
         git_env_isolate; echo "status $?"
         for v in "$@"; do [[ -n "${!v+set}" ]] && echo "$v"; done
@@ -52,6 +52,20 @@ EMPTY=$(mktemp -d); trap 'rm -rf "$EMPTY"' EXIT
 OUT=$(leftover "$EMPTY")
 check "fails without git" "status 1" "$(head -1 <<<"$OUT")"
 check "changes nothing without git" "${#EXPECTED[@]}" "$(tail -n +2 <<<"$OUT" | grep -c .)"
+
+# The caller's IFS does not change which names are cleared.
+# shellcheck disable=SC2016 # expanded by the child, not here
+OUT=$(env GIT_COMMON_DIR=/redirected "$BASH" -c '
+    . "$1"; IFS=:
+    git_env_isolate; echo "status $? ${GIT_COMMON_DIR-unset}"' _ "$LIB")
+check "clears under a caller IFS without newline" "status 0 unset" "$OUT"
+
+# A readonly variable fails it before anything is unset.
+# shellcheck disable=SC2016 # expanded by the child, not here
+OUT=$(env GIT_COMMON_DIR=/redirected GIT_DIR=/redirected "$BASH" -c '
+    . "$1"; readonly GIT_DIR
+    git_env_isolate; echo "status $? ${GIT_COMMON_DIR-unset}"' _ "$LIB")
+check "a readonly variable fails and changes nothing" "status 1 /redirected" "$OUT"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

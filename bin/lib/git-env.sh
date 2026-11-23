@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # git-env.sh — clear the git environment that redirects repository discovery.
 #
-# Source this, then call git_env_isolate before the first git call:
+# Source this, then call git_env_isolate before the git call it guards:
 #
 #     # shellcheck source=bin/lib/git-env.sh
 #     . "$(dirname "${BASH_SOURCE[0]}")/lib/git-env.sh"
-#     git_env_isolate || exit 2
+#     top=$(git_env_isolate && git -C "$dir" rev-parse --show-toplevel)
 #
 # WHY THIS EXISTS
 #
@@ -26,10 +26,19 @@
 GIT_ENV_DISCOVERY_VARS=(GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM)
 
 # Unset every repository-local git variable and the discovery controls in the
-# calling shell. Fails, changing nothing, when git cannot list them.
+# calling shell. Fails, changing nothing, when git cannot list them or one of
+# them is readonly. Call it in a subshell (`( git_env_isolate && git ... )`,
+# `$(git_env_isolate && git ...)`) to clear only that git call's environment.
 git_env_isolate() {
-    local vars
+    local vars v decl names=()
     vars=$(git rev-parse --local-env-vars 2>/dev/null) && [[ -n "$vars" ]] || return 1
-    # shellcheck disable=SC2086 # one variable name per word
-    unset $vars "${GIT_ENV_DISCOVERY_VARS[@]}"
+    # One name per line; read as lines so the caller's IFS does not matter.
+    mapfile -t names <<<"$vars"
+    names+=("${GIT_ENV_DISCOVERY_VARS[@]}")
+    for v in "${names[@]}"; do
+        decl=$(declare -p "$v" 2>/dev/null) || continue
+        decl=${decl#declare -}
+        [[ "${decl%% *}" == *r* ]] && return 1
+    done
+    unset "${names[@]}"
 }
