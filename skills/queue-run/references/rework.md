@@ -61,7 +61,9 @@ Save the four lists (each line one JSON object):
 ```
 
 The cutoff is the time of the last PR comment with `marker: true` (the last
-round comment, R4), or the PR's `createdAt` when there is none. `<comments>`
+round comment, R4, or the decision card, which starts with the marker too
+and keeps its creation time when it is edited), or the PR's `createdAt` when
+there is none. `<comments>`
 is, one URL per line:
 
 - every review, inline comment, PR comment and issue comment after the
@@ -104,7 +106,7 @@ Fixed:
 - <sha>: <finding>
 Rejected:
 - <finding>: <reason>
-Left for the human:
+Left for the human (the questions are on the decision card, R5):
 - <finding>: <question>; options: <options>; recommendation: <one>
 ```
 
@@ -133,9 +135,12 @@ no first review: leave out `--review` and `--review-findings`.
 | Re-review `BLOCKING`, `HUMAN` or not posted, or a `left` finding | `release <N> rework <pr-url> /tmp/<project>-queue-review-<N>.md` |
 
 `rework` swaps `agent-rework` for `agent-pr`; with the note it adds
-`needs-human` and puts the note in the issue comment. Write the note first
-with the Write tool: the re-review verdict and URL, the round comment's URL
-and each `left` finding. `escalated` and `failed` keep `agent-rework`: a first
+`needs-human` and puts the note in the issue comment. Before a `rework`
+release with a note, post the PR's decision card ("Decision card" in
+`review-and-fix.md`; the questions of the `left` lines, `--gates` and the
+`rejected` lines for a `BLOCKING` re-review, `--human` for a `HUMAN` one).
+Then write the note with the Write tool: the re-review verdict and URL, the
+round comment's URL, the decision card's URL and each `left` finding. `escalated` and `failed` keep `agent-rework`: a first
 failure gets its one retry through the next `claim --rework`, a second one
 adds `needs-human` (D5). Every rework release counts toward `--budget` (D2).
 Then `queue-budget.sh worked` as in Step 5.

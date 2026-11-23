@@ -305,7 +305,10 @@ first matching row wins. `pr <url> <note>` keeps the PR, swaps `agent-ready`
 for `agent-pr` and adds `needs-human` with the text of
 `/tmp/<project>-queue-review-<N>.md` in the comment: write that file first
 with the Write tool (what happened, the review URLs, and the error or
-`NOT_ADDRESSED` of a report). The PR is never lost.
+`NOT_ADDRESSED` of a report). The PR is never lost. Before a `<note>`
+release after a review (every row with a note but the fix round's), post the
+PR's decision card ("Decision card" in `review-and-fix.md`) and put its URL
+in the note.
 
 | Review outcome (Step 4c) | Release |
 |---|---|
@@ -388,6 +391,19 @@ measure.
 - `queue: #<N> failed (first failure, back in queue) (<summary>) [budget 3/10]` or `(second failure, needs-human) (<summary>) [budget 3/10]`
 - `queue: idle (empty queue) [idle 2/16]` or `queue: idle (WIP limit <open>/<limit>) [idle 2/16]`
 - `queue: stopped (<why>) [<the line of queue-budget.sh stop>]`, e.g. `queue: stopped (stop: budget used up (10/10)) [runner: in 0.0k / cw 32k / cr 2.47M / out 13k, 1 agent]`
+
+**Waiting on you.** Under the line of a worked iteration and under a stop
+report, add the fixed block of PRs that wait on the human, one row per PR
+with its question count and decision card link (#376):
+
+```bash
+~/.claude/bin/queue-decision-card.py waiting --repo <owner/name>
+```
+
+`<owner/name>` is the GitHub repository of `<repo>`. Print its output as it
+is; it is empty when no PR waits, and then there is no block. An exit 3
+becomes the one line `Waiting on you: unknown (<error>)`. Idle lines get no
+block: they changed nothing.
 
 ## Pacing
 
