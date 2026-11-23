@@ -109,7 +109,6 @@ check 2 "stash clear"                               "git -C $BASE/wt stash clear
 check 2 "destructive second invocation in a chain"  "git -C $BASE/wt add x && git -C $BASE/wt reset --hard"
 check 2 "harmless first target, foreign second"     "git -C $BASE/main reset --hard; git -C $BASE/wt reset --hard"
 check 2 "global options before the subcommand"      "git -C $BASE/wt -c core.x=y --no-pager reset --hard"
-check 2 "-C written as -C=<dir>"                    "git -C=$BASE/wt reset --hard"
 check 2 "quoted -C target"                          "git -C \"$BASE/wt\" reset --hard"
 check 2 "inside a command substitution"             "echo \$(git -C $BASE/wt reset --hard)"
 check 2 "backslash-newline continuation"            "git -C $BASE/wt \\
@@ -134,6 +133,36 @@ check 2 "reset --hard with a redirect"              "git -C $BASE/wt reset --har
 export FOREIGN_WT_TEST_DIR=$BASE/wt
 check 2 "-C target via \$VAR"                       "git -C \"\$FOREIGN_WT_TEST_DIR\" reset --hard"
 check 2 "-C target via \${VAR}"                     "git -C \${FOREIGN_WT_TEST_DIR} reset --hard"
+
+# PR #365 second review: fail closed when the split cannot be trusted.
+check 2 "# comment line before the git call"        "# restore sibling
+git -C $BASE/wt checkout -- ."
+check 2 "# inside a word swallows the rest"         "echo \${#a[@]}; git -C $BASE/wt reset --hard"
+check 2 "\$(...) inside double quotes"              "echo \"\$(git -C $BASE/wt reset --hard)\""
+check 2 "backticks inside double quotes"            "echo \"\`git -C $BASE/wt reset --hard\`\""
+check 2 "unbalanced quote in a heredoc body"        "git -C $BASE/wt reset --hard && cat <<EOF
+don't
+EOF"
+check 0 "uncertain split, no destructive verb"      "# note
+git -C $BASE/wt status"
+check 0 "uncertain split, own tree only"            "# note
+git -C $BASE/main reset --hard"
+
+# PR #365 second review: abbreviations, trailing --, redirects, more verbs.
+check 2 "checkout --f (shortest --force)"           "git -C $BASE/wt checkout --f spare"
+check 2 "switch --f (shortest --force)"             "git -C $BASE/wt switch --f spare"
+check 0 "checkout <branch> -- (disambiguation, D2)" "git -C $BASE/wt checkout spare --"
+check 0 "subshell with a clustered )>"              "(git -C $BASE/wt checkout spare)>/dev/null"
+check 2 "subshell )> with a destructive call"       "(git -C $BASE/wt reset --hard)>/dev/null"
+check 2 "process substitution <(...)"               "cat <(git -C $BASE/wt reset --hard)"
+check 2 "read-tree -u --reset"                      "git -C $BASE/wt read-tree -u --reset HEAD"
+check 0 "read-tree --reset without -u"              "git -C $BASE/wt read-tree --reset HEAD"
+check 2 "checkout-index -f -a"                      "git -C $BASE/wt checkout-index -f -a"
+check 2 "checkout-index -af (cluster)"              "git -C $BASE/wt checkout-index -af"
+check 0 "checkout-index without force"              "git -C $BASE/wt checkout-index -a"
+check 2 "worktree remove --force"                   "git -C $BASE/wt worktree remove --force $BASE/wt"
+check 0 "worktree remove without force"             "git -C $BASE/wt worktree remove $BASE/wt"
+check 0 "worktree list"                             "git -C $BASE/wt worktree list"
 
 # Allowed: read-only stash verbs.
 check 0 "stash list is read-only"               "git -C $BASE/wt stash list"
@@ -202,6 +231,8 @@ check 0 "pop with an empty stash stack"        "git -C $BASE/unrelated stash pop
 check 0 "pop the own top entry"                 "git -C $BASE/main stash pop"
 check 2 "pop 1: short form of another branch's entry" "git -C $BASE/main stash pop 1"
 check 2 "apply --index 1: short form after a flag"    "git -C $BASE/main stash apply --index 1"
+check 2 "pop 1 >/dev/null: 1 is the entry, not an fd" "git -C $BASE/main stash pop 1 >/dev/null"
+check 0 "pop 1>/dev/null: 1 is an fd"                 "git -C $BASE/main stash pop 1>/dev/null"
 
 if [ $fail -eq 0 ]; then
   echo "all tests passed"

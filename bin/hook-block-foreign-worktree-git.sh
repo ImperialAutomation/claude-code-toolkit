@@ -53,10 +53,15 @@
 #             `.`, two or more positional arguments, or one that is not a ref
 #             allowed: -b/-B/--orphan, --detach/--track/--no-track/--quiet and
 #             other long options, switching to an existing branch
+#             (a trailing `--` with nothing after it only disambiguates a
+#             branch, D2)
 #   switch    blocked: -f/--force/--discard-changes; everything else allowed
 #   restore, reset, clean   always blocked
 #   stash     list/show allowed; pop/apply/drop judged on the entry's origin
 #             (below); everything else (bare, push, -u, clear, ...) blocked
+#   read-tree       blocked: -u together with --reset
+#   checkout-index  blocked: -f/--force
+#   worktree        blocked: remove with -f/--force
 #   anything else (add, grep, log, show, diff, ...)   allowed
 #
 # A verb that appears as a path or a pattern (`add docs/restore.md`,
@@ -69,6 +74,12 @@
 # removed, chain operators and redirects (`2>&1`, `>/dev/null`) as their own
 # tokens. A -C target gets `~`, `$VAR` and `${VAR}` expanded from the hook's
 # environment.
+#
+# Fail closed: the parser only allows what it fully understood. When the split
+# cannot be trusted (the tokenizer gave up on a quote, a `#` that shlex reads as
+# a comment and that swallows the rest, a command substitution inside quotes,
+# a backtick, a heredoc), the whole line is also judged the old way: a
+# destructive verb anywhere on it plus a -C target in a foreign worktree blocks.
 #
 # Scope: only cross-worktree operations. Inside your own tree these commands stay
 # untouched: that is your own work to discard, and guarding it would add friction
@@ -132,7 +143,11 @@ GLOBAL_OPTS_WITH_VALUE=' -c --git-dir --work-tree --namespace --config-env --sup
 
 # Subcommands that can discard work; any other subcommand is allowed without
 # resolving the target, which saves the git calls of foreign_root.
-DESTRUCTIVE_CANDIDATES=' checkout switch restore reset clean stash '
+DESTRUCTIVE_CANDIDATES=' checkout switch restore reset clean stash read-tree checkout-index worktree '
+
+# The whole-line verdict for a command the parser could not fully understand
+# (see "Fail closed" above): any of these words anywhere on the line.
+FALLBACK_DESTRUCTIVE_RE='(checkout[[:space:]]+--|checkout[[:space:]]+-f|checkout-index\b|restore\b|reset\b|clean\b|stash\b|worktree[[:space:]]+remove\b)'
 
 # A `$NAME` or `${NAME}` reference, with the text before and after it.
 # shellcheck disable=SC2016  # a literal `$`, not an expansion
@@ -168,7 +183,7 @@ scan_short_cluster() { # word destructive-letters value-letters
     for ((i = 0; i < ${#w}; i++)); do
         c=${w:i:1}
         case "$2" in *"$c"*) echo D; return ;; esac
-        case "$3" in *"$c"*)
+        [ -n "$3" ] && case "$3" in *"$c"*)
             if [ $((i + 1)) -eq ${#w} ]; then echo "V$c"; else echo "A$c"; fi
             return ;;
         esac
@@ -195,16 +210,20 @@ checkout_is_destructive() { # target-root args...
     local root=$1; shift
     local creates=0 skip=0 a r
     local -a positional=()
-    for a in "$@"; do
+    while [ $# -gt 0 ]; do
+        a=$1; shift
         if [ $skip -eq 1 ]; then skip=0; continue; fi
         case "$a" in
-            --) return 0 ;;
+            # Paths after `--` are restored. A trailing `--` with nothing after
+            # it only says the word before it is a branch (D2).
+            --) [ $# -gt 0 ] && return 0; break ;;
             --orphan) creates=1; skip=1 ;;
             --orphan=*) creates=1 ;;
             --*)
                 # pathspec-fr: shortest prefix not shared with --pathspec-file-nul.
+                # No other checkout option starts with f, so `--f` is --force.
                 is_long_prefix "$a" pathspec-from-file 11 && return 0
-                is_long_prefix "$a" force 2 && return 0
+                is_long_prefix "$a" force 1 && return 0
                 is_long_prefix "$a" patch 2 && return 0
                 ;;
             -?*)
@@ -232,10 +251,35 @@ switch_is_destructive() { # args...
         case "$a" in
             --) return 1 ;;
             --*)
-                is_long_prefix "$a" force 2 && return 0
+                is_long_prefix "$a" force 1 && return 0
                 is_long_prefix "$a" discard-changes 2 && return 0
                 ;;
             -?*) [ "$(scan_short_cluster "$a" f cC)" = D ] && return 0 ;;
+        esac
+    done
+    return 1
+}
+
+read_tree_is_destructive() { # args...: -u with --reset overwrites the tree
+    local a update=0 reset=0
+    for a in "$@"; do
+        case "$a" in
+            --) break ;;
+            # res: shortest prefix not shared with --recurse-submodules.
+            --*) is_long_prefix "$a" reset 3 && reset=1 ;;
+            -?*) [ "$(scan_short_cluster "$a" u "")" = D ] && update=1 ;;
+        esac
+    done
+    [ $update -eq 1 ] && [ $reset -eq 1 ]
+}
+
+force_flag_given() { # args...: -f or (abbreviated) --force before any `--`
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --) return 1 ;;
+            --*) is_long_prefix "$a" force 1 && return 0 ;;
+            -?*) [ "$(scan_short_cluster "$a" f "")" = D ] && return 0 ;;
         esac
     done
     return 1
@@ -250,6 +294,10 @@ subcommand_is_destructive() { # target-root subcommand args...
         # list/show/pop/apply/drop never reach here; every other form, bare
         # `stash`, `push`, `-u`, `clear`, removes changes or entries.
         stash) return 0 ;;
+        read-tree) read_tree_is_destructive "$@" ;;
+        # Without force both refuse to overwrite local changes.
+        checkout-index) force_flag_given "$@" ;;
+        worktree) [ "${1:-}" = remove ] && force_flag_given "${@:2}" ;;
         *) return 1 ;;
     esac
 }
@@ -323,39 +371,56 @@ EOF
     exit 2
 }
 
-foreign_root() { # target -> prints the target's worktree root when it is a
+# The caller's worktree root and common git dir, resolved once per run by
+# load_caller_tree: a chain with several git -C calls needs them only once.
+CALLER_LOADED=0
+CALLER_ROOT=""
+CALLER_COMMON=""
+
+tree_and_common() { # [dir] -> two lines: worktree root, absolute common git dir
+    git ${1:+-C "$1"} rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null
+}
+
+load_caller_tree() {
+    [ "$CALLER_LOADED" = 1 ] && return 0
+    CALLER_LOADED=1
+    { IFS= read -r CALLER_ROOT; IFS= read -r CALLER_COMMON; } < <(tree_and_common || true)
+}
+
+# Set by foreign_root: the target's worktree root.
+FOREIGN_ROOT=""
+
+foreign_root() { # target -> sets FOREIGN_ROOT and succeeds when the target is a
     # DIFFERENT worktree of the SAME repository as the caller's; fails otherwise.
+    # Called directly, not in $(...), so the caller's tree stays cached.
     #
     # If either resolution fails the command is not something this hook
     # understands (not a repo, path does not exist), so it is out of scope and
     # git reports the real error.
-    local target_root cwd_root target_common cwd_common
-    target_root=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+    local target_root="" target_common=""
+    { IFS= read -r target_root; IFS= read -r target_common; } < <(tree_and_common "$1" || true)
     [ -n "$target_root" ] || return 1
-    cwd_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
-    [ -n "$cwd_root" ] || return 1
+    load_caller_tree
+    [ -n "$CALLER_ROOT" ] || return 1
 
     # Same tree: this is the caller's own working directory, out of scope.
-    [ "$target_root" = "$cwd_root" ] && return 1
+    [ "$target_root" = "$CALLER_ROOT" ] && return 1
 
     # Different trees that do not share a repository are unrelated checkouts.
     # The worktree hazard is specifically about trees sharing one .git, where
     # the sibling is easy to mistake for your own; leave the unrelated case alone.
-    target_common=$(git -C "$target_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    cwd_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    [ "$target_common" = "$cwd_common" ] || return 1
+    [ "$target_common" = "$CALLER_COMMON" ] || return 1
 
-    printf '%s' "$target_root"
+    FOREIGN_ROOT=$target_root
 }
 
 block_foreign() { # target-root subcommand
-    local cwd_root
-    cwd_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    load_caller_tree
     cat >&2 <<EOF
 BLOCKED by hook-block-foreign-worktree-git.sh: this discards uncommitted work in
 a worktree you are not working in.
 
-  you are in : $cwd_root
+  you are in : $CALLER_ROOT
   target     : $1
   subcommand : git $2
 
@@ -403,7 +468,6 @@ judge_invocation() { # words of one shell command
         dir=""
         case "$w" in
             -C) i=$((i + 1)); [ "$i" -lt "$n" ] && dir=${words[i]} ;;
-            -C=*) dir=${w#-C=} ;;
             -c)
                 i=$((i + 1))
                 kv=${words[i]:-}
@@ -455,11 +519,47 @@ judge_invocation() { # words of one shell command
     # Decide on the subcommand before resolving the target: most `git -C`
     # calls (log, status, diff) never need the git calls of foreign_root.
     [ $shell_alias -eq 1 ] || case "$DESTRUCTIVE_CANDIDATES" in *" $sub "*) ;; *) return 0 ;; esac
-    local root
-    root=$(foreign_root "$target") || return 0
-    [ $shell_alias -eq 1 ] && block_foreign "$root" "$sub (inline shell alias)"
-    subcommand_is_destructive "$root" "$sub" "${args[@]}" && block_foreign "$root" "$sub"
+    foreign_root "$target" || return 0
+    [ $shell_alias -eq 1 ] && block_foreign "$FOREIGN_ROOT" "$sub (inline shell alias)"
+    subcommand_is_destructive "$FOREIGN_ROOT" "$sub" "${args[@]}" && block_foreign "$FOREIGN_ROOT" "$sub"
     return 0
+}
+
+# Is fd number $1 written glued to a redirect (`2>x`) and never apart from one
+# (`2 >x`)? Only then is the word before a redirect an fd and no argument:
+# `stash pop 1 >/dev/null` pops stash@{1}.
+fd_glued_to_redirect() { # digit
+    local glued="(^|[[:space:];&|()])$1[<>]" spaced="(^|[[:space:]])$1[[:space:]]+[<>]"
+    [[ "$COMMAND" =~ $glued ]] && ! [[ "$COMMAND" =~ $spaced ]]
+}
+
+# Fail-closed verdict for a line the parser could not fully understand: the
+# whole-line check from before #322. Every -C target on the line is resolved;
+# one in a foreign worktree with a destructive verb anywhere on the line blocks.
+judge_whole_line() {
+    echo "$COMMAND" | grep -qE "$FALLBACK_DESTRUCTIVE_RE" || return 0
+    local t
+    while IFS= read -r t; do
+        t=${t#-C}; t=${t#=}; t=${t#"${t%%[! ]*}"}
+        t=${t%\"}; t=${t#\"}; t=${t%\'}; t=${t#\'}
+        foreign_root "$(expand_path "$t")" || continue
+        block_foreign "$FOREIGN_ROOT" "(command not fully parsed; judged on the whole line)"
+    done < <(echo "$COMMAND" | grep -oE -- '-C[= ]+[^ ;&|()`]+' || true)
+}
+
+# Can the split of the command line be trusted? Not when shlex gave up (no
+# tokens), when a `#` may have been read as a comment that swallows the rest
+# (shlex does so mid-word too, as in `${#a[@]}`), when a backtick or a quoted
+# `$(...)` hides a command inside one word, or when a heredoc body follows.
+split_is_uncertain() {
+    [ ${#TOKENS[@]} -eq 0 ] && return 0
+    case "$COMMAND" in *'#'*|*'`'*) return 0 ;; esac
+    local t
+    for t in "${TOKENS[@]}"; do
+        # shellcheck disable=SC2016  # a literal `$(`, not an expansion
+        case "$t" in *'$('*|'<<'|'<<-') return 0 ;; esac
+    done
+    return 1
 }
 
 # Split the command line into its separate commands and judge each one. Command
@@ -471,20 +571,29 @@ SEGMENT=()
 SKIP_NEXT=0
 for tok in "${TOKENS[@]}" ';'; do
     if [ "$SKIP_NEXT" = 1 ]; then SKIP_NEXT=0; continue; fi
-    if [[ "$tok" =~ ^[\;\&\|\(\)]+$ ]]; then
-        # Chain operator(s), possibly clustered (`);`): the command ends here.
+    if ! [[ "$tok" =~ ^[\;\&\|\(\)\<\>]+$ ]]; then
+        SEGMENT+=("$tok")
+        continue
+    fi
+    if [[ "$tok" == *[\;\(\)]* || ! "$tok" =~ [\<\>] ]]; then
+        # Chain operator(s), possibly clustered (`);`, `)>`, `<(`): the
+        # command ends here.
         [ ${#SEGMENT[@]} -gt 0 ] && judge_invocation "${SEGMENT[@]}"
         SEGMENT=()
-    elif [[ "$tok" =~ ^[\<\>\&\|]+$ ]]; then
+        # A redirect after the last `;`, `(` or `)` (`)>/dev/null`) still
+        # takes the next word as its target.
+        [[ "${tok##*[;()]}" =~ [\<\>] ]] && SKIP_NEXT=1
+    else
         # A redirect and its target are no arguments. Drop an fd number written
         # before it too (`2>&1` tokenizes as 2, >&, 1).
-        if [ ${#SEGMENT[@]} -gt 1 ] && [[ "${SEGMENT[-1]}" =~ ^[0-9]$ ]]; then
+        if [ ${#SEGMENT[@]} -gt 1 ] && [[ "${SEGMENT[-1]}" =~ ^[0-9]$ ]] \
+           && fd_glued_to_redirect "${SEGMENT[-1]}"; then
             unset 'SEGMENT[-1]'
         fi
         SKIP_NEXT=1
-    else
-        SEGMENT+=("$tok")
     fi
 done
+
+split_is_uncertain && judge_whole_line
 
 exit 0
