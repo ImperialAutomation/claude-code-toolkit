@@ -112,6 +112,8 @@ check 2 "global options before the subcommand"      "git -C $BASE/wt -c core.x=y
 check 2 "-C written as -C=<dir>"                    "git -C=$BASE/wt reset --hard"
 check 2 "quoted -C target"                          "git -C \"$BASE/wt\" reset --hard"
 check 2 "inside a command substitution"             "echo \$(git -C $BASE/wt reset --hard)"
+check 2 "backslash-newline continuation"            "git -C $BASE/wt \\
+  reset --hard"
 check 0 "foreign harmless, own destructive"         "git -C $BASE/wt status && git -C $BASE/main reset --hard"
 check 0 "make -C is not git"                        "make -C $BASE/wt clean"
 

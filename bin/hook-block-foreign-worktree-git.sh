@@ -120,7 +120,7 @@ GLOBAL_OPTS_WITH_VALUE=' -c --git-dir --work-tree --namespace --config-env --sup
 # Shell operators that end one command and start the next. `$(` must come
 # before `(` so a command substitution leaves no stray `$`.
 # shellcheck disable=SC2016  # literal `$(`, not an expansion
-CHAIN_SEPARATORS=('$(''&&' '||' ';' '&' '|' '(' ')' '`')
+CHAIN_SEPARATORS=('$(' '&&''||' ';' '&' '|' '(' ')' '`')
 
 strip_quotes() { # word -> the word without one layer of surrounding quotes
     local w=$1
@@ -411,8 +411,10 @@ judge_invocation() { # words of one shell command
     return 0
 }
 
-# Split the command line into its separate commands and judge each one.
-SEGMENTS=$COMMAND
+# Split the command line into its separate commands and judge each one. A
+# backslash-newline continues the same command, so it is joined first; split as a
+# line break it would cut `git -C <wt> \` from the `reset --hard` that follows.
+SEGMENTS=${COMMAND//$'\\\n'/ }
 for sep in "${CHAIN_SEPARATORS[@]}"; do
     SEGMENTS=${SEGMENTS//"$sep"/$'\n'}
 done
