@@ -34,6 +34,9 @@
 #   35-38. tree not on the named feature branch (clean, dirty, feature checked
 #          out elsewhere, detached)                      -> refuse, nothing changed
 #   39-40. tree on the feature branch, named or not      -> cleans up as before
+#   41-43. tree on an integration branch with the base auto-detected, feature
+#          worktree directory gone, feature worktree with the base not named
+#                                                        -> refuse, right hint
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -764,6 +767,46 @@ OUT=$(run_notty "$R"); RC=$?
 check "exit zero" 0 "$RC"
 check "feature branch deleted" no "$(branch_exists "$R" issue-40-feature)"
 lacks "no wrong-branch refusal" "is on '" "$OUT"
+
+echo "== 41. tree on main, base auto-detected, feature merged into develop: refused =="
+# The base is detected from the tree's own branch, so a tree another session has
+# on main yields base main: matching it must not count as "on the base".
+R=$(newremote r41 main)
+git_q "$R" checkout -q -b develop
+git_q "$R" push -q -u origin develop
+add_merged_feature "$R" develop issue-41-feature >/dev/null
+advance_remote "$R" main "Hotfix on main"
+git_q "$R" fetch -q origin
+git_q "$R" checkout -q main
+BEFORE=$(tree_state "$R")
+OUT=$(run_notty_yes "$R" issue-41-feature); RC=$?
+check "exit one" 1 "$RC"
+contains "names the tree's branch" "is on 'main', not 'issue-41-feature'" "$OUT"
+contains "says how to name the base" "name it:" "$OUT"
+check "main not fast-forwarded" "$BEFORE" "$(tree_state "$R")"
+check "feature branch survives" yes "$(branch_exists "$R" issue-41-feature)"
+contains "base placeholder in the manual check" "origin/<base>..issue-41-feature" "$OUT"
+
+echo "== 42. feature worktree registered, its directory gone: prune first =="
+R=$(taken_over r42 issue-42-feature issue-95-other)
+git_q "$R" worktree add -q "$R-wt" issue-42-feature
+rm -rf "$R-wt"
+OUT=$(run_notty_yes "$R" issue-42-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "says the directory is gone" "but that directory is gone" "$OUT"
+contains "says to prune" "git worktree prune" "$OUT"
+lacks "no hint to run there" "run the cleanup there" "$OUT"
+contains "fetches before the check" "git fetch origin" "$OUT"
+contains "prints the force delete" "git branch -D issue-42-feature" "$OUT"
+
+echo "== 43. feature in a worktree, base not named: hint has no base, path quoted =="
+R=$(taken_over r43 issue-43-feature issue-94-other)
+git_q "$R" worktree add -q "$R wt" issue-43-feature
+OUT=$(run_notty_yes "$R" issue-43-feature); RC=$?
+check "exit one" 1 "$RC"
+contains "run the cleanup there" "run the cleanup there" "$OUT"
+contains "path quoted" 'r43\ wt issue-43-feature' "$OUT"
+lacks "no base from this tree in the hint" "issue-43-feature develop" "$OUT"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

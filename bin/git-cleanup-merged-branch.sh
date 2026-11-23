@@ -26,11 +26,12 @@
 # In every other repository the route below the toolkit section is unchanged.
 #
 # A named feature branch must be the branch of the tree the script runs in (or
-# that tree must be on the base branch). On any other branch, or a detached
-# HEAD, another session may be working there: the script refuses before any
-# change (exit 1), names the worktree that has the feature branch checked out,
-# or, when none has, prints the `git log` check and the `git branch -D` to
-# delete it by hand.
+# that tree must be on the base branch named with it; an auto-detected base does
+# not count, it is read from that same tree). On any other branch, or a
+# detached HEAD, another session may be working there: the script refuses
+# before any change (exit 1), names the worktree that has the feature branch
+# checked out, or, when none has, prints the fetch, the `git log` check and the
+# `git branch -D` to delete it by hand.
 #
 # Options (anywhere on the command line):
 #   --repo DIR       Run git in repository DIR (avoids a leading `cd`, which
@@ -146,6 +147,17 @@ handle_remote_branch() {
     fi
 }
 
+# Print <branch>'s upstream as <remote>/<name>; fail when it has none.
+upstream_of() { # branch
+    git_filtered rev-parse --abbrev-ref --symbolic-full-name "$1@{upstream}" 2>/dev/null
+}
+
+# Print the worktree_list line (`<path>\t<branch>\t<locked>\t<prunable>`) of
+# the worktree that has <branch> checked out, or nothing when none has.
+worktree_of_branch() { # dir branch
+    worktree_list "$1" | awk -F'\t' -v b="$2" '$2 == b { print; exit }'
+}
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -201,7 +213,7 @@ toolkit_cleanup() {
     # Leave the feature worktree first: it is about to be removed.
     cd "$LIVE_ROOT"
 
-    local base remote_base worktree="" locked="" prunable="" path branch lock prune
+    local base remote_base worktree="" locked="" prunable=""
     local candidates overwritten ignored done_so_far
     base="${POSITIONAL[1]:-$(live_base_branch "$LIVE_ROOT")}"
     remote_base="origin/$base"
@@ -236,10 +248,8 @@ toolkit_cleanup() {
     git_filtered show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH" \
         || tk_refuse "branch '$FEATURE_BRANCH' does not exist"
 
-    while IFS=$'\t' read -r path branch lock prune; do
-        [ "$branch" = "$FEATURE_BRANCH" ] || continue
-        worktree="$path"; locked="$lock"; prunable="$prune"
-    done < <(worktree_list "$LIVE_ROOT")
+    IFS=$'\t' read -r worktree _ locked prunable \
+        < <(worktree_of_branch "$LIVE_ROOT" "$FEATURE_BRANCH") || true
     [ "$worktree" != "$LIVE_ROOT" ] \
         || tk_refuse "'$FEATURE_BRANCH' is checked out in the live checkout itself"
 
@@ -377,27 +387,46 @@ fi
 # A named feature branch must be the one this tree is on (#321). Another
 # session may have taken the tree over since the PR was opened; checking out
 # the base would then take that session's checkout away. A tree already on the
-# base is not switched, so that stays allowed (#321, D2). This runs before the
+# base is not switched, so that stays allowed (#321, D2), but only for a base
+# named on the command line: an auto-detected base is read from this same tree,
+# so a tree on develop/master/main would always match it. This runs before the
 # uncommitted-changes guard, so a dirty tree is refused for the right reason.
 if [ -n "${POSITIONAL[0]:-}" ]; then
     CURRENT_BRANCH=$(git_filtered branch --show-current)
-    if [ "$CURRENT_BRANCH" != "$FEATURE_BRANCH" ] && [ "$CURRENT_BRANCH" != "$BASE_BRANCH" ]; then
+    NAMED_BASE="${POSITIONAL[1]:-}"
+    if [ "$CURRENT_BRANCH" != "$FEATURE_BRANCH" ] \
+            && { [ -z "$NAMED_BASE" ] || [ "$CURRENT_BRANCH" != "$NAMED_BASE" ]; }; then
         echo -e "${RED}Error: this tree is on '${CURRENT_BRANCH:-detached HEAD}', not '$FEATURE_BRANCH'${NC}" >&2
         echo "Another session may be working in it; it is left as it is." >&2
-        FEATURE_WORKTREE=""
-        while IFS=$'\t' read -r wt_path wt_branch _ _; do
-            [ "$wt_branch" != "$FEATURE_BRANCH" ] || FEATURE_WORKTREE="$wt_path"
-        done < <(worktree_list .)
-        if [ -n "$FEATURE_WORKTREE" ]; then
+        if [ -z "$NAMED_BASE" ] && [ "$CURRENT_BRANCH" = "$BASE_BRANCH" ]; then
+            echo "If '$CURRENT_BRANCH' is the base '$FEATURE_BRANCH' was merged into, name it:" >&2
+            echo "  ~/.claude/bin/$(basename "$0") --repo $(printf '%q' "$PWD") $(printf '%q' "$FEATURE_BRANCH") $(printf '%q' "$CURRENT_BRANCH")" >&2
+        fi
+        IFS=$'\t' read -r FEATURE_WORKTREE _ _ FEATURE_PRUNABLE \
+            < <(worktree_of_branch . "$FEATURE_BRANCH") || true
+        if [ -n "$FEATURE_WORKTREE" ] && [ -z "$FEATURE_PRUNABLE" ] && [ -d "$FEATURE_WORKTREE" ]; then
+            # Without a named base the run there detects it from the feature's
+            # own tree; this tree's base may belong to an unrelated branch.
             echo "'$FEATURE_BRANCH' is checked out in $FEATURE_WORKTREE; run the cleanup there:" >&2
-            echo "  ~/.claude/bin/$(basename "$0") --repo $FEATURE_WORKTREE $FEATURE_BRANCH $BASE_BRANCH" >&2
+            echo "  ~/.claude/bin/$(basename "$0") --repo $(printf '%q' "$FEATURE_WORKTREE") $(printf '%q' "$FEATURE_BRANCH")${NAMED_BASE:+ $(printf '%q' "$NAMED_BASE")}" >&2
         else
-            BASE_REF=$(git_filtered rev-parse --abbrev-ref --symbolic-full-name "$BASE_BRANCH@{upstream}" 2>/dev/null) \
-                || BASE_REF="origin/$BASE_BRANCH"
-            echo "'$FEATURE_BRANCH' is not checked out in any worktree. To delete it by hand:" >&2
-            echo "  git log --oneline $BASE_REF..$FEATURE_BRANCH   # must print nothing" >&2
-            echo "  git branch -D $FEATURE_BRANCH" >&2
-            echo "(Plain -d checks against this tree's current branch, which may be behind.)" >&2
+            if [ -n "$FEATURE_WORKTREE" ]; then
+                echo "'$FEATURE_BRANCH' is registered in $FEATURE_WORKTREE, but that directory is gone." >&2
+                echo "Unregister it first: git worktree prune" >&2
+            else
+                echo "'$FEATURE_BRANCH' is not checked out in any worktree." >&2
+            fi
+            if [ -n "$NAMED_BASE" ]; then
+                BASE_REF=$(upstream_of "$NAMED_BASE") || BASE_REF="origin/$NAMED_BASE"
+                BASE_REF=$(printf '%q' "$BASE_REF")
+            else
+                BASE_REF="origin/<base>"
+            fi
+            echo "To delete it by hand, fetch the base first, so a fresh merge counts:" >&2
+            echo "  git fetch ${BASE_REF%%/*}" >&2
+            echo "  git log --oneline $BASE_REF..$(printf '%q' "$FEATURE_BRANCH")   # must print nothing" >&2
+            echo "  git branch -D $(printf '%q' "$FEATURE_BRANCH")" >&2
+            echo "(Plain -d is no check here: it compares with the branch's upstream, or else with this tree's HEAD, not with the base.)" >&2
         fi
         echo "Nothing was changed." >&2
         exit 1
@@ -424,7 +453,7 @@ git_filtered checkout "$BASE_BRANCH"
 # different remote. A linked worktree hits the first case routinely -- the shared
 # base is checked out in the main tree, so the worktree parks on its own branch
 # tracking origin/develop, and the pull dies on "couldn't find remote ref".
-UPSTREAM=$(git_filtered rev-parse --abbrev-ref --symbolic-full-name "$BASE_BRANCH@{upstream}" 2>/dev/null) || {
+UPSTREAM=$(upstream_of "$BASE_BRANCH") || {
     echo -e "${RED}Error: '$BASE_BRANCH' has no upstream${NC}" >&2
     echo "Set one with: git branch -u <remote>/<branch> $BASE_BRANCH" >&2
     exit 1

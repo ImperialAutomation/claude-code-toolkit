@@ -66,10 +66,11 @@ the removed directory fails.
   session) it never prompts: the remote branch is kept, the delete command is
   printed, and it exits 0. Pass `--delete-remote` to delete it instead
 - A named feature branch must be the branch of the tree it runs in (or that tree
-  is on the base). When the tree is on another branch or detached, another
-  session may have taken it over: the script refuses before changing anything,
-  names the worktree where the feature branch is checked out, or prints the
-  manual `git log` check and `git branch -D` when it is checked out nowhere
+  is on the base named with it: an auto-detected base does not count). When the
+  tree is on another branch or detached, another session may have taken it over:
+  the script refuses before changing anything, names the worktree where the
+  feature branch is checked out, or prints the manual fetch, `git log` check and
+  `git branch -D` when it is checked out nowhere
 - Checks for uncommitted changes and warns you; without a terminal it stops there
 - `--help` prints the full usage, including the other no-terminal defaults
 - The base branch must have an upstream; the script stops with the `git branch -u`
