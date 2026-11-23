@@ -34,6 +34,7 @@ Every file this skill writes is unique per project and PR, so two reviews can ru
 | `/tmp/<project>-pre-merge-gates-<key>.json` | Input of `pre-merge-verdict.py` (Phase 8) |
 | `/tmp/<project>-pre-merge-report-<key>.md` | The Phase 9 report, the review body (Phase 10) |
 | `/tmp/<project>-pre-merge-human-<key>.json` | `HUMAN` decisions for the review (Phase 10) |
+| `/tmp/<project>-pre-merge-threads-<key>.json` | Open review threads of the PR (Phase 8, `--post` only) |
 
 ### If PR number provided:
 ```bash
@@ -175,7 +176,17 @@ The verdict comes from one helper, so this skill and `/pre-merge --post` read th
 }
 ```
 
-`pr` is `null` without a PR number; leave a section out (or empty) when its phase did not run. Then:
+`pr` is `null` without a PR number; leave a section out (or empty) when its phase did not run.
+
+**Open review threads (only with `--post`).** An earlier review may have left open threads on the PR; a finding one of them already raises must not open a second thread. List them first:
+
+```bash
+~/.claude/bin/cmd-save.sh /tmp/<project>-pre-merge-threads-<key>.json ~/.claude/bin/pr-review-threads.py list --repo <repo> --pr <PR>
+```
+
+Each entry is an unresolved thread with its `id`, `path`, `line` (`null` when outdated), `original_line` and `comments`. When a finding is the same problem as a thread (same file, and its comments describe that problem; an outdated thread counts too), add `"thread": "<id>"` to that finding in the gates file. Phase 10 then replies on that thread instead of posting a new inline comment. Only add a thread id when it is the same problem, not merely the same line. When the list fails, add no thread ids and say so in the report.
+
+Then:
 
 ```bash
 ~/.claude/bin/pre-merge-verdict.py --input /tmp/<project>-pre-merge-gates-<key>.json
@@ -251,12 +262,12 @@ Then:
 ~/.claude/bin/pre-merge-post.py --gates /tmp/<project>-pre-merge-gates-<key>.json --body /tmp/<project>-pre-merge-report-<key>.md [--human /tmp/<project>-pre-merge-human-<key>.json]
 ```
 
-It recomputes the verdict with the Phase 8 rules and posts the matching event: `APPROVE` → `APPROVE`, `BLOCKING` → `REQUEST_CHANGES`, `HUMAN` → `COMMENT` with the decisions on top of the body. Findings on a diff line become inline comments of that review; the rest are listed in its body. On `HUMAN` it then adds `needs-human` to the PR and to every linked issue (`escalation.linked_issues`). The app has `Contents: Read-only`, so its `APPROVE` does not count toward a required-approvals rule.
+It recomputes the verdict with the Phase 8 rules and posts the matching event: `APPROVE` → `APPROVE`, `BLOCKING` → `REQUEST_CHANGES`, `HUMAN` → `COMMENT` with the decisions on top of the body. Findings on a diff line become inline comments of that review; the rest are listed in its body. A finding with a `thread` that is still open gets no new inline comment: after the review it is a reply on that thread (starting with the `<!-- queue-runner -->` marker, so the queue runner's rework never reads it as new review input), and the body lists it under "Findings on an open review thread" with the thread id. On `HUMAN` it then adds `needs-human` to the PR and to every linked issue (`escalation.linked_issues`). The app has `Contents: Read-only`, so its `APPROVE` does not count toward a required-approvals rule.
 
 | Exit | `status` | Meaning |
 |---|---|---|
 | 0 | `posted` | Review on the PR (and labels set on `HUMAN`) |
-| 3 | `post_failed` | No token or an API error; `stage` (`files`, `review`, `label`), `error`, `review_posted` |
+| 3 | `post_failed` | No token or an API error; `stage` (`files`, `threads`, `review`, `thread`, `label`), `error`, `review_posted` |
 | 2 | (no JSON) | Invalid input, nothing sent: fix it and run again |
 
 A post failure is not a verdict: report the verdict from Phase 8 plus `review not posted (<error>)`, and never retry as the user's own account.

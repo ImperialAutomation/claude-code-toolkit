@@ -65,9 +65,14 @@ round comment, R4), or the PR's `createdAt` when there is none. `<comments>`
 is, one URL per line:
 
 - every review, inline comment, PR comment and issue comment after the
-  cutoff with `marker: false`, except a review in `PENDING` state and an
-  inline comment whose `review` is one of the selected reviews (the fix round
-  fetches those through the review);
+  cutoff with `marker: false`, except a review in `PENDING` state, a review
+  whose inline comments (the rows of the inline list whose `review` is its
+  `id`) are at least one and all have `marker: true`, and an inline comment
+  whose `review` is one of the selected reviews (the fix round fetches those
+  through the review). A thread reply of the loop or its sub-agents
+  (`pr-review-threads.py`, #378) is an inline comment with the marker, and
+  GitHub wraps each one in a `COMMENTED` review of its own with an empty
+  body: that review is no review input;
 - the re-review named in the last round comment, when its verdict there was
   not `APPROVE`: it was posted before that comment, but no round addressed it.
 
