@@ -119,9 +119,13 @@ Rejected:
 - <finding>: <reason>
 Left for the human (the questions are on the decision card, R5):
 - <finding>: <question>; options: <options>; recommendation: <one>
+- <finding>: scope unclear: <why>
+Follow-ups (out of scope, not blocking):
+- #<issue>: <finding>
 ```
 
-A heading with no entries says `none`. The marker line comes first: R3 of the
+A heading with no entries says `none`. A `left (scope)` line counts as a
+`left` finding in R5; a `followup` line never does. The marker line comes first: R3 of the
 next round finds the cutoff by it.
 
 Tokens: sum the files that measured, as in Step 4c, into `-review.json` and
@@ -155,7 +159,7 @@ no first review: leave out `--review` and `--review-findings`.
 `rework` swaps `agent-rework` for `agent-pr`; with the note it adds
 `needs-human` and puts the note in the issue comment. Before a `rework`
 release with a note, post the PR's decision card ("Decision card" in
-`review-and-fix.md`; the questions of the `left` lines, `--gates` and the
+`review-and-fix.md`; the questions of the `left` lines, `scope` for the `left (scope)` ones, `--gates` and the
 `rejected` lines for a `BLOCKING` re-review, `--human` for a `HUMAN` one).
 Then write the note with the Write tool: the re-review verdict and URL, the
 round comment's URL, the decision card's URL and each `left` finding. `escalated` and `failed` keep `agent-rework`: a first

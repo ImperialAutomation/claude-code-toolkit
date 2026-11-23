@@ -178,6 +178,8 @@ The verdict comes from one helper, so this skill and `/pre-merge --post` read th
 
 `pr` is `null` without a PR number; leave a section out (or empty) when its phase did not run.
 
+**Out-of-scope findings.** A finding of either review that is clearly outside the PR's scope (its code is untouched by the diff and the gap already exists on the base branch, or fixing it goes beyond the issue's acceptance criteria; the full rule is "Out-of-scope findings" in `~/.claude/skills/queue-run/references/review-and-fix.md`) gets `"followup": "<key>"`: its thread id, or a short slug such as `bin/x.sh:redirect-gap`. It never blocks, whatever its severity; the helper reports it under `followup_findings`. With `--post`, read the PR body's Follow-ups first (`~/.claude/bin/pr-followup.py list --repo <repo> --pr <PR>`): a finding listed there is a follow-up under its listed key. When the scope is unclear, leave the finding as it is.
+
 **Open review threads (only with `--post`).** An earlier review may have left open threads on the PR; a finding one of them already raises must not open a second thread. List them first:
 
 ```bash
@@ -192,7 +194,7 @@ Then:
 ~/.claude/bin/pre-merge-verdict.py --input /tmp/<project>-pre-merge-gates-<key>.json
 ```
 
-It prints JSON with `verdict`, `human_reasons`, `blocking_reasons`, `listed_findings`, `approved_escalations` and `correctness.line`, and appends one row per `/code-review` finding to `~/.claude/pre-merge-findings.tsv` (date, repo, PR or branch, `file:line`, shadow severity, verdict). Exit 2 means the input was invalid: fix the JSON and run it again; never pick a verdict yourself.
+It prints JSON with `verdict`, `human_reasons`, `blocking_reasons`, `listed_findings`, `followup_findings`, `approved_escalations` and `correctness.line`, and appends one row per `/code-review` finding to `~/.claude/pre-merge-findings.tsv` (date, repo, PR or branch, `file:line`, shadow severity, verdict). Exit 2 means the input was invalid: fix the JSON and run it again; never pick a verdict yourself.
 
 The mapping it applies, top to bottom:
 
@@ -262,7 +264,7 @@ Then:
 ~/.claude/bin/pre-merge-post.py --gates /tmp/<project>-pre-merge-gates-<key>.json --body /tmp/<project>-pre-merge-report-<key>.md [--human /tmp/<project>-pre-merge-human-<key>.json]
 ```
 
-It recomputes the verdict with the Phase 8 rules and posts the matching event: `APPROVE` → `APPROVE`, `BLOCKING` → `REQUEST_CHANGES`, `HUMAN` → `COMMENT` with the decisions on top of the body. Findings on a diff line become inline comments of that review; the rest are listed in its body. A finding with a `thread` that is still open gets no new inline comment: after the review it is a reply on that thread (starting with the `<!-- queue-runner -->` marker, so the queue runner's rework never reads it as new review input), and the body lists it under "Findings on an open review thread" with the thread id. On `HUMAN` it then adds `needs-human` to the PR and to every linked issue (`escalation.linked_issues`). The app has `Contents: Read-only`, so its `APPROVE` does not count toward a required-approvals rule.
+It recomputes the verdict with the Phase 8 rules and posts the matching event: `APPROVE` → `APPROVE`, `BLOCKING` → `REQUEST_CHANGES`, `HUMAN` → `COMMENT` with the decisions on top of the body. Findings on a diff line become inline comments of that review; the rest are listed in its body. A finding with a `thread` that is still open gets no new inline comment: after the review it is a reply on that thread (starting with the `<!-- queue-runner -->` marker, so the queue runner's rework never reads it as new review input), and the body lists it under "Findings on an open review thread" with the thread id. On `HUMAN` it then adds `needs-human` to the PR and to every linked issue (`escalation.linked_issues`). A `followup` finding is neither an inline comment nor a thread reply; the body lists it under "Out of scope: follow-up issues". After the post, file each one under the app: write its description with the Write tool, then `~/.claude/bin/pr-followup.py file --repo <repo> --pr <PR> --key <key> --title "<title>" --body-file <file> [--thread <id>] --app` (idempotent; it adds the issue to the PR body's Follow-ups and answers the thread). The app has `Contents: Read-only`, so its `APPROVE` does not count toward a required-approvals rule.
 
 | Exit | `status` | Meaning |
 |---|---|---|
