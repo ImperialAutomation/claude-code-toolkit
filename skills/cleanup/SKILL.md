@@ -85,10 +85,11 @@ the removed directory fails.
 # Auto-detect everything
 ~/.claude/bin/git-cleanup-merged-branch.sh
 
-# Specify feature branch
+# Specify feature branch: only from the tree that has it checked out; from any
+# other tree this is refused (a tree on the base names the base too, below)
 ~/.claude/bin/git-cleanup-merged-branch.sh issue-123-my-feature
 
-# Specify both branches
+# Specify both branches (also from a tree on that base)
 ~/.claude/bin/git-cleanup-merged-branch.sh issue-123-my-feature develop
 
 # Also delete the remote branch, without a prompt
