@@ -34,8 +34,11 @@
 #   - Restoring paths is blocked whether or not it is spelled with `--` (D4):
 #     `checkout -- f`, `checkout HEAD f`, `checkout .` and `checkout f` all put
 #     files back at a commit. A single argument counts as a path when it does not
-#     name a commit (or a remote branch git would DWIM into a new branch) in the
-#     target repository.
+#     name a commit, or literally a remote branch git would DWIM into a new
+#     branch (D7), in the target repository. The remote-branch match is literal,
+#     so a pathspec glob such as `*` stays a path.
+#   - Only git's own -C sets the target (D6). `env -C <wt> git ...` is the same
+#     deliberate act as `cd <wt> && git ...` and is not judged.
 #
 # How a command is judged
 # -----------------------
@@ -45,7 +48,8 @@
 # remaining word is the subcommand, and only that subcommand's own arguments are
 # judged:
 #
-#   checkout  blocked: bare `--`, -f/--force, -p/--patch, --pathspec-from-file,
+#   checkout  blocked: bare `--`, -f/--force, -p/--patch, --pathspec-from-file
+#             (long options also abbreviated),
 #             `.`, two or more positional arguments, or one that is not a ref
 #             allowed: -b/-B/--orphan, --detach/--track/--no-track/--quiet and
 #             other long options, switching to an existing branch
@@ -57,8 +61,14 @@
 #
 # A verb that appears as a path or a pattern (`add docs/restore.md`,
 # `log --grep=clean`) is therefore never mistaken for the subcommand (#125).
-# Words are split on whitespace with one layer of quotes stripped; a quoted
-# path containing spaces splits into several words, which errs toward blocking.
+# An alias defined inline (`-c alias.x='reset --hard' x`) is expanded first and
+# judged as what it runs; an inline shell alias (`!...`) cannot be judged and
+# is blocked.
+#
+# Words come from lib/shell-tokens.sh, which splits like a shell: quotes
+# removed, chain operators and redirects (`2>&1`, `>/dev/null`) as their own
+# tokens. A -C target gets `~`, `$VAR` and `${VAR}` expanded from the hook's
+# environment.
 #
 # Scope: only cross-worktree operations. Inside your own tree these commands stay
 # untouched: that is your own work to discard, and guarding it would add friction
@@ -95,6 +105,9 @@
 
 set -uo pipefail
 
+# shellcheck source=bin/lib/shell-tokens.sh
+. "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/lib/shell-tokens.sh"
+
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 
@@ -117,26 +130,26 @@ echo "$COMMAND" | grep -qE -- '-C[= ]|--git-dir[= ]' || exit 0
 # `=`; -C is handled separately because it sets the target.
 GLOBAL_OPTS_WITH_VALUE=' -c --git-dir --work-tree --namespace --config-env --super-prefix --list-cmds '
 
-# Shell operators that end one command and start the next. `$(` must come
-# before `(` so a command substitution leaves no stray `$`.
-# shellcheck disable=SC2016  # literal `$(`, not an expansion
-CHAIN_SEPARATORS=('$(' '&&' '||' ';' '&' '|' '(' ')' '`')
+# Subcommands that can discard work; any other subcommand is allowed without
+# resolving the target, which saves the git calls of foreign_root.
+DESTRUCTIVE_CANDIDATES=' checkout switch restore reset clean stash '
 
-strip_quotes() { # word -> the word without one layer of surrounding quotes
-    local w=$1
-    case "$w" in
-        \"*\") w=${w#\"}; w=${w%\"} ;;
-        \'*\') w=${w#\'}; w=${w%\'} ;;
-    esac
-    printf '%s' "$w"
-}
+# A `$NAME` or `${NAME}` reference, with the text before and after it.
+# shellcheck disable=SC2016  # a literal `$`, not an expansion
+VAR_REF_RE='^([^$]*)\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(.*)$'
 
-expand_tilde() { # path -> path with a leading ~/ expanded
-    case "$1" in
-        "~") printf '%s' "$HOME" ;;
-        "~"/*) printf '%s' "$HOME/${1#\~/}" ;;
-        *) printf '%s' "$1" ;;
+expand_path() { # path -> path with a leading ~ and $VAR/${VAR} expanded
+    local p=$1 out="" name
+    case "$p" in
+        "~") p=$HOME ;;
+        "~"/*) p="$HOME/${p#\~/}" ;;
     esac
+    while [[ "$p" =~ $VAR_REF_RE ]]; do
+        name=${BASH_REMATCH[3]:-${BASH_REMATCH[4]}}
+        out+=${BASH_REMATCH[1]}${!name:-}
+        p=${BASH_REMATCH[5]}
+    done
+    printf '%s' "$out$p"
 }
 
 is_long_prefix() { # word full-name min-len: does --<abbrev> abbreviate --<full>?
@@ -167,8 +180,15 @@ is_ref() { # target-root word: does the word name a commit or a remote branch?
     [ "$2" = "-" ] && return 0
     git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1 && return 0
     # `checkout <name>` with no local branch <name> but a remote one creates a
-    # tracking branch (DWIM): a branch switch, not a path restore.
-    [ -n "$(git -C "$1" for-each-ref --count=1 --format=x "refs/remotes/*/$2" 2>/dev/null)" ]
+    # tracking branch (DWIM): a branch switch, not a path restore (D7). Compared
+    # literally against refs/remotes/<remote>/<name>, never as a ref pattern:
+    # a pathspec glob such as `*` must not match every remote branch.
+    local ref
+    while IFS= read -r ref; do
+        ref=${ref#refs/remotes/}
+        [ "${ref#*/}" = "$2" ] && return 0
+    done < <(git -C "$1" for-each-ref --format='%(refname)' refs/remotes/ 2>/dev/null)
+    return 1
 }
 
 checkout_is_destructive() { # target-root args...
@@ -181,8 +201,9 @@ checkout_is_destructive() { # target-root args...
             --) return 0 ;;
             --orphan) creates=1; skip=1 ;;
             --orphan=*) creates=1 ;;
-            --pathspec-from-file|--pathspec-from-file=*) return 0 ;;
             --*)
+                # pathspec-fr: shortest prefix not shared with --pathspec-file-nul.
+                is_long_prefix "$a" pathspec-from-file 11 && return 0
                 is_long_prefix "$a" force 2 && return 0
                 is_long_prefix "$a" patch 2 && return 0
                 ;;
@@ -258,11 +279,12 @@ check_stash_origin() { # target args-after-pop/apply/drop...
     local target=$1; shift
     [ -z "$target" ] && return 0
 
-    # Which entry: an explicit stash@{N} if named, otherwise the top of the
-    # stack, which is what a bare pop/apply/drop takes.
+    # Which entry: an explicit stash@{N} or its short form N if named, otherwise
+    # the top of the stack, which is what a bare pop/apply/drop takes.
     local ref='stash@{0}' a
     for a in "$@"; do
         case "$a" in stash@\{*\}) ref=$a; break ;; esac
+        [[ "$a" =~ ^[0-9]+$ ]] && { ref="stash@{$a}"; break; }
     done
 
     # "On <branch>: <message>": the branch the entry was raised on. Empty when
@@ -360,13 +382,15 @@ EOF
 
 judge_invocation() { # words of one shell command
     local -a words=("$@")
-    local n=${#words[@]} i=0 w dir target="" sub=""
+    local n=${#words[@]} i=0 w dir target="" sub="" kv key
+    # Inline aliases from `-c alias.<name>=<body>`, keyed by lowercase name:
+    # git config variable names are case-insensitive.
+    local -A aliases=()
 
     # Find `git` (or a path ending in /git). Words before it are env
     # assignments or wrappers (env, rtk, command, ...).
     while [ "$i" -lt "$n" ]; do
-        w=$(strip_quotes "${words[i]}")
-        case "$w" in git|*/git) break ;; esac
+        case "${words[i]}" in git|*/git) break ;; esac
         i=$((i + 1))
     done
     [ "$i" -ge "$n" ] && return 0
@@ -375,16 +399,25 @@ judge_invocation() { # words of one shell command
     # Global options up to the subcommand. Several -C options apply
     # cumulatively, a relative one resolved against the previous.
     while [ "$i" -lt "$n" ]; do
-        w=$(strip_quotes "${words[i]}")
+        w=${words[i]}
         dir=""
         case "$w" in
-            -C) i=$((i + 1)); [ "$i" -lt "$n" ] && dir=$(strip_quotes "${words[i]}") ;;
-            -C=*) dir=$(strip_quotes "${w#-C=}") ;;
+            -C) i=$((i + 1)); [ "$i" -lt "$n" ] && dir=${words[i]} ;;
+            -C=*) dir=${w#-C=} ;;
+            -c)
+                i=$((i + 1))
+                kv=${words[i]:-}
+                if [[ "${kv,,}" == alias.*=* ]]; then
+                    kv=${kv#*.}
+                    key=${kv%%=*}
+                    aliases[${key,,}]=${kv#*=}
+                fi
+                ;;
             -*) case "$GLOBAL_OPTS_WITH_VALUE" in *" $w "*) i=$((i + 1)) ;; esac ;;
             *) sub=$w; i=$((i + 1)); break ;;
         esac
         if [ -n "$dir" ]; then
-            dir=$(expand_tilde "$dir")
+            dir=$(expand_path "$dir")
             case "$dir" in
                 /*) target=$dir ;;
                 *) target=${target:+$target/}$dir ;;
@@ -394,10 +427,24 @@ judge_invocation() { # words of one shell command
     done
     [ -z "$sub" ] && return 0
 
-    local -a args=()
-    for w in "${words[@]:i}"; do args+=("$(strip_quotes "$w")"); done
+    local -a args=("${words[@]:i}")
 
-    if [ "$sub" = stash ]; then
+    # An inline alias runs its body instead of the name: judge the body. A
+    # shell alias (`!...`) runs arbitrary commands this hook cannot judge, so
+    # in a foreign worktree it is blocked.
+    local body=${aliases[${sub,,}]:-} shell_alias=0
+    if [ -n "$body" ]; then
+        if [ "${body#!}" != "$body" ]; then
+            shell_alias=1
+        else
+            local -a expansion=()
+            read -ra expansion <<< "$body"
+            sub=${expansion[0]:-}
+            args=("${expansion[@]:1}" "${args[@]}")
+        fi
+    fi
+
+    if [ "$sub" = stash ] && [ $shell_alias -eq 0 ]; then
         case "${args[0]:-}" in
             list|show) return 0 ;;
             pop|apply|drop) check_stash_origin "$target" "${args[@]:1}"; return 0 ;;
@@ -405,24 +452,39 @@ judge_invocation() { # words of one shell command
     fi
 
     [ -z "$target" ] && return 0
+    # Decide on the subcommand before resolving the target: most `git -C`
+    # calls (log, status, diff) never need the git calls of foreign_root.
+    [ $shell_alias -eq 1 ] || case "$DESTRUCTIVE_CANDIDATES" in *" $sub "*) ;; *) return 0 ;; esac
     local root
     root=$(foreign_root "$target") || return 0
+    [ $shell_alias -eq 1 ] && block_foreign "$root" "$sub (inline shell alias)"
     subcommand_is_destructive "$root" "$sub" "${args[@]}" && block_foreign "$root" "$sub"
     return 0
 }
 
-# Split the command line into its separate commands and judge each one. A
-# backslash-newline continues the same command, so it is joined first; split as a
-# line break it would cut `git -C <wt> \` from the `reset --hard` that follows.
-SEGMENTS=${COMMAND//$'\\\n'/ }
-for sep in "${CHAIN_SEPARATORS[@]}"; do
-    SEGMENTS=${SEGMENTS//"$sep"/$'\n'}
-done
+# Split the command line into its separate commands and judge each one. Command
+# substitution in backticks is a command of its own, so a backtick ends one;
+# `$(` and `)` already do, as `(` and `)` are operators.
+mapfile -d '' TOKENS < <(shell_tokens "${COMMAND//\`/ ; }")
 
-while IFS= read -r segment; do
-    read -ra words <<< "$segment"
-    [ ${#words[@]} -eq 0 ] && continue
-    judge_invocation "${words[@]}"
-done <<< "$SEGMENTS"
+SEGMENT=()
+SKIP_NEXT=0
+for tok in "${TOKENS[@]}" ';'; do
+    if [ "$SKIP_NEXT" = 1 ]; then SKIP_NEXT=0; continue; fi
+    if [[ "$tok" =~ ^[\;\&\|\(\)]+$ ]]; then
+        # Chain operator(s), possibly clustered (`);`): the command ends here.
+        [ ${#SEGMENT[@]} -gt 0 ] && judge_invocation "${SEGMENT[@]}"
+        SEGMENT=()
+    elif [[ "$tok" =~ ^[\<\>\&\|]+$ ]]; then
+        # A redirect and its target are no arguments. Drop an fd number written
+        # before it too (`2>&1` tokenizes as 2, >&, 1).
+        if [ ${#SEGMENT[@]} -gt 1 ] && [[ "${SEGMENT[-1]}" =~ ^[0-9]$ ]]; then
+            unset 'SEGMENT[-1]'
+        fi
+        SKIP_NEXT=1
+    else
+        SEGMENT+=("$tok")
+    fi
+done
 
 exit 0

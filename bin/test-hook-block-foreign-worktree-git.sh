@@ -116,6 +116,24 @@ check 2 "backslash-newline continuation"            "git -C $BASE/wt \\
   reset --hard"
 check 0 "foreign harmless, own destructive"         "git -C $BASE/wt status && git -C $BASE/main reset --hard"
 check 0 "make -C is not git"                        "make -C $BASE/wt clean"
+check 2 "inside backticks"                          "echo \`git -C $BASE/wt reset --hard\`"
+check 2 "subshell closed with );"                   "(git -C $BASE/wt reset --hard);ls"
+
+# PR #365 review: globs, inline aliases, abbreviations, redirects, variables.
+check 2 "checkout '*' is a pathspec glob, not a remote branch (D7)" "git -C $BASE/wt checkout '*'"
+check 2 "checkout 'dev*' is a pathspec glob (D7)"   "git -C $BASE/wt checkout 'dev*'"
+check 2 "inline alias for reset --hard"             "git -C $BASE/wt -c alias.x='reset --hard' x"
+check 2 "inline alias, name in other case"          "git -C $BASE/wt -c Alias.X='reset --hard' x"
+check 2 "inline shell alias"                        "git -C $BASE/wt -c alias.x='!git reset --hard' x"
+check 0 "inline alias for a branch switch"          "git -C $BASE/wt -c alias.co=checkout co spare"
+check 2 "checkout --pathspec-fr (abbreviated)"      "git -C $BASE/wt checkout --pathspec-fr=list.txt"
+check 2 "checkout --pathspec-from-file"             "git -C $BASE/wt checkout --pathspec-from-file list.txt"
+check 0 "checkout branch with 2>&1"                 "git -C $BASE/wt checkout spare 2>&1"
+check 0 "checkout branch with >/dev/null"           "git -C $BASE/wt checkout spare >/dev/null"
+check 2 "reset --hard with a redirect"              "git -C $BASE/wt reset --hard 2>/dev/null"
+export FOREIGN_WT_TEST_DIR=$BASE/wt
+check 2 "-C target via \$VAR"                       "git -C \"\$FOREIGN_WT_TEST_DIR\" reset --hard"
+check 2 "-C target via \${VAR}"                     "git -C \${FOREIGN_WT_TEST_DIR} reset --hard"
 
 # Allowed: read-only stash verbs.
 check 0 "stash list is read-only"               "git -C $BASE/wt stash list"
@@ -171,6 +189,19 @@ check 0 "target path does not exist"            "git -C $BASE/nope reset --hard"
 # git will report "No stash entries found" itself. Checked in the unrelated repo,
 # which never had a stash raised in it.
 check 0 "pop with an empty stash stack"        "git -C $BASE/unrelated stash pop"
+
+# The short form `stash pop N` names stash@{N}. Fixture: raise an entry on the
+# main tree's own branch on top of the one raised in wt, so stash@{0} is the
+# caller's and stash@{1} belongs to the other branch.
+(
+  cd "$BASE/main" || exit 1
+  echo changed >> f.txt
+  git stash push -q -m "raised-in-main"
+) >/dev/null 2>&1
+
+check 0 "pop the own top entry"                 "git -C $BASE/main stash pop"
+check 2 "pop 1: short form of another branch's entry" "git -C $BASE/main stash pop 1"
+check 2 "apply --index 1: short form after a flag"    "git -C $BASE/main stash apply --index 1"
 
 if [ $fail -eq 0 ]; then
   echo "all tests passed"

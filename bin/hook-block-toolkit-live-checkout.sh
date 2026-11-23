@@ -43,6 +43,8 @@ set -uo pipefail
 
 # shellcheck source=bin/lib/live-checkout.sh
 . "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/lib/live-checkout.sh"
+# shellcheck source=bin/lib/shell-tokens.sh
+. "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/lib/shell-tokens.sh"
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
@@ -59,17 +61,7 @@ LIVE_ROOT=$(live_checkout_root)
 # Tokenize like a shell would (quotes, chains), one NUL-terminated token per
 # word or operator. Unparseable input yields nothing and is allowed: git will
 # reject it too, and a guard that blocks on its own parse errors gets disabled.
-mapfile -d '' TOKENS < <(python3 -c '
-import shlex, sys
-try:
-    lex = shlex.shlex(sys.argv[1].replace("\n", ";"), posix=True, punctuation_chars=";&|()<>")
-    lex.whitespace_split = True
-    tokens = list(lex)
-except ValueError:
-    sys.exit(0)
-for t in tokens:
-    sys.stdout.write(t + "\0")
-' "$COMMAND")
+mapfile -d '' TOKENS < <(shell_tokens "$COMMAND")
 
 # Resolve <dir> against <base> the way cd and git -C do, expanding a leading ~.
 resolve_dir() { # base dir
