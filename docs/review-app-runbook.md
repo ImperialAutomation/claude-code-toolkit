@@ -160,11 +160,12 @@ are listed under every verdict. You always merge yourself.
 |---|---|---|
 | `APPROVE` | `APPROVE` | Read it and merge, or post what should change and hand it back |
 | `BLOCKING` | `REQUEST_CHANGES`; from `/queue-run`, `needs-human` on the issue when the re-review is still `BLOCKING` | Fix it yourself, or hand it back: the review is the input |
-| `HUMAN` | `COMMENT` with question, options and recommendation on top; `needs-human` on the PR and every linked issue | Post your decision as a PR or issue comment, remove `needs-human` from the PR and the issue, then hand it back or act on it yourself |
+| `HUMAN` | `COMMENT` with question, options and recommendation on top; `needs-human` on the PR and every linked issue | From `/queue-run`: reply to the PR's decision card (`1A 2C`), which hands it back. Otherwise post your decision, remove `needs-human` from the PR and the issue, and act on it yourself |
 | not posted | none; from `/queue-run`, `agent-pr` and `needs-human` on the issue, the error in its comment | Fix the cause (step 4 table), remove `needs-human` and run `/pre-merge <PR> --post`; never post as your own account |
 
-Hand back an agent PR (its issue has `agent-pr`) by adding `agent-rework` to
-the issue once it has no `needs-human`: the next `/queue-run` iteration runs a
+Hand back an agent PR (its issue has `agent-pr`) on the PR: reply to its
+decision card, or add `agent-rework` to the PR. The loop moves the labels on
+the issue itself (#377). The next `/queue-run` iteration runs a
 fix round on the review input posted since its last round (the app's reviews
 count), then a re-review. Without new input it escalates instead. See "Back
 to the loop after a review (#300)" in `docs/escalation-list.md`.
