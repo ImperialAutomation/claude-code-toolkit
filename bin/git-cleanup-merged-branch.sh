@@ -25,6 +25,14 @@
 #     directory; the live checkout's path is printed at the end
 # In every other repository the route below the toolkit section is unchanged.
 #
+# A named feature branch must be the branch of the tree the script runs in (or
+# that tree must be on the base branch named with it; an auto-detected base does
+# not count, it is read from that same tree). On any other branch, or a
+# detached HEAD, another session may be working there: the script refuses
+# before any change (exit 1), names the worktree that has the feature branch
+# checked out, or, when none has, prints the fetch, the `git log` check and the
+# `git branch -D` to delete it by hand.
+#
 # Options (anywhere on the command line):
 #   --repo DIR       Run git in repository DIR (avoids a leading `cd`, which
 #                    would break the Bash(~/.claude/bin/*) permission match)
@@ -52,6 +60,10 @@ set -e  # Exit on error
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/live-checkout.sh"
 
 readonly EXIT_USAGE=2
+# How a remedy re-runs this script: printed for the user, not expanded here.
+# shellcheck disable=SC2088
+SELF_CMD="~/.claude/bin/$(basename "$0")"
+readonly SELF_CMD
 
 usage() {
     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
@@ -139,16 +151,29 @@ handle_remote_branch() {
     fi
 }
 
+# Print <branch>'s upstream as <remote>/<name>; fail when it has none.
+upstream_of() { # branch
+    git_filtered rev-parse --abbrev-ref --symbolic-full-name "$1@{upstream}" 2>/dev/null
+}
+
+# Print the worktree_list fields (<path> <branch> <locked> <prunable>) of the
+# worktree that has <branch> checked out, or nothing when none has. The fields
+# are separated by WT_SEP, not a tab: tab is IFS whitespace, so `IFS=$'\t' read`
+# would collapse an empty <locked> and shift "prunable" into its place.
+readonly WT_SEP=$'\037'
+worktree_of_branch() { # dir branch
+    worktree_list "$1" | awk -F'\t' -v OFS="$WT_SEP" -v b="$2" '$2 == b { $1 = $1; print; exit }'
+}
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# --- Toolkit route (#206) -----------------------------------------------------
-
-# Refuse with a message; nothing has been changed when this is called.
-tk_refuse() { # message...
+# Refuse with a message; nothing has been changed when this is called. Shared
+# by both routes.
+refuse() { # message...
     echo -e "${RED}Error: $1${NC}" >&2
     shift
     local line
@@ -157,6 +182,18 @@ tk_refuse() { # message...
     exit 1
 }
 
+# Why git reports the registered worktree <path> as stale. A prune unregisters
+# it either way, but leaves a directory that is still there behind.
+stale_worktree_note() { # path
+    if [ -d "$1" ]; then
+        echo "its directory is no longer a worktree (a prune leaves that directory; remove it by hand)"
+    else
+        echo "its directory is gone"
+    fi
+}
+
+# --- Toolkit route (#206) -----------------------------------------------------
+
 # A step after the checks failed. The steps before it stay done. A re-run with
 # the branch named continues: every check passes again on the partly cleaned
 # state, and a step that is already done is skipped or a no-op.
@@ -164,7 +201,7 @@ tk_step_failed() { # step already-done
     echo -e "${RED}Error: $1 failed (see git's message above).${NC}" >&2
     echo "Already done: $2." >&2
     echo "Fix the cause, then re-run from the live checkout to continue:" >&2
-    echo "  ~/.claude/bin/$(basename "$0") --repo $LIVE_ROOT $FEATURE_BRANCH $TK_BASE" >&2
+    echo "  $SELF_CMD --repo $LIVE_ROOT $FEATURE_BRANCH $TK_BASE" >&2
     exit 1
 }
 
@@ -194,7 +231,7 @@ toolkit_cleanup() {
     # Leave the feature worktree first: it is about to be removed.
     cd "$LIVE_ROOT"
 
-    local base remote_base worktree="" locked="" prunable="" path branch lock prune
+    local base remote_base worktree="" locked="" prunable=""
     local candidates overwritten ignored done_so_far
     base="${POSITIONAL[1]:-$(live_base_branch "$LIVE_ROOT")}"
     remote_base="origin/$base"
@@ -203,21 +240,21 @@ toolkit_cleanup() {
     echo -e "${GREEN}=== Git Cleanup: Merged Toolkit Worktree ===${NC}"
     echo "Live checkout: $LIVE_ROOT"
 
-    git_filtered fetch --prune origin || tk_refuse "fetching origin failed"
+    git_filtered fetch --prune origin || refuse "fetching origin failed"
     git_filtered rev-parse --verify -q "$remote_base" >/dev/null \
-        || tk_refuse "'$remote_base' does not exist"
+        || refuse "'$remote_base' does not exist"
 
     FEATURE_BRANCH="${POSITIONAL[0]:-}"
     if [ -z "$FEATURE_BRANCH" ] && [ "$REPO_TOP" != "$LIVE_ROOT" ]; then
         FEATURE_BRANCH=$(git_filtered -C "$REPO_TOP" branch --show-current)
-        [ -n "$FEATURE_BRANCH" ] || tk_refuse "worktree '$REPO_TOP' is not on a branch"
+        [ -n "$FEATURE_BRANCH" ] || refuse "worktree '$REPO_TOP' is not on a branch"
     fi
     if [ -z "$FEATURE_BRANCH" ]; then
         candidates=$(tk_merged_issue_worktrees "$remote_base")
         case "$(grep -c . <<< "$candidates")" in
-            0) tk_refuse "no linked worktree on an issue-* branch is merged into '$remote_base'" ;;
+            0) refuse "no linked worktree on an issue-* branch is merged into '$remote_base'" ;;
             1) FEATURE_BRANCH=$(cut -f2 <<< "$candidates") ;;
-            *) tk_refuse "several merged issue worktrees; name the branch to clean up:" \
+            *) refuse "several merged issue worktrees; name the branch to clean up:" \
                    "$(sed 's/^\(.*\)\t\(.*\)$/  \2  (\1)/' <<< "$candidates")" ;;
         esac
     fi
@@ -225,54 +262,53 @@ toolkit_cleanup() {
     echo "Feature branch: $FEATURE_BRANCH"
     echo "Base branch: $base"
 
-    [ "$FEATURE_BRANCH" != "$base" ] || tk_refuse "cannot clean up the base branch '$base'"
+    [ "$FEATURE_BRANCH" != "$base" ] || refuse "cannot clean up the base branch '$base'"
     git_filtered show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH" \
-        || tk_refuse "branch '$FEATURE_BRANCH' does not exist"
+        || refuse "branch '$FEATURE_BRANCH' does not exist"
 
-    while IFS=$'\t' read -r path branch lock prune; do
-        [ "$branch" = "$FEATURE_BRANCH" ] || continue
-        worktree="$path"; locked="$lock"; prunable="$prune"
-    done < <(worktree_list "$LIVE_ROOT")
+    IFS="$WT_SEP" read -r worktree _ locked prunable \
+        < <(worktree_of_branch "$LIVE_ROOT" "$FEATURE_BRANCH") || true
     [ "$worktree" != "$LIVE_ROOT" ] \
-        || tk_refuse "'$FEATURE_BRANCH' is checked out in the live checkout itself"
+        || refuse "'$FEATURE_BRANCH' is checked out in the live checkout itself"
 
     # All checks before the first change.
     [ "$(git_filtered branch --show-current)" = "$base" ] \
-        || tk_refuse "the live checkout is not on '$base'" "Switch it back: git -C $LIVE_ROOT switch $base"
+        || refuse "the live checkout is not on '$base'" "Switch it back: git -C $LIVE_ROOT switch $base"
     [ -z "$(git_filtered status --porcelain --untracked-files=no)" ] \
-        || tk_refuse "the live checkout has uncommitted changes" "Commit or stash them in $LIVE_ROOT, then re-run."
+        || refuse "the live checkout has uncommitted changes" "Commit or stash them in $LIVE_ROOT, then re-run."
     git_filtered merge-base --is-ancestor HEAD "$remote_base" \
-        || tk_refuse "the live checkout's '$base' cannot fast-forward to '$remote_base' (it has commits of its own)"
+        || refuse "the live checkout's '$base' cannot fast-forward to '$remote_base' (it has commits of its own)"
     # Untracked files are left out of the clean check above, but one that the
     # fast-forward would write over makes the merge abort halfway through.
     overwritten=$(comm -12 \
         <(git_filtered ls-files --others --exclude-standard | sort) \
         <(git_filtered diff --name-only HEAD "$remote_base" | sort))
     [ -z "$overwritten" ] \
-        || tk_refuse "untracked files in the live checkout would be overwritten by '$remote_base':" \
+        || refuse "untracked files in the live checkout would be overwritten by '$remote_base':" \
                "$(sed 's/^/  /' <<< "$overwritten")" "Move or remove them in $LIVE_ROOT, then re-run."
     git_filtered merge-base --is-ancestor "refs/heads/$FEATURE_BRANCH" "$remote_base" \
-        || tk_refuse "'$FEATURE_BRANCH' is not merged into '$remote_base'" \
+        || refuse "'$FEATURE_BRANCH' is not merged into '$remote_base'" \
                "Merge its PR first; for a squash merge delete it by hand: git branch -D $FEATURE_BRANCH"
     # Ancestry alone would also pass a branch without commits of its own, such
     # as a worktree another session has only just created (D7).
     if tk_on_first_parent "refs/heads/$FEATURE_BRANCH" "$remote_base"; then
-        tk_refuse "'$FEATURE_BRANCH' has no commits of its own: its tip is on the first-parent line of '$remote_base'" \
+        refuse "'$FEATURE_BRANCH' has no commits of its own: its tip is on the first-parent line of '$remote_base'" \
             "A fresh worktree looks like this; another session may be working in it." \
             "If it was merged by fast-forward instead, clean up by hand:" \
             "  git -C $LIVE_ROOT worktree remove ${worktree:-<worktree>}" \
             "  git -C $LIVE_ROOT branch -d $FEATURE_BRANCH"
     fi
     if [ -n "$worktree" ]; then
+        # Locked first: a prune skips a locked worktree, so its hint would loop.
+        [ -z "$locked" ] || refuse "worktree '$worktree' is locked" "Unlock it: git worktree unlock $worktree"
         if [ -n "$prunable" ] || [ ! -d "$worktree" ]; then
-            tk_refuse "worktree '$worktree' is registered, but its directory is gone" \
+            refuse "worktree '$worktree' is registered, but $(stale_worktree_note "$worktree")" \
                 "Unregister it, then re-run with the branch named:" \
                 "  git -C $LIVE_ROOT worktree prune" \
-                "  ~/.claude/bin/$(basename "$0") --repo $LIVE_ROOT $FEATURE_BRANCH $base"
+                "  $SELF_CMD --repo $LIVE_ROOT $FEATURE_BRANCH $base"
         fi
-        [ -z "$locked" ] || tk_refuse "worktree '$worktree' is locked" "Unlock it: git worktree unlock $worktree"
         [ -z "$(git_filtered -C "$worktree" status --porcelain)" ] \
-            || tk_refuse "worktree '$worktree' has uncommitted or untracked files" \
+            || refuse "worktree '$worktree' has uncommitted or untracked files" \
                    "Commit, move or remove them, then re-run."
     fi
 
@@ -318,8 +354,120 @@ fi
 
 # --- Every other repository ---------------------------------------------------
 
+# Print the base <feature> was cut from, read from the branch itself rather than
+# from the tree: the first of develop, master, main that is an ancestor of it.
+base_of_feature() { # feature
+    local candidate
+    for candidate in develop master main; do
+        git_filtered show-ref --verify --quiet "refs/heads/$candidate" || continue
+        if git merge-base --is-ancestor "$candidate" "$1" 2>/dev/null; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Refuse a tree that is on <current> (empty: detached HEAD) rather than on the
+# named feature branch, and say where the cleanup can run instead (#321).
+refuse_wrong_branch() { # current named-base
+    local current="$1" named_base="$2" base q_feature q_base hint
+    local feature_wt="" feature_locked="" feature_prunable="" base_wt=""
+    local base_ref base_remote q_remote q_wt
+    q_feature=$(printf '%q' "$FEATURE_BRANCH")
+    # Without a named base, the one the feature was cut from: this tree's own
+    # branch may be another session's, so its detected base says nothing.
+    base="${named_base:-$(base_of_feature "$FEATURE_BRANCH" || true)}"
+    q_base=$(printf '%q' "$base")
+    hint=("Another session may be working in it; it is left as it is.")
+
+    IFS="$WT_SEP" read -r feature_wt _ feature_locked feature_prunable \
+        < <(worktree_of_branch . "$FEATURE_BRANCH") || true
+    if [ -n "$base" ]; then
+        IFS="$WT_SEP" read -r base_wt _ < <(worktree_of_branch . "$base") || true
+    fi
+
+    if [ -n "$feature_wt" ] && [ -z "$feature_prunable" ] && [ -d "$feature_wt" ]; then
+        if [ -n "$base_wt" ]; then
+            # A run in the feature's worktree would die on `checkout <base>`:
+            # git checks a branch out in one worktree only.
+            hint+=("'$FEATURE_BRANCH' is checked out in $feature_wt and '$base' in $base_wt,"
+                   "so a cleanup in $feature_wt cannot check out '$base'."
+                   "Once $feature_wt is off '$FEATURE_BRANCH' (or removed), run the cleanup in $base_wt:"
+                   "  $SELF_CMD --repo $(printf '%q' "$base_wt") $q_feature $q_base")
+        else
+            hint+=("'$FEATURE_BRANCH' is checked out in $feature_wt; run the cleanup there:"
+                   "  $SELF_CMD --repo $(printf '%q' "$feature_wt") $q_feature${base:+ $q_base}")
+        fi
+        refuse "this tree is on '${current:-detached HEAD}', not '$FEATURE_BRANCH'" "${hint[@]}"
+    fi
+
+    # Only an auto-detected base gets here with this tree on it (D5).
+    if [ -n "$base" ] && [ "$current" = "$base" ]; then
+        hint+=("If '$current' is the base '$FEATURE_BRANCH' was merged into, name it:"
+               "  $SELF_CMD --repo $(printf '%q' "$PWD") $q_feature $q_base")
+    fi
+    if [ -n "$feature_wt" ] && [ -n "$feature_locked" ]; then
+        # git never reports a locked worktree as prunable, and a prune skips it.
+        q_wt=$(printf '%q' "$feature_wt")
+        hint+=("'$FEATURE_BRANCH' is registered in $feature_wt, a locked worktree whose directory is gone."
+               "Unlock and unregister it first:"
+               "  git worktree unlock $q_wt"
+               "  git worktree prune")
+    elif [ -n "$feature_wt" ]; then
+        hint+=("'$FEATURE_BRANCH' is registered in $feature_wt, but $(stale_worktree_note "$feature_wt")."
+               "Unregister it first: git worktree prune")
+    else
+        hint+=("'$FEATURE_BRANCH' is not checked out in any worktree.")
+    fi
+    if [ -n "$named_base" ]; then
+        base_ref=$(upstream_of "$named_base") || base_ref="origin/$named_base"
+        base_ref=$(printf '%q' "$base_ref")
+        # The remote from the branch's config, not from the abbreviated
+        # upstream: a remote name may contain '/', and a local upstream
+        # (remote '.') has nothing to fetch.
+        base_remote=$(git_filtered config "branch.$named_base.remote") || base_remote=origin
+    else
+        base_ref="origin/<base>"
+        base_remote=origin
+    fi
+    if [ "$base_remote" = "." ]; then
+        hint+=("To delete it by hand:")
+    else
+        q_remote=$(printf '%q' "$base_remote")
+        hint+=("To delete it by hand, fetch the base first, so a fresh merge counts:"
+               "  git fetch $q_remote")
+    fi
+    hint+=("  git log --oneline $base_ref..$q_feature   # must print nothing"
+           "  git branch -D $q_feature"
+           "(Plain -d is no check here: it compares with the branch's upstream, or else with this tree's HEAD, not with the base.)")
+    refuse "this tree is on '${current:-detached HEAD}', not '$FEATURE_BRANCH'" "${hint[@]}"
+}
+
 echo -e "${GREEN}=== Git Cleanup: Merged Branch ===${NC}"
 echo "Feature branch: $FEATURE_BRANCH"
+
+# Verify feature branch exists
+if ! git_filtered show-ref --verify --quiet refs/heads/"$FEATURE_BRANCH"; then
+    echo -e "${RED}Error: Branch '$FEATURE_BRANCH' does not exist${NC}"
+    exit 1
+fi
+
+# A named feature branch must be the one this tree is on (#321). Another
+# session may have taken the tree over since the PR was opened; checking out
+# the base would then take that session's checkout away. A tree already on the
+# base is not switched, so that stays allowed (#321, D2), but only for a base
+# named on the command line: an auto-detected base is read from this same tree,
+# so a tree on develop/master/main would always match it (D5). This runs before
+# the base is detected from this tree, and before the uncommitted-changes
+# guard, so a taken-over tree is refused for the right reason.
+if [ -n "${POSITIONAL[0]:-}" ]; then
+    CURRENT_BRANCH=$(git_filtered branch --show-current)
+    if [ "$CURRENT_BRANCH" != "$FEATURE_BRANCH" ] \
+            && { [ -z "$BASE_BRANCH" ] || [ "$CURRENT_BRANCH" != "$BASE_BRANCH" ]; }; then
+        refuse_wrong_branch "$CURRENT_BRANCH" "$BASE_BRANCH"
+    fi
+fi
 
 # Find base branch if not specified
 if [ -z "$BASE_BRANCH" ]; then
@@ -329,31 +477,17 @@ if [ -z "$BASE_BRANCH" ]; then
     if [ -x ~/.claude/bin/git-find-base-branch ]; then
         BASE_BRANCH=$(~/.claude/bin/git-find-base-branch)
     else
-        # Fallback: check common base branches
-        for candidate in develop master main; do
-            if git_filtered show-ref --verify --quiet refs/heads/$candidate; then
-                if git merge-base --is-ancestor "$candidate" "$FEATURE_BRANCH" 2>/dev/null; then
-                    BASE_BRANCH=$candidate
-                    break
-                fi
-            fi
-        done
+        BASE_BRANCH=$(base_of_feature "$FEATURE_BRANCH") || true
     fi
 
     if [ -z "$BASE_BRANCH" ]; then
         echo -e "${RED}Error: Could not determine base branch${NC}"
-        echo "Please specify manually: git-cleanup-merged-branch.sh $FEATURE_BRANCH <base-branch>"
+        echo "Please specify manually: $SELF_CMD $FEATURE_BRANCH <base-branch>"
         exit 1
     fi
 fi
 
 echo "Base branch: $BASE_BRANCH"
-
-# Verify feature branch exists
-if ! git_filtered show-ref --verify --quiet refs/heads/"$FEATURE_BRANCH"; then
-    echo -e "${RED}Error: Branch '$FEATURE_BRANCH' does not exist${NC}"
-    exit 1
-fi
 
 # Verify base branch exists
 if ! git_filtered show-ref --verify --quiet refs/heads/"$BASE_BRANCH"; then
@@ -387,7 +521,7 @@ git_filtered checkout "$BASE_BRANCH"
 # different remote. A linked worktree hits the first case routinely -- the shared
 # base is checked out in the main tree, so the worktree parks on its own branch
 # tracking origin/develop, and the pull dies on "couldn't find remote ref".
-UPSTREAM=$(git_filtered rev-parse --abbrev-ref --symbolic-full-name "$BASE_BRANCH@{upstream}" 2>/dev/null) || {
+UPSTREAM=$(upstream_of "$BASE_BRANCH") || {
     echo -e "${RED}Error: '$BASE_BRANCH' has no upstream${NC}" >&2
     echo "Set one with: git branch -u <remote>/<branch> $BASE_BRANCH" >&2
     exit 1

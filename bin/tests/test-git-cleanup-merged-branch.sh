@@ -31,6 +31,20 @@
 #   31-32. toolkit: ignored files listed; --delete-remote -> cleans
 #   33-34. toolkit: a step fails after the checks        -> says what was done,
 #                                                           a re-run finishes
+#   35-38. tree not on the named feature branch (clean, dirty, feature checked
+#          out elsewhere, detached)                      -> refuse, nothing changed
+#   39-40. tree on the feature branch, named or not      -> cleans up as before
+#   41-43. tree on an integration branch with the base auto-detected, feature
+#          worktree directory gone, feature worktree with the base not named
+#                                                        -> refuse, right hint
+#   44-46. feature worktree prunable with its directory there, base checked
+#          out in another worktree, base tracking a local branch -> right hint
+#   47.   toolkit: unlocked prunable worktree           -> prune hint, not "locked"
+#   48-51. base not named (tree on it, feature nowhere; base and feature in
+#          other worktrees; tree on it, feature elsewhere), locked worktree
+#          with its directory gone                       -> refuse, right hint
+#   52.   toolkit: locked worktree, directory gone      -> unlock hint first
+#   53.   taken-over tree, no base to detect            -> wrong-branch refusal
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -676,6 +690,244 @@ check "branch still there" yes "$(branch_exists "$L" issue-34-widget)"
 OUT=$(run_tk "$L" "$L" issue-34-widget main); RC=$?
 check "re-run exits zero" 0 "$RC"
 check_cleaned "$L" "$L-34" issue-34-widget
+
+# --- Tree not on the named feature branch (#321) -------------------------------
+#
+# Another session may have taken the tree over since the PR was opened: it is
+# then on that session's branch, and checking out the base would take that
+# checkout away. The refusal must come before any change and before the
+# uncommitted-changes guard, so a dirty tree is refused for the right reason.
+
+# The post-merge fixture, with the tree switched to someone else's new branch.
+taken_over() { # name feature other
+    local d
+    d=$(newremote "$1" develop)
+    add_merged_feature "$d" develop "$2" >/dev/null
+    git -C "$d" checkout -q -b "$3"
+    echo "$d"
+}
+
+tree_state() { # repodir -> branch and HEAD
+    printf '%s %s\n' "$(git -C "$1" branch --show-current)" "$(git -C "$1" rev-parse HEAD)"
+}
+
+echo "== 35. tree on another branch, clean: refused, nothing changed =="
+R=$(taken_over r35 issue-35-feature issue-99-other)
+BEFORE=$(tree_state "$R")
+OUT=$(run_notty_yes "$R" issue-35-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "names the tree's branch" "is on 'issue-99-other', not 'issue-35-feature'" "$OUT"
+check "branch and HEAD unchanged" "$BEFORE" "$(tree_state "$R")"
+check "feature branch survives" yes "$(branch_exists "$R" issue-35-feature)"
+contains "says it is checked out nowhere" "not checked out in any worktree" "$OUT"
+contains "prints the unmerged-commit check" "git log --oneline origin/develop..issue-35-feature" "$OUT"
+contains "prints the force delete" "git branch -D issue-35-feature" "$OUT"
+
+echo "== 36. tree on another branch, dirty: wrong-branch refusal, not the dirty one =="
+R=$(taken_over r36 issue-36-feature issue-98-other)
+printf 'other session edit\n' >> "$R/README.md"
+BEFORE=$(tree_state "$R")
+OUT=$(run_notty_yes "$R" issue-36-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "wrong-branch message" "is on 'issue-98-other', not 'issue-36-feature'" "$OUT"
+lacks "not the uncommitted-changes message" "uncommitted changes" "$OUT"
+check "branch and HEAD unchanged" "$BEFORE" "$(tree_state "$R")"
+check "edit still there" "other session edit" "$(tail -n 1 "$R/README.md")"
+check "feature branch survives" yes "$(branch_exists "$R" issue-36-feature)"
+
+echo "== 37. feature branch checked out in another worktree: that path is named =="
+R=$(taken_over r37 issue-37-feature issue-97-other)
+git_q "$R" worktree add -q "$R-wt" issue-37-feature
+OUT=$(run_notty_yes "$R" issue-37-feature develop); RC=$?
+check "exit one" 1 "$RC"
+# git prints the worktree's resolved path, which differs from $R-wt where the
+# temp dir sits behind a symlink; the basename is what identifies it.
+contains "names the other worktree" "is checked out in " "$OUT"
+contains "with that worktree's path" "r37-wt; run the cleanup there" "$OUT"
+lacks "no force delete for a checked-out branch" "git branch -D" "$OUT"
+check "feature worktree untouched" issue-37-feature "$(git_q "$R-wt" branch --show-current)"
+
+echo "== 38. detached HEAD with a named feature branch: refused =="
+R=$(taken_over r38 issue-38-feature issue-96-other)
+git_q "$R" checkout -q --detach
+BEFORE=$(git_q "$R" rev-parse HEAD)
+OUT=$(run_notty_yes "$R" issue-38-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "says detached" "detached HEAD" "$OUT"
+check "HEAD unchanged" "$BEFORE" "$(git_q "$R" rev-parse HEAD)"
+check "still detached" "" "$(git_q "$R" branch --show-current)"
+check "feature branch survives" yes "$(branch_exists "$R" issue-38-feature)"
+
+echo "== 39. tree on the named feature branch: cleans up as before =="
+R=$(newremote r39 develop)
+add_merged_feature "$R" develop issue-39-feature
+git_q "$R" checkout -q issue-39-feature
+OUT=$(run_notty "$R" issue-39-feature develop); RC=$?
+check "exit zero" 0 "$RC"
+check "feature branch deleted" no "$(branch_exists "$R" issue-39-feature)"
+check "on base branch" develop "$(git_q "$R" branch --show-current)"
+
+echo "== 40. no feature argument: the current branch is the feature =="
+R=$(newremote r40 develop)
+add_merged_feature "$R" develop issue-40-feature
+git_q "$R" checkout -q issue-40-feature
+OUT=$(run_notty "$R"); RC=$?
+check "exit zero" 0 "$RC"
+check "feature branch deleted" no "$(branch_exists "$R" issue-40-feature)"
+lacks "no wrong-branch refusal" "is on '" "$OUT"
+
+echo "== 41. tree on main, base auto-detected, feature merged into develop: refused =="
+# A base detected from the tree's own branch would be main here: matching it
+# must not count as "on the base", and main is not offered as the base to name.
+R=$(newremote r41 main)
+git_q "$R" checkout -q -b develop
+git_q "$R" push -q -u origin develop
+add_merged_feature "$R" develop issue-41-feature >/dev/null
+advance_remote "$R" main "Hotfix on main"
+git_q "$R" fetch -q origin
+git_q "$R" checkout -q main
+BEFORE=$(tree_state "$R")
+OUT=$(run_notty_yes "$R" issue-41-feature); RC=$?
+check "exit one" 1 "$RC"
+contains "names the tree's branch" "is on 'main', not 'issue-41-feature'" "$OUT"
+lacks "main not offered as the base" "issue-41-feature main" "$OUT"
+check "main not fast-forwarded" "$BEFORE" "$(tree_state "$R")"
+check "feature branch survives" yes "$(branch_exists "$R" issue-41-feature)"
+contains "base placeholder in the manual check" "origin/<base>..issue-41-feature" "$OUT"
+
+echo "== 42. feature worktree registered, its directory gone: prune first =="
+R=$(taken_over r42 issue-42-feature issue-95-other)
+git_q "$R" worktree add -q "$R-wt" issue-42-feature
+rm -rf "$R-wt"
+OUT=$(run_notty_yes "$R" issue-42-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "says the directory is gone" "but its directory is gone" "$OUT"
+contains "says to prune" "git worktree prune" "$OUT"
+lacks "no hint to run there" "run the cleanup there" "$OUT"
+contains "fetches before the check" "git fetch origin" "$OUT"
+contains "prints the force delete" "git branch -D issue-42-feature" "$OUT"
+
+echo "== 43. feature in a worktree, base not named: base read from the feature, path quoted =="
+R=$(taken_over r43 issue-43-feature issue-94-other)
+git_q "$R" worktree add -q "$R wt" issue-43-feature
+OUT=$(run_notty_yes "$R" issue-43-feature); RC=$?
+check "exit one" 1 "$RC"
+contains "run the cleanup there" "run the cleanup there" "$OUT"
+contains "path quoted, base the feature was cut from" 'r43\ wt issue-43-feature develop' "$OUT"
+lacks "no base from this tree in the hint" "issue-43-feature issue-94-other" "$OUT"
+
+echo "== 44. feature worktree prunable, its directory still there: prune first =="
+# Unlocked and prunable: the empty <locked> field must not shift "prunable" away.
+R=$(taken_over r44 issue-44-feature issue-93-other)
+git_q "$R" worktree add -q "$R-wt" issue-44-feature
+rm "$R-wt/.git"
+OUT=$(run_notty_yes "$R" issue-44-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "says to prune" "git worktree prune" "$OUT"
+contains "the directory is there, not gone" "its directory is no longer a worktree" "$OUT"
+lacks "no hint to run there" "run the cleanup there" "$OUT"
+
+echo "== 45. feature and base each in another worktree: run in the base's =="
+# A run in the feature's worktree would die on `checkout develop`.
+R=$(taken_over r45 issue-45-feature issue-92-other)
+git_q "$R" worktree add -q "$R-wt" issue-45-feature
+git_q "$R" worktree add -q "$R-base" develop
+OUT=$(run_notty_yes "$R" issue-45-feature develop); RC=$?
+check "exit one" 1 "$RC"
+lacks "no hint to run in the feature's worktree" "run the cleanup there" "$OUT"
+contains "names the base's worktree" "r45-base issue-45-feature develop" "$OUT"
+check "feature worktree untouched" issue-45-feature "$(git_q "$R-wt" branch --show-current)"
+
+echo "== 46. base tracks a local branch: no fetch in the manual check =="
+R=$(taken_over r46 issue-46-feature issue-91-other)
+git_q "$R" branch -q base-src develop
+git_q "$R" branch -q --set-upstream-to=base-src develop
+OUT=$(run_notty_yes "$R" issue-46-feature develop); RC=$?
+check "exit one" 1 "$RC"
+lacks "no fetch of a local branch" "git fetch" "$OUT"
+contains "checks against the local upstream" "git log --oneline base-src..issue-46-feature" "$OUT"
+
+echo "== 47. toolkit: unlocked prunable worktree, directory there -> prune hint, not locked =="
+L=$(tk_fixture tk47)
+tk_worktree "$L" 47 widget
+tk_merge_on_remote "$L" issue-47-widget
+rm "$L-47/.git"
+BEFORE=$(tk_state "$L" "$L-47" issue-47-widget)
+OUT=$(run_tk "$L" "$L" issue-47-widget); RC=$?
+check "exit one" 1 "$RC"
+contains "gives the prune hint" "git -C $L worktree prune" "$OUT"
+lacks "not refused as locked" "is locked" "$OUT"
+contains "the directory is there, not gone" "its directory is no longer a worktree" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-47" issue-47-widget)"
+
+echo "== 48. tree on the auto-detected base, feature checked out nowhere: name the base =="
+# The refusal does not depend on an installed git-find-base-branch: the base it
+# offers is the one the feature was cut from.
+R=$(newremote r48 develop)
+add_merged_feature "$R" develop issue-48-feature
+BEFORE=$(tree_state "$R")
+OUT=$(run_notty_yes "$R" issue-48-feature); RC=$?
+check "exit one" 1 "$RC"
+contains "says how to name the base" "name it:" "$OUT"
+contains "with the base named" "r48 issue-48-feature develop" "$OUT"
+check "develop not fast-forwarded" "$BEFORE" "$(tree_state "$R")"
+check "feature branch survives" yes "$(branch_exists "$R" issue-48-feature)"
+
+echo "== 49. base not named, base and feature each in another worktree: run in the base's =="
+R=$(taken_over r49 issue-49-feature issue-90-other)
+git_q "$R" worktree add -q "$R-wt" issue-49-feature
+git_q "$R" worktree add -q "$R-base" develop
+OUT=$(run_notty_yes "$R" issue-49-feature); RC=$?
+check "exit one" 1 "$RC"
+lacks "no hint to run in the feature's worktree" "run the cleanup there" "$OUT"
+contains "names the base's worktree" "r49-base issue-49-feature develop" "$OUT"
+
+echo "== 50. tree on the auto-detected base, feature in another worktree: one hint =="
+# Naming the base here would pass the guard and end in a refused branch -D
+# (#370); a run in the feature's worktree could not check out develop.
+R=$(newremote r50 develop)
+add_merged_feature "$R" develop issue-50-feature
+git_q "$R" worktree add -q "$R-wt" issue-50-feature
+OUT=$(run_notty_yes "$R" issue-50-feature); RC=$?
+check "exit one" 1 "$RC"
+lacks "no name-the-base hint" "name it:" "$OUT"
+lacks "no hint to run in the feature's worktree" "run the cleanup there" "$OUT"
+contains "run here once the feature's worktree is off it" "r50 issue-50-feature develop" "$OUT"
+
+echo "== 51. locked feature worktree, its directory gone: unlock before the prune =="
+R=$(taken_over r51 issue-51-feature issue-89-other)
+git_q "$R" worktree add -q "$R-wt" issue-51-feature
+git_q "$R" worktree lock "$R-wt"
+rm -rf "$R-wt"
+OUT=$(run_notty_yes "$R" issue-51-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "says to unlock" "git worktree unlock" "$OUT"
+contains "then to prune" "git worktree prune" "$OUT"
+
+echo "== 52. toolkit: locked worktree, its directory gone -> unlock first, not prune =="
+# A prune skips a locked worktree, so a prune hint would come back on every run.
+L=$(tk_fixture tk52)
+tk_worktree "$L" 52 widget
+tk_merge_on_remote "$L" issue-52-widget
+lock_worktree "$L" "$L-52"
+remove_dir "$L" "$L-52"
+BEFORE=$(tk_state "$L" "$L-52" issue-52-widget)
+OUT=$(run_tk "$L" "$L" issue-52-widget); RC=$?
+check "exit one" 1 "$RC"
+contains "says to unlock" "git worktree unlock $L-52" "$OUT"
+lacks "no prune hint yet" "worktree prune" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-52" issue-52-widget)"
+
+echo "== 53. taken-over tree, no base to detect: wrong-branch refusal first =="
+# Base detection reads this tree; the guard comes before it.
+R=$(newremote r53 trunk)
+git_q "$R" checkout -q -b issue-53-feature
+git_q "$R" commit -q --allow-empty -m "Feature work"
+git_q "$R" checkout -q -b issue-88-other trunk
+OUT=$(run_notty_yes "$R" issue-53-feature); RC=$?
+check "exit one" 1 "$RC"
+contains "wrong-branch message" "is on 'issue-88-other', not 'issue-53-feature'" "$OUT"
+lacks "not the base-detection error" "Could not determine base branch" "$OUT"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
