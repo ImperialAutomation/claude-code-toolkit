@@ -28,6 +28,12 @@ Run the requested audit(s). When `$ARGUMENTS` is empty or `all`, run all audits 
 ```
 Finds missing/unused/inconsistent i18n keys. Only applicable to frontend projects with locale files.
 
+next-intl translators are resolved against their namespace: `t("title")` under
+`useTranslations("orders")` or `await getTranslations({ namespace: "orders" })` counts as
+`orders.title`. A translator whose namespace is not a literal is listed under "Unresolvable
+Translators" and its keys are not checked as missing. next-intl keeps messages in `messages/`,
+which is not auto-detected: pass `--locale-dir messages`.
+
 Run from a repo root whose frontend sits one level down (`frontend/`, `web/`), it detects that
 subdirectory and audits it as the project; the report's `Project:` line names it. When several
 subdirectories hold locale files it exits 2 and lists them: pass the one to audit as the project

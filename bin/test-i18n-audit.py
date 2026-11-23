@@ -552,6 +552,241 @@ with tempfile.TemporaryDirectory() as tmp:
     )
 
 
+# --- next-intl: scoped translators resolve relative keys (#348) ---
+#
+# `const t = useTranslations("orders")` makes `t("columns.date")` mean
+# `orders.columns.date`. Matched literally, every such call is a false missing
+# key and every real key under the namespace a false unused one.
+
+NEXT_INTL_MESSAGES = {
+    "common": {"save": "Save", "cancel": "Cancel", "title": "App"},
+    "orders": {
+        "title": "Orders",
+        "columns": {"date": "Date", "total": "Total"},
+        "status": {"open": "Open", "paid": "Paid"},
+        "intro": "Read <b>this</b>",
+        "rawHtml": "<p>raw</p>",
+        "markupText": "<b>m</b>",
+        "optional": "Maybe",
+    },
+    "dashboard": {
+        "orders": {"heading": "Recent orders", "empty": "Nothing yet"},
+    },
+    "settings": {"title": "Settings", "save": "Save settings"},
+    "profile": {"title": "Profile", "deadKey": "Never used"},
+    "nav": {"home": "Home"},
+}
+
+NEXT_INTL_SOURCES = {
+    # Client component: plain call, rich/raw/markup/has, dynamic key.
+    "app/orders/OrdersTable.tsx": (
+        "'use client';\n"
+        "import { useTranslations } from 'next-intl';\n"
+        "export function OrdersTable({ s }: { s: string }) {\n"
+        "  const t = useTranslations(\"orders\");\n"
+        "  return (\n"
+        "    <div>\n"
+        "      <h1>{t(\"title\")}</h1>\n"
+        "      <th>{t(\"columns.date\")}</th><th>{t('columns.total')}</th>\n"
+        "      {t.rich(\"intro\", { b: (c) => <b>{c}</b> })}\n"
+        "      {t.raw(\"rawHtml\")}{t.markup(\"markupText\", {})}\n"
+        "      {t.has(\"optional\") && t(\"optional\")}\n"
+        "      {t.has(\"notThere\") && <span />}\n"
+        "      <span>{t(`status.${s}`)}</span>\n"
+        "      <p>{t(\"missingOne\")}</p>\n"
+        "    </div>\n"
+        "  );\n"
+        "}\n"
+    ),
+    # Server component with a dotted namespace string.
+    "app/dashboard/page.tsx": (
+        "import { getTranslations } from 'next-intl/server';\n"
+        "export default async function Page() {\n"
+        "  const t = await getTranslations(\"dashboard.orders\");\n"
+        "  return <h2>{t(\"heading\")}{t(\"empty\")}</h2>;\n"
+        "}\n"
+    ),
+    # Server component with the object form, spread over several lines.
+    "app/settings/page.tsx": (
+        "import { getTranslations } from 'next-intl/server';\n"
+        "export default async function Page({ params: { locale } }) {\n"
+        "  const t = await getTranslations({\n"
+        "    locale,\n"
+        "    namespace: 'settings',\n"
+        "  });\n"
+        "  return <h2>{t('title')}{t('save')}</h2>;\n"
+        "}\n"
+    ),
+    # Two translators on different namespaces calling the same relative key.
+    "app/Toolbar.tsx": (
+        "import { useTranslations } from 'next-intl';\n"
+        "export function Toolbar() {\n"
+        "  const t = useTranslations('settings');\n"
+        "  const tCommon = useTranslations('common');\n"
+        "  return <>{t('title')}{tCommon('title')}{tCommon('save')}{tCommon(\"cancel\")}</>;\n"
+        "}\n"
+    ),
+    # Two components in one file, each rebinding `t`.
+    "app/Cards.tsx": (
+        "import { useTranslations } from 'next-intl';\n"
+        "export function ProfileCard() {\n"
+        "  const t = useTranslations('profile');\n"
+        "  return <h3>{t('title')}</h3>;\n"
+        "}\n"
+        "export function NavCard() {\n"
+        "  const t = useTranslations('nav');\n"
+        "  return <a>{t('home')}</a>;\n"
+        "}\n"
+    ),
+    # Root translator: keys are full keys.
+    "app/Root.tsx": (
+        "import { useTranslations } from 'next-intl';\n"
+        "export function Root() {\n"
+        "  const t = useTranslations();\n"
+        "  return <p>{t('orders.columns.date')}</p>;\n"
+        "}\n"
+    ),
+    # Namespace that is not a literal: unresolvable, its calls are not missing.
+    "app/Dynamic.tsx": (
+        "import { useTranslations } from 'next-intl';\n"
+        "export function Dynamic({ ns }: { ns: string }) {\n"
+        "  const tx = useTranslations(ns);\n"
+        "  return <p>{tx('whatever')}{tx('some.thing')}</p>;\n"
+        "}\n"
+    ),
+}
+
+
+def run_next_intl(messages: dict, sources: dict, *extra_args):
+    """A next-intl layout: `messages/<locale>.json` next to `src/`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        messages_dir = root / "messages"
+        messages_dir.mkdir()
+        for locale in ("en", "nl"):
+            (messages_dir / f"{locale}.json").write_text(
+                json.dumps(messages), encoding="utf-8"
+            )
+        for name, body in sources.items():
+            path = root / "src" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), str(root), "--locale-dir", "messages", *extra_args],
+            capture_output=True,
+            text=True,
+        )
+
+
+proc = run_next_intl(NEXT_INTL_MESSAGES, NEXT_INTL_SOURCES, "--json")
+report = json.loads(proc.stdout) if proc.stdout else {}
+missing_keys = [entry["key"] for entry in report.get("missing", [])]
+unused_keys = [entry["key"] for entry in report.get("unused", [])]
+undeterminable_keys = [entry["key"] for entry in report.get("undeterminable", [])]
+
+check(
+    "next-intl: only the genuinely missing key is reported missing",
+    missing_keys == ["orders.missingOne"],
+)
+check(
+    "next-intl: only the genuinely unused key is reported unused",
+    unused_keys == ["profile.deadKey"],
+)
+check(
+    "next-intl: t.has() on an absent key is not reported missing",
+    "orders.notThere" not in missing_keys,
+)
+check(
+    "next-intl: the missing key points at its call site",
+    any(
+        loc == {"file": "src/app/orders/OrdersTable.tsx", "line": 14}
+        for entry in report.get("missing", [])
+        for loc in entry["locations"]
+    ),
+)
+check(
+    "next-intl: a dynamic key resolves its prefix against the namespace",
+    undeterminable_keys == ["orders.status.open", "orders.status.paid"]
+    and [d["pattern"] for d in report.get("dynamicKeys", [])] == ["orders.status.${s}"],
+)
+check(
+    "next-intl: one unresolvable binding is counted in the JSON summary",
+    report.get("summary", {}).get("unresolvableBindingCount") == 1
+    and [(b["file"], b["line"]) for b in report.get("unresolvableBindings", [])]
+    == [("src/app/Dynamic.tsx", 3)],
+)
+check(
+    "next-intl: exit code reflects the two real issues",
+    report.get("summary", {}).get("totalIssues") == 2 and proc.returncode == 1,
+)
+
+text = run_next_intl(NEXT_INTL_MESSAGES, NEXT_INTL_SOURCES).stdout
+check(
+    "next-intl: the text report shows the unresolvable translator count",
+    "── Unresolvable Translators (1)" in text
+    and "src/app/Dynamic.tsx:3" in text
+    and "Unresolvable translators: 1" in text,
+)
+
+
+def scan_keys(source: str):
+    return set(scan_snippet(source).key_locations)
+
+
+# Two translators, same relative key: both full keys are used, and the bare
+# relative key is not recorded as if the generic t() pattern had matched it.
+keys = scan_keys(
+    "const t = useTranslations('settings');\n"
+    "const tCommon = useTranslations('common');\n"
+    "t('title.main'); tCommon('title.main');\n"
+)
+check(
+    "next-intl: two translators on different namespaces both resolve",
+    keys == {"settings.title.main", "common.title.main"},
+)
+
+keys = scan_keys(
+    "function A() { const t = useTranslations('a'); return t('x'); }\n"
+    "function B() { const t = useTranslations('b'); return t('x'); }\n"
+)
+check(
+    "next-intl: a rebound name resolves against the nearest binding above",
+    keys == {"a.x", "b.x"},
+)
+
+# Files without a next-intl binding keep the old behaviour, including an
+# i18next `t` that happens to appear before a later next-intl binding.
+keys = scan_keys(
+    "const { t } = useTranslation();\n"
+    "t('legacy.key');\n"
+    "function B() { const t = useTranslations('b'); return t('x'); }\n"
+)
+check(
+    "next-intl: a call above any binding keeps the literal key",
+    keys == {"legacy.key", "b.x"},
+)
+
+check(
+    "next-intl: getTranslations({ locale }) without namespace is the root",
+    scan_keys("const t = await getTranslations({ locale });\nt('orders.title');\n")
+    == {"orders.title"},
+)
+
+result = scan_snippet(
+    "const t = await getTranslations({ locale, namespace });\nt('a.b');\n"
+)
+check(
+    "next-intl: a shorthand namespace property is unresolvable",
+    set(result.key_locations) == set() and len(result.unresolvable_bindings) == 1,
+)
+
+result = scan_snippet("const t = useTranslations('orders');\nt(`${key}`);\n")
+check(
+    "next-intl: a fully dynamic key under a namespace reaches the namespace",
+    audit.dynamic_prefixes(result.dynamic_keys) == {"orders."},
+)
+
+
 # --- summary ---
 
 print()
