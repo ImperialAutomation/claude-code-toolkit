@@ -971,6 +971,118 @@ check(
     not approved and reason is None,
 )
 
+# --- for-loops over gh issue searches: deny with a hint at batch-issue-search.sh ---
+# A duplicate check written as `for q in ...; do gh issue list --search "$q"; done`
+# starts with `for`, so permission matching never sees `gh` and it prompts every
+# time. batch-issue-search.sh runs the same searches as one command (#345).
+# Only that loop shape is denied: other `for` loops have no wrapper to point at.
+
+ISSUE_SEARCH_LOOP = (
+    'for q in "term one" "term two"; do echo "== $q"; '
+    'gh issue list --state all --search "$q" --limit 4 --json number,title,state; done'
+)
+
+check(
+    "for-search: the duplicate-check loop is detected",
+    hook.command_has_for_issue_search_loop(ISSUE_SEARCH_LOOP),
+)
+
+check(
+    "for-search: `gh issue list` right after `do` is detected",
+    hook.command_has_for_issue_search_loop(
+        'for q in a b; do gh issue list --search "$q"; done'
+    ),
+)
+
+check(
+    "for-search: the short -S flag is detected",
+    hook.command_has_for_issue_search_loop('for q in a b; do gh issue list -S "$q"; done'),
+)
+
+check(
+    "for-search: --search=<value> is detected",
+    hook.command_has_for_issue_search_loop(
+        'for q in a b; do gh issue list --search="$q"; done'
+    ),
+)
+
+check(
+    "for-search: a leading command before the loop does not hide it",
+    hook.command_has_for_issue_search_loop(
+        'git status && for q in a b; do gh issue list --search "$q"; done'
+    ),
+)
+
+check(
+    "for-search: a single gh issue list --search is not a loop",
+    not hook.command_has_for_issue_search_loop('gh issue list --search "login bug"'),
+)
+
+check(
+    "for-search: a for loop without gh issue list is NOT matched",
+    not hook.command_has_for_issue_search_loop("for i in 1 2 3; do curl -s x; done"),
+)
+
+check(
+    "for-search: a for loop over gh issue view is NOT matched (other wrapper)",
+    not hook.command_has_for_issue_search_loop(
+        "for n in 1 2; do gh issue view $n; done"
+    ),
+)
+
+check(
+    "for-search: gh issue list without a search is NOT matched",
+    not hook.command_has_for_issue_search_loop(
+        "for l in bug feat; do gh issue list --label $l; done"
+    ),
+)
+
+# The `done` boundary is load-bearing: a search AFTER the loop is not in its body.
+check(
+    "for-search: a search after `done` is not inside the loop body",
+    not hook.command_has_for_issue_search_loop(
+        'for i in 1 2; do echo $i; done; gh issue list --search x'
+    ),
+)
+
+check(
+    "for-search: a while loop is NOT matched",
+    not hook.command_has_for_issue_search_loop(
+        'while read q; do gh issue list --search "$q"; done'
+    ),
+)
+
+check(
+    "for-search: the word 'for' inside a quoted string is not a loop",
+    not hook.command_has_for_issue_search_loop(
+        'echo "for q in x; do gh issue list --search q; done"'
+    ),
+)
+
+check(
+    "for-search: unparseable input returns False instead of raising",
+    not hook.command_has_for_issue_search_loop("for q in 'unterminated"),
+)
+
+approved, reason, rc = run_hook(ISSUE_SEARCH_LOOP)
+check("for-search: hook does not approve the loop", not approved)
+check(
+    "for-search: hook denies naming batch-issue-search.sh",
+    reason is not None and "batch-issue-search.sh" in reason,
+)
+check(
+    "for-search: the hint spells out the argument form",
+    reason is not None and "<query>" in reason and "--state" in reason,
+)
+check("for-search: hook still exits 0", rc == 0)
+
+approved, reason, _ = run_hook('gh issue list --state all --search "login bug" --limit 4')
+check("for-search: a single gh issue list --search stays approved", approved)
+check(
+    "for-search: and gets no batch-issue-search.sh hint",
+    reason is None or "batch-issue-search.sh" not in reason,
+)
+
 # --- until+sleep wait loops: deny with a hint pointing at wait-for-pattern.sh ---
 # `until <cond>; do sleep N; done` is a compound command, so permission matching
 # fails on its second segment and it prompts every single time.

@@ -46,7 +46,7 @@ het alternatief en de voorwaarden noemt. **Volg de hint**, zoek geen omweg
 | `until [ -f F ]; do sleep N; done` | `wait-for-pattern.sh`; `wait-for-healthy.sh <container>` voor containers |
 | `<cmd> > /tmp/out` | `cmd-save.sh <outfile> <cmd>` |
 | `for i in 1 2 3; do <cmd>; done` (metingen) | `repeat-cmd.sh <count> <cmd>` |
-| `for`/`&&`-reeks van `gh`-calls | `batch-issue-status.sh`, `batch-issue-view.sh` |
+| `for`/`&&`-reeks van `gh`-calls | `batch-issue-status.sh`, `batch-issue-view.sh`; zoektermen (duplicaatcheck): `batch-issue-search.sh <query>...` |
 | twee `curl -w "%{http_code}"` op één regel | `http-status.sh <url>...` |
 | inline `python3` tegen de PyPI JSON API (releasedatum, `requires_python`) | `pypi-release-info.sh <pkg> [<version>...]` |
 | `... \| sed 's/\x1b\[[0-9;]*m//g'` | `strip-ansi.sh <file>`, of meteen `cmd-save.sh --strip-ansi` |
