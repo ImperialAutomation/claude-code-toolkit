@@ -139,7 +139,7 @@ DECISIONS: <absolute path of the HUMAN decisions file, or none>
 
 Only an exit 0 of `pre-merge-post.py` is `REVIEW_POSTED`. Every other end is
 "review not posted": a `post_failed` result (exit 3, also with
-`review_posted: true` when a label is missing), an exit 2, an error before
+`review_posted: true` when a label or a thread reply is missing), an exit 2, an error before
 Phase 10, or a sub-agent that ends without one of the two blocks. The loop
 never retries a review as the user.
 

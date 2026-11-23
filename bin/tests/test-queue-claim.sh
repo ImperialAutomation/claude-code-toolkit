@@ -115,6 +115,7 @@ case "$1" in
             edit)
                 p="$1"; shift
                 [[ -d "$P/$p" ]] || { echo "no PR $p" >&2; exit 1; }
+                [[ -e "$STUB/fail-pr-edit-$p" ]] && { echo "gh: HTTP 422" >&2; exit 1; }
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --add-label) grep -qxF -- "$2" "$P/$p/labels" || echo "$2" >> "$P/$p/labels"; shift 2 ;;
@@ -973,14 +974,42 @@ issue 17 2026-01-01 agent-pr needs-human
 pr 42 17 agent-rework needs-human
 touch "$STUB/fail-pr-edit"
 run claim --rework
-check "PR edit fails: exit 1" "1" "$RC"
-check "PR edit fails: nothing on stdout" "" "$OUT"
+check "PR edit fails: exit 0, the claim goes on" "0" "$RC"
+check "PR edit fails: its half-moved issue is not claimed" "" "$OUT"
+check "PR edit fails: stderr warns and names the PR" "yes" "$(contains "$ERR" "skipped the rework handed back on PR #42")"
 check "PR edit fails: PR keeps its labels" "agent-rework needs-human" "$(pr_labels 42)"
 rm -f "$STUB/fail-pr-edit"
 run claim --rework
 check "retry after a failed PR edit: claimed" "17" "$OUT"
 check "retry after a failed PR edit: issue labels moved once" "agent-pr agent-rework agent-wip" "$(labels_of 17)"
 check "retry after a failed PR edit: PR cleared" "" "$(pr_labels 42)"
+
+reset_stub
+issue 17 2026-01-01 agent-pr needs-human
+pr 42 17 agent-rework needs-human
+issue 18 2026-01-02 agent-pr
+pr 43 18 agent-rework
+issue 19 2026-01-03 agent-pr agent-rework
+touch "$STUB/fail-pr-edit-42"
+run claim --rework
+check "one hand-back fails: exit 0" "0" "$RC"
+check "one hand-back fails: the other hand-back is claimed first" "18" "$OUT"
+check "one hand-back fails: the other PR is cleared" "" "$(pr_labels 43)"
+check "one hand-back fails: the failed PR keeps its labels" "agent-rework needs-human" "$(pr_labels 42)"
+run claim --rework
+check "one hand-back fails: an issue-side rework is still claimed" "19" "$OUT"
+check "one hand-back fails: the half-moved issue is never claimed" "no" "$(has 17 agent-wip)"
+rm -f "$STUB/fail-pr-edit-42"
+
+reset_stub
+issue 17 2026-01-01 agent-pr needs-human
+pr 42 17 agent-rework
+touch "$STUB/fail-edit"
+run claim --rework
+check "issue edit fails: exit 0, nothing claimed" "0 " "$RC $OUT"
+check "issue edit fails: stderr names the issue" "yes" "$(contains "$ERR" "move the rework onto #17")"
+check "issue edit fails: PR keeps its label" "agent-rework" "$(pr_labels 42)"
+rm -f "$STUB/fail-edit"
 
 reset_stub
 issue 17 2026-01-01 agent-pr

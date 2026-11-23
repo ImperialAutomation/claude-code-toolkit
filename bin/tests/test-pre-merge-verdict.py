@@ -204,6 +204,16 @@ check("a follow-up next to an in-scope HIGH finding: still BLOCKING on the in-sc
       out.get("verdict") == "BLOCKING" and len(out.get("blocking_reasons", [])) == 1
       and "in scope" in out["blocking_reasons"][0])
 check("no follow-up -> followup_findings is an empty list", run(base())[1].get("followup_findings") == [])
+r, out = run(base(correctness_findings=[dict(finding(shadow="HIGH"), followup="k1"),
+                                        dict(finding(line=8, shadow="MEDIUM"), followup="k2"),
+                                        finding(line=9, shadow="LOW")]))
+check("follow-ups of any severity count as routed, not as downgraded",
+      out.get("correctness", {}).get("followups") == 2
+      and out.get("correctness", {}).get("downgraded") == 1)
+check("the report line names the follow-ups",
+      out.get("correctness", {}).get("line")
+      == "1 of 3 correctness findings downgraded (MEDIUM/LOW: listed, not blocking), "
+         "2 routed to follow-ups (not blocking)")
 for bad in ("", "  ", 3, True):
     r, out = run(base(correctness_findings=[dict(finding(), followup=bad)]))
     check(f"followup {bad!r}: exit 2, no verdict", r.returncode == 2 and out == {})
@@ -216,6 +226,7 @@ check("downgrade count: MEDIUM and LOW are downgraded",
 check("report line wording",
       out.get("correctness", {}).get("line")
       == "2 of 3 correctness findings downgraded (MEDIUM/LOW: listed, not blocking)")
+check("no follow-ups: followups 0", out.get("correctness", {}).get("followups") == 0)
 check("one HIGH among MEDIUM/LOW findings -> BLOCKING", out.get("verdict") == "BLOCKING")
 check("only the HIGH correctness finding is a blocking reason",
       len(out.get("blocking_reasons", [])) == 1

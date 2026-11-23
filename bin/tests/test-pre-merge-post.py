@@ -7,8 +7,9 @@ Run directly: python3 bin/tests/test-pre-merge-post.py
 Hermetic: `gh` is a stub first on PATH and the token script is a stub named
 by PRE_MERGE_TOKEN_SCRIPT, so nothing reaches GitHub and no app credentials
 are read. The gh stub records every call (arguments, GH_TOKEN, the --input
-body) and answers from fixtures; STUB_FAIL=files|review|label makes that call
-fail, STUB_NO_TOKEN makes the token stub fail like a missing app.
+body) and answers from fixtures; STUB_FAIL=files|threads|review|thread|label
+makes that call fail, STUB_FAIL_THREAD=<id> only the reply on that thread,
+STUB_NO_TOKEN makes the token stub fail like a missing app.
 PRE_MERGE_FINDINGS_LOG points at a temp file, which posting must not write.
 
 Covers the verdict-to-review-event mapping (APPROVE, REQUEST_CHANGES,
@@ -77,7 +78,8 @@ if args[:2] == ["api", "graphql"]:
             "pageInfo": {"hasNextPage": False, "endCursor": None},
             "nodes": json.loads((stub / "threads.json").read_text())}}}}}))
     elif "addPullRequestReviewThreadReply" in q:
-        if fail == "thread":
+        thread = (body or {}).get("variables", {}).get("thread")
+        if fail == "thread" or thread == os.environ.get("STUB_FAIL_THREAD"):
             print("gh: Resource not accessible by integration (HTTP 403)", file=sys.stderr); sys.exit(1)
         print(json.dumps({"data": {"addPullRequestReviewThreadReply": {"comment": {
             "url": "https://github.com/owner/repo/pull/42#discussion_r555"}}}}))
@@ -382,6 +384,27 @@ r, out = run(gates(correctness_findings=[dict(finding(line=2), thread="PRRT_open
 check("thread reply error after the review: exit 3, stage thread, review_posted true",
       r.returncode == 3 and out.get("stage") == "thread" and out.get("review_posted") is True
       and "PRRT_open" in out.get("error", "") and "verdict" not in out)
+
+r, out = run(gates(
+    correctness_findings=[dict(finding(line=2, summary="off by one"), thread="PRRT_open")],
+    review_findings=[{"severity": "MEDIUM", "finding": "outdated one", "location": "a.py:9",
+                      "thread": "PRRT_outdated"}]), human=False,
+    env_extra={"STUB_FAIL_THREAD": "PRRT_open"})
+replied = [c["input"]["variables"]["thread"] for c in graphql_calls("addPullRequestReviewThreadReply")]
+check("one failed reply: the other thread is still replied on",
+      r.returncode == 3 and replied == ["PRRT_open", "PRRT_outdated"])
+check("one failed reply: the error names only the failed thread",
+      "PRRT_open" in out.get("error", "") and "PRRT_outdated" not in out.get("error", ""))
+check("one failed reply: thread_replies lists the reply that went out",
+      out.get("thread_replies") == ["https://github.com/owner/repo/pull/42#discussion_r555"])
+
+r, out = run(gates(escalation={"hits": [ESC_HIT], "linked_issues": [{"number": 7, "labels": []}]},
+                   correctness_findings=[dict(finding(line=2), thread="PRRT_open")]),
+             env_extra={"STUB_FAIL": "thread"})
+check("HUMAN with a failed reply: exit 3, stage thread, yet the PR and the issue are labeled",
+      r.returncode == 3 and out.get("stage") == "thread"
+      and sorted(a for c in label_calls() for a in c["args"] if a.endswith("/labels")) == [
+          "repos/owner/repo/issues/42/labels", "repos/owner/repo/issues/7/labels"])
 
 # --- follow-up findings (#379) ----------------------------------------------------
 

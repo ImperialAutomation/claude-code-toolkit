@@ -97,6 +97,16 @@ check 2 "gh pr checkout from a subdirectory"      "$TK/bin" "gh pr checkout 365"
 check 2 "cd <live>, then gh pr checkout"          "$OTHER" "cd $TK && gh pr checkout 365 --detach"
 check 2 "env -C <live> gh pr checkout"            "$OTHER" "env -C $TK gh pr checkout 365"
 check 2 "gh pr checkout in a later segment"       "$TK" "git fetch; gh pr checkout 365"
+# A command-running wrapper runs its inner command in the same tree: judged by
+# that command, any spelling of the wrapper, nested too.
+check 2 "cmd-save.sh <out> gh pr checkout"        "$TK" "~/.claude/bin/cmd-save.sh /tmp/x.txt gh pr checkout 365"
+check 2 "cmd-save.sh --stderr merge -- <out> gh co" "$TK" "cmd-save.sh --stderr merge -- /tmp/x.txt gh co 365"
+check 2 "gh-app-token.sh -- gh pr checkout"       "$TK" "~/.claude/bin/gh-app-token.sh --repo o/r -- gh pr checkout 365"
+check 2 "repeat-cmd.sh 1 git checkout <branch>"   "$TK" "~/.claude/bin/repeat-cmd.sh 1 git checkout feature"
+check 2 "venv-run.sh git switch"                  "$TK" "~/.claude/bin/venv-run.sh git switch feature"
+check 2 "nested wrappers"                         "$TK" "cmd-save.sh /tmp/x.txt gh-app-token.sh --repo o/r -- gh pr checkout 365 --detach"
+check 2 "env -C <live> cmd-save.sh gh pr checkout" "$OTHER" "env -C $TK cmd-save.sh /tmp/x.txt gh pr checkout 365"
+check 2 "wrapper in a later segment"              "$TK" "git fetch && cmd-save.sh /tmp/x.txt git switch feature"
 # git bisect detaches HEAD at every step it takes.
 check 2 "bisect start <bad> <good>"               "$TK" "git bisect start feature main"
 check 2 "bisect start without revisions"          "$TK" "git bisect start"
@@ -150,6 +160,10 @@ check 0 "gh pr checkout in another repository"    "$OTHER" "gh pr checkout 365 -
 check 0 "gh co in another repository"             "$OTHER" "gh co 365"
 check 0 "cd <linked worktree>, then gh pr checkout" "$TK" "cd $WT && gh pr checkout 365"
 check 0 "env -C <linked worktree> gh pr checkout" "$TK" "env -C $WT gh pr checkout 365"
+check 0 "cmd-save.sh gh pr checkout in a linked worktree" "$WT" "cmd-save.sh /tmp/x.txt gh pr checkout 365"
+check 0 "cmd-save.sh git checkout main"           "$TK" "cmd-save.sh /tmp/x.txt git checkout main"
+check 0 "cmd-save.sh of a read-only gh call"      "$TK" "cmd-save.sh /tmp/checkout.json gh pr view 365"
+check 0 "a wrapper whose outfile is named checkout" "$TK" "cmd-save.sh checkout gh pr view 365"
 check 0 "bisect in a linked worktree"             "$WT" "git bisect start feature main"
 check 0 "bisect in another repository"           "$OTHER" "git bisect start"
 

@@ -70,7 +70,10 @@
 #           adds `agent-rework` there, then drops `needs-human` and
 #           `agent-rework` from the PR, and names the PR (and the reply) on
 #           stderr, with a warning when the reply is not in the card's answer
-#           format. The human never edits issue labels for a rework.
+#           format. The human never edits issue labels for a rework. A label
+#           edit that fails skips that PR with a warning (its issues are not
+#           claimed in this call; the next one retries the move) and does not
+#           stop the claim.
 # release   Ends a claim; every outcome drops `agent-wip`:
 #   pr <url>               comments with the PR link and swaps `agent-ready`
 #                          for `agent-pr`, so no later claim opens a second
@@ -373,8 +376,12 @@ triage() {
 # PR (drop needs-human and agent-rework). Every step is idempotent: a retry
 # after a failure in between finds the same PR again (its label, or the
 # reply while needs-human is still on the PR) and finishes the move.
+# A failed edit skips only that PR: it is reported, its issues land in
+# handback_skip so this claim does not take a half-moved rework, and the
+# other PRs and the claim go on.
+handback_skip=()
 promote_handbacks() {
-    local name rows parsed pr trigger issues url problem i
+    local name rows parsed pr trigger issues url problem i failed
     name=$(gh repo view --json nameWithOwner --jq .nameWithOwner) \
         || gh_fail "read the repository name"
     rows=$("$CARD_SCRIPT" handback --repo "$name") \
@@ -384,12 +391,22 @@ promote_handbacks() {
         || gh_fail "read the PRs handed back for a rework (not a JSON list): $rows"
     while IFS=$'\t' read -r pr trigger issues url problem; do
         [[ -n "$pr" ]] || continue
+        failed=""
         for i in $issues; do
             gh issue edit "$i" --remove-label "$HUMAN_LABEL" --add-label "$REWORK_LABEL" >/dev/null \
-                || gh_fail "move the rework of PR #$pr onto #$i"
+                || { failed="move the rework onto #$i"; break; }
         done
-        gh pr edit "$pr" --remove-label "$HUMAN_LABEL" --remove-label "$REWORK_LABEL" >/dev/null \
-            || gh_fail "drop '$HUMAN_LABEL' and '$REWORK_LABEL' from PR #$pr"
+        if [[ -z "$failed" ]]; then
+            gh pr edit "$pr" --remove-label "$HUMAN_LABEL" --remove-label "$REWORK_LABEL" >/dev/null \
+                || failed="drop '$HUMAN_LABEL' and '$REWORK_LABEL' from the PR"
+        fi
+        if [[ -n "$failed" ]]; then
+            echo "warning: skipped the rework handed back on PR #$pr: gh could not $failed; the next claim --rework retries it" >&2
+            # Word splitting is the point: one array element per issue.
+            # shellcheck disable=SC2206
+            handback_skip+=($issues)
+            continue
+        fi
         if [[ "$trigger" == reply ]]; then
             echo "rework handed back on PR #$pr by the reply $url; moved to #${issues// /, #}" >&2
             [[ -z "$problem" ]] \
@@ -432,6 +449,8 @@ do_claim() {
 
     # The +-guard keeps an empty list safe under set -u on bash < 4.4.
     for n in ${candidates[@]+"${candidates[@]}"}; do
+        # A rework whose hand-back failed half-way waits for the retry.
+        [[ " ${handback_skip[*]+${handback_skip[*]}} " == *" $n "* ]] && continue
         # The list may be stale: someone may have claimed it since.
         before=$(labels_of "$n") || gh_fail "read the labels of #$n"
         claimable "$before" || continue

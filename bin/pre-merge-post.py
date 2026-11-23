@@ -33,13 +33,16 @@ What one run does:
      starts with the `<!-- queue-runner -->` marker), and the review body
      lists it with the thread id. A thread that is no longer open is ignored:
      the finding is posted as one without a thread. The open threads are read
-     only when a finding names one.
+     only when a finding names one. A failed reply does not stop the replies
+     to the other threads.
      A finding with "followup" (#379, out of the PR's scope) gets neither an
      inline comment nor a thread reply: the body lists it under "Out of
      scope: follow-up issues", and pr-followup.py files the issue and
      answers its thread.
   4. HUMAN only: add the label needs-human to the PR and to every linked issue
-     (escalation.linked_issues of the gates file), after the review is in.
+     (escalation.linked_issues of the gates file), after the review is in and
+     before the thread replies of step 3, so a failed reply cannot leave a
+     HUMAN review unlabeled.
 
 Result, one JSON object on stdout (exit 0 and 3):
 
@@ -51,12 +54,14 @@ Result, one JSON object on stdout (exit 0 and 3):
   post_failed: {"status": "post_failed",
                 "stage": "files|threads|review|thread|label",
                 "error": "...", "review_posted": false|true,
-                "review_url": "..." (only when review_posted)}
+                "review_url": "...", "thread_replies": ["<reply url>", ...]
+                (both only when review_posted)}
 
 A post failure is never a verdict: post_failed carries no "verdict" or
 "event", so a caller cannot mistake it for one. review_posted true means the
 review is on the PR but a thread reply (stage thread) or a label (stage
-label) is missing. A missing app or
+label) is missing; thread_replies lists the replies that did go out, and
+"error" names every thread whose reply failed. A missing app or
 token surfaces as a failure of the first call (stage files), with the token
 script's message in "error".
 
@@ -122,9 +127,10 @@ T = _load_module("pr_review_threads", THREADS_SCRIPT)
 
 
 class PostFailed(Exception):
-    def __init__(self, stage, error, review=None):
+    def __init__(self, stage, error, review=None, thread_replies=None):
         super().__init__(error)
         self.stage, self.error, self.review = stage, error, review
+        self.thread_replies = thread_replies or []
 
 
 # --- input ----------------------------------------------------------------------
@@ -347,13 +353,8 @@ def post(repo, pr, issues, result, report, decisions, gates):
     except ValueError:
         review = {}
 
-    reply_urls = []
-    for thread, text in replies:
-        try:
-            reply_urls.append(T.reply(run_thread, thread, text)["reply_url"])
-        except (T.ThreadsFailed, PostFailed) as exc:
-            raise PostFailed(STAGE_THREAD, f"thread {thread}: {exc.error}", review=review)
-
+    # The labels before the replies: a human acts on needs-human, while a
+    # missing reply only repeats what the review already says.
     labeled = []
     if result["verdict"] == V.HUMAN:
         for number in dict.fromkeys([pr, *issues]):
@@ -364,6 +365,18 @@ def post(repo, pr, issues, result, report, decisions, gates):
                 exc.review = review
                 raise
             labeled.append(number)
+
+    # One failed reply does not stop the others; the failure names every
+    # failed thread and the replies already posted.
+    reply_urls, reply_errors = [], []
+    for thread, text in replies:
+        try:
+            reply_urls.append(T.reply(run_thread, thread, text)["reply_url"])
+        except (T.ThreadsFailed, PostFailed) as exc:
+            reply_errors.append(f"thread {thread}: {exc.error}")
+    if reply_errors:
+        raise PostFailed(STAGE_THREAD, " | ".join(reply_errors), review=review,
+                         thread_replies=reply_urls)
 
     return {"status": STATUS_POSTED, "verdict": result["verdict"], "event": event,
             "review_id": review.get("id"), "review_url": review.get("html_url", ""),
@@ -417,6 +430,7 @@ def main(argv=None):
                "review_posted": exc.review is not None}
         if exc.review is not None:
             out["review_url"] = exc.review.get("html_url", "")
+            out["thread_replies"] = exc.thread_replies
         print(json.dumps(out, indent=2))
         return EXIT_POST_FAILED
     print(json.dumps(out, indent=2))

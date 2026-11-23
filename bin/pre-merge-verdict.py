@@ -57,7 +57,10 @@ label needs-human.
 
 The shadow severity of a /code-review finding decides whether it blocks (#374):
 HIGH blocks, MEDIUM and LOW are downgraded to listed findings. Every finding
-is logged with it, so the log shows what the downgrade let through.
+is logged with it, so the log shows what the downgrade let through. A finding
+with "followup" (#379) never blocks and is counted as routed (K), not as
+downgraded (N); the part in brackets of the line appears only when K > 0, and
+M - N - K correctness findings block.
 
 Output:
 
@@ -69,8 +72,8 @@ Output:
     "listed_findings": ["..."],          # /code-review MEDIUM/LOW, /review MEDIUM/LOW/INFO
     "followup_findings": ["..."],        # any finding with "followup", never blocking
     "approved_escalations": ["..."],
-    "correctness": {"total": M, "downgraded": N,
-                    "line": "N of M correctness findings downgraded (MEDIUM/LOW: listed, not blocking)"},
+    "correctness": {"total": M, "downgraded": N, "followups": K,
+                    "line": "N of M correctness findings downgraded (MEDIUM/LOW: listed, not blocking)[, K routed to follow-ups (not blocking)]"},
     "log": {"path": "...", "rows": M, "written": true}
   }
 
@@ -270,7 +273,15 @@ def evaluate(data):
         blocking.append(f"tests: {failed} failed")
 
     verdict = HUMAN if human else BLOCKING if blocking else APPROVE
-    downgraded = sum(f["shadow_severity"] not in CORRECTNESS_BLOCKING for f in correctness)
+    # Disjoint counts: a follow-up of any severity counts as routed, not as
+    # downgraded, so a HIGH one that no longer blocks still shows up.
+    routed = sum(is_followup(f) for f in correctness)
+    downgraded = sum(f["shadow_severity"] not in CORRECTNESS_BLOCKING and not is_followup(f)
+                     for f in correctness)
+    line = (f"{downgraded} of {len(correctness)} correctness findings downgraded "
+            "(MEDIUM/LOW: listed, not blocking)")
+    if routed:
+        line += f", {routed} routed to follow-ups (not blocking)"
     return {
         "verdict": verdict,
         "review_event": REVIEW_EVENTS[verdict],
@@ -282,8 +293,8 @@ def evaluate(data):
         "correctness": {
             "total": len(correctness),
             "downgraded": downgraded,
-            "line": (f"{downgraded} of {len(correctness)} correctness findings downgraded "
-                     "(MEDIUM/LOW: listed, not blocking)"),
+            "followups": routed,
+            "line": line,
         },
     }
 
