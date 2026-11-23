@@ -34,6 +34,10 @@ What one run does:
      lists it with the thread id. A thread that is no longer open is ignored:
      the finding is posted as one without a thread. The open threads are read
      only when a finding names one.
+     A finding with "followup" (#379, out of the PR's scope) gets neither an
+     inline comment nor a thread reply: the body lists it under "Out of
+     scope: follow-up issues", and pr-followup.py files the issue and
+     answers its thread.
   4. HUMAN only: add the label needs-human to the PR and to every linked issue
      (escalation.linked_issues of the gates file), after the review is in.
 
@@ -42,7 +46,7 @@ Result, one JSON object on stdout (exit 0 and 3):
   posted:      {"status": "posted", "verdict": "APPROVE|BLOCKING|HUMAN",
                 "event": "APPROVE|REQUEST_CHANGES|COMMENT", "review_id": 1,
                 "review_url": "...", "inline_comments": N, "body_findings": N,
-                "thread_replies": ["<reply url>", ...],
+                "followups": N, "thread_replies": ["<reply url>", ...],
                 "labeled": [<PR>, <issue>, ...]}
   post_failed: {"status": "post_failed",
                 "stage": "files|threads|review|thread|label",
@@ -90,6 +94,7 @@ STAGE_THREAD = "thread"
 # A finding may name the open review thread that already raises it (#378).
 THREAD_KEY = "thread"
 REREVIEW_PREFIX = "Still applies at this re-review:"
+FOLLOWUP_HEADING = "Out of scope: follow-up issues (not blocking, see the PR's Follow-ups)"
 
 EXIT_POSTED = 0
 EXIT_INVALID = 2
@@ -184,8 +189,8 @@ def validate_threads(gates):
 
 
 def collect_findings(gates):
-    """Every finding with a file or a thread:
-    (path, line or None, inline text, list text, thread id or None)."""
+    """Every finding with a file, a thread or a follow-up key:
+    (path, line or None, inline text, list text, thread id or None, follow-up key or None)."""
     found = []
     for f in gates.get("correctness_findings", []):
         line = _line(f.get("line"))
@@ -194,16 +199,16 @@ def collect_findings(gates):
         if f.get("failure_scenario"):
             text += f"\n\nFailure scenario: {f['failure_scenario']}"
         found.append((f["file"], line, text, f"correctness: {f.get('summary', '')}",
-                      f.get(THREAD_KEY)))
+                      f.get(THREAD_KEY), f.get(V.FOLLOWUP_KEY)))
     for f in gates.get("review_findings", []):
         match = LOCATION.match(str(f.get("location") or ""))
-        if match or f.get(THREAD_KEY):
+        if match or f.get(THREAD_KEY) or f.get(V.FOLLOWUP_KEY):
             path, line = (match["path"], int(match["line"])) if match else (
                 str(f.get("location") or "-"), None)
             found.append((path, line,
                           f"**/review {f['severity']}**: {f.get('finding', '')}",
                           f"/review {f['severity']}: {f.get('finding', '')}",
-                          f.get(THREAD_KEY)))
+                          f.get(THREAD_KEY), f.get(V.FOLLOWUP_KEY)))
     return found
 
 
@@ -253,7 +258,7 @@ def human_section(decisions, reasons):
     return "\n".join(parts)
 
 
-def build_body(result, report, decisions, off_diff, on_thread=()):
+def build_body(result, report, decisions, off_diff, on_thread=(), followups=()):
     verdict, event = result["verdict"], V.REVIEW_EVENTS[result["verdict"]]
     head = [f"**/pre-merge verdict: {verdict}** (review event `{event}`)", ""]
     if verdict == V.HUMAN:
@@ -266,7 +271,9 @@ def build_body(result, report, decisions, off_diff, on_thread=()):
     if on_thread:
         tail += ["", "### Findings on an open review thread (replied there, no new thread)",
                  bullet_list(on_thread)]
-    fixed = "\n".join(head) + "\n---\n\n"
+    if followups:
+        tail += ["", f"### {FOLLOWUP_HEADING}", bullet_list(followups)]
+    fixed ="\n".join(head) + "\n---\n\n"
     tail_text = "\n".join(tail)
     room = MAX_BODY - len(fixed) - len(tail_text)
     note = "\n\n(report truncated: GitHub limits the review body)"
@@ -307,16 +314,20 @@ def post(repo, pr, issues, result, report, decisions, gates):
     findings = collect_findings(gates)
     run_thread = thread_runner(repo)
     open_ids = set()
-    if any(thread for *_, thread in findings):
+    if any(thread and not followup for *_, thread, followup in findings):
         try:
             open_ids = {t["id"] for t in T.list_open_threads(run_thread, repo, pr)}
         except T.ThreadsFailed as exc:
             raise PostFailed(STAGE_THREADS, exc.error)
 
-    comments, off_diff, on_thread, replies = [], [], [], []
-    for path, line, inline, listed, thread in findings:
+    comments, off_diff, on_thread, replies, followups = [], [], [], [], []
+    for path, line, inline, listed, thread, followup in findings:
         where = f"`{path}{f':{line}' if line else ''}` {listed}"
-        if thread in open_ids:
+        if followup:
+            # Out of the PR's scope (#379): pr-followup.py files the issue and
+            # answers the thread; the review neither comments nor replies.
+            followups.append(f"{where} (follow-up `{followup}`)")
+        elif thread in open_ids:
             # An open thread already raises it: reply there, open no new thread.
             on_thread.append(f"{where} (thread `{thread}`)")
             replies.append((thread, f"{REREVIEW_PREFIX}\n\n{inline}"))
@@ -326,7 +337,8 @@ def post(repo, pr, issues, result, report, decisions, gates):
             off_diff.append(where)
 
     event = V.REVIEW_EVENTS[result["verdict"]]
-    request = {"event": event, "body": build_body(result, report, decisions, off_diff, on_thread),
+    request = {"event": event, "body": build_body(result, report, decisions, off_diff, on_thread,
+                                                  followups),
                "comments": comments}
     answer = gh_api(repo, STAGE_REVIEW, "-X", "POST", f"repos/{repo}/pulls/{pr}/reviews",
                     payload=request)
@@ -356,7 +368,7 @@ def post(repo, pr, issues, result, report, decisions, gates):
     return {"status": STATUS_POSTED, "verdict": result["verdict"], "event": event,
             "review_id": review.get("id"), "review_url": review.get("html_url", ""),
             "inline_comments": len(comments), "body_findings": len(off_diff),
-            "thread_replies": reply_urls, "labeled": labeled}
+            "followups": len(followups), "thread_replies": reply_urls, "labeled": labeled}
 
 
 def thread_runner(repo):

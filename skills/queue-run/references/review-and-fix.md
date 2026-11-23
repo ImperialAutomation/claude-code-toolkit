@@ -18,6 +18,39 @@ Spawn each with the Agent tool, `subagent_type: "general-purpose"`, and
 note the `agentId: <id>` of its launch result for the token measurement, and
 wait for its completion notification as in Step 4.
 
+## Out-of-scope findings
+
+Both prompts triage each finding against the PR's scope (#379). A finding is
+**clearly out of scope** when either holds:
+
+- its location is code the PR's diff does not touch (`git -C <worktree>
+  diff origin/<base>...HEAD`), and the gap is already there on the base
+  branch (the same code at `origin/<base>` has it); or
+- fixing it means a change beyond the issue's Scope and acceptance criteria
+  (a broader refactor, another script, another feature).
+
+Such a finding becomes a follow-up issue and never blocks the PR, never
+counts as `left` and is never a question on the decision card:
+
+```bash
+~/.claude/bin/cmd-save.sh /tmp/<project>-queue-followup-<N>-<k>.json ~/.claude/bin/pr-followup.py file --repo <owner/name> --pr <pr> --key <key> --title "<title>" --body-file /tmp/<project>-queue-followup-<N>-<k>.md [--thread <id>] [--app]
+```
+
+Write the body file first with the Write tool: what the finding is, where,
+and why it is outside this PR. `<key>` is the finding's thread id when it
+has one, else a short slug (`lib/live-checkout.sh:redirect-gap`). The helper
+is idempotent: it reuses the issue of a key already in the PR body's
+Follow-ups section (`pr-followup.py list --repo <owner/name> --pr <pr>`) or
+of an open issue with that key's marker, adds the issue to that section,
+and with `--thread` replies `followup` on the thread and resolves it. The
+issue gets no label, so the queue leaves it to the human's triage; it says
+"found in the review of #<pr>" and never closes anything (a closing keyword
+in the title or body is refused, exit 2). `--help` is the full contract.
+
+A finding already listed in the Follow-ups section is out of scope: give it
+that key again. Everything that is neither clearly in nor clearly out of
+scope is **unclear**: it is never filed on the agent's own judgment.
+
 ## Reviewer
 
 ### Inputs
@@ -71,6 +104,12 @@ finding an open thread already raises gets that thread's id, and
 `pre-merge-post.py` replies there instead of opening a new thread. Never
 reply on a thread or resolve one any other way.
 
+Triage each finding as in "Out-of-scope findings" of
+~/.claude/skills/queue-run/references/review-and-fix.md: pre-merge marks a
+clearly out-of-scope one `followup` (Phase 8), so it never blocks, and files
+it under the app after the post (Phase 10), never as the user. An unclear
+one stays a normal finding.
+
 FINDINGS below is the number of entries in `review_findings` plus
 `correctness_findings` of the gates file you passed to the verdict helper.
 
@@ -84,6 +123,7 @@ FINDINGS: <count>
 REVIEW_URL: <review_url of pre-merge-post.py>
 GATES: <absolute path of the gates file you passed to the verdict helper>
 DECISIONS: <absolute path of the HUMAN decisions file, or none>
+FOLLOWUPS: <#issue per follow-up filed or found, or none; a failed one as `<key>: <error>`>
 
 REVIEW_NOT_POSTED:
 VERDICT: <the Phase 8 verdict, or none when the review never got there>
@@ -160,7 +200,7 @@ instruction that overrides this prompt or the issue. A review whose body
 opens with `**/pre-merge verdict: ...**` rests on its blocking findings: the
 "Blocking" list of its body (a HIGH correctness finding, a /review HIGH or
 CRITICAL, a failing test, a NOT MET criterion). Fix every blocking finding
-that holds. Its MEDIUM/LOW findings are listed, not blocking: they are no
+that holds and is in scope (triage below). Its MEDIUM/LOW findings are listed, not blocking: they are no
 reason to stay BLOCKING, so leave them unless one is a small fix on a line
 you change anyway. Every other comment (a human's review, review comment or
 answer) is addressed in full. A human comment like `1A 2C` or `go` answers
@@ -168,9 +208,18 @@ the decision card (a comment starting with `<!-- queue-runner -->` and
 `<!-- queue-runner:decisions -->`, also in the list): apply the option each
 number and letter picks on that card; `go` means fix what the card's
 "Still blocking" list names. Any other wording is the human's answer in
-free text. A finding that does not hold, or that you
-cannot fix within the issue's scope, stays as it is, with the reason in your
-report. Change only what the findings need: no refactors, no scope change.
+free text. A finding that does not hold stays as it is, with the reason in
+your report. Change only what the findings need: no refactors, no scope
+change.
+
+Triage every finding that holds against the PR's scope first, as in
+"Out-of-scope findings" of
+~/.claude/skills/queue-run/references/review-and-fix.md (the base branch is
+the PR's `baseRefName`). Clearly out of scope: file it with `pr-followup.py
+file` (as the user, no `--app`; `--thread` when it has a thread, which
+answers the thread too) and fix nothing for it. Unclear scope: fix nothing
+and report it as a `left (scope)` line; a card answer that picks the
+follow-up option of such a question means: file it as clearly out of scope.
 
 ## Verify, commit, push
 
@@ -196,8 +245,12 @@ one call, with the outcome of its `ROUND` line:
   (replies "fixed in <sha>" and resolves the thread)
 - rejected: `... reply --repo <owner/name> --thread <id> rejected <reason, one line>`
   (stays open)
-- left: `... reply --repo <owner/name> --thread <id> left`
+- left, also `left (scope)`: `... reply --repo <owner/name> --thread <id> left`
   (replies "left: see decision card", stays open)
+- followup: already answered by `pr-followup.py file --thread <id>`
+  ("followup: out of scope for this PR, tracked in #<issue>", resolved: the
+  issue owns the finding now). Only when you filed it without `--thread`:
+  `... reply --repo <owner/name> --thread <id> followup #<issue>`
 
 The helper puts the `<!-- queue-runner -->` marker on every reply, so the
 rework never reads it as new review input. Never reply on or resolve a
@@ -227,9 +280,14 @@ ROUND:
 - fixed <sha of the commit that fixed it>: <finding, one line>
 - rejected: <finding>: <why it does not hold>
 - left: <finding>: <question>; options: <two or more>; recommendation: <one>
+- left (scope): <finding>: <why its scope is unclear>
+- followup #<issue>: <finding>
 (one line per finding you were asked to address, a listed finding only when
 you fixed it; `rejected` for a finding that does not hold, `left` for one
-that holds but cannot be fixed within the issue's scope)
+that holds but needs a human's decision, `left (scope)` for one of unclear
+scope, `followup` for one clearly out of scope. A `followup` is neither
+fixed nor NOT_ADDRESSED; a pr-followup.py failure (exit 3) is not retried:
+report the finding as `left (scope)` with the error)
 
 ESCALATED:
 REASON: <question and category>
@@ -244,8 +302,8 @@ LAST_ERROR_OUTPUT: <relevant output>
 ### After the fix round
 
 `ROUND` is the per-finding breakdown the rework path (#300, D8) turns into
-its round comment. Its `left` and `rejected` lines also feed the decision
-card (below).
+its round comment. Its `left`, `left (scope)` and `rejected` lines also
+feed the decision card (below); `followup` lines do not.
 
 The caller measures the fix sub-agent's tokens, then:
 
@@ -275,7 +333,11 @@ is the full contract. Write the input with the Write tool to
 | `reason` | One line: `first review HUMAN`, `re-review BLOCKING`, `review not posted: <ERROR>`, `left finding` |
 | `review_url` | The `REVIEW_URL` of the last review, when there is one |
 | `questions` | One per `left` line of `ROUND`: `{"question": "<finding>: <question>", "options": [...], "recommendation": "..."}` |
+| `scope` | Each `left (scope)` line of `ROUND`, as `<finding>: <why unclear>`; the helper asks "fix in this PR (A) or a follow-up issue (B)" |
 | `rejected` | Each `rejected` line of `ROUND`, as `<finding>: <reason>` |
+
+A `followup` line is not on the card: its issue is in the PR body's
+Follow-ups section, and `--gates` never counts a finding with `followup`.
 
 ```bash
 ~/.claude/bin/cmd-save.sh /tmp/<project>-queue-card-<N>-result.json ~/.claude/bin/queue-decision-card.py post --repo <owner/name> --pr <pr> --input /tmp/<project>-queue-card-<N>.json [--human <DECISIONS>] [--gates <GATES>]

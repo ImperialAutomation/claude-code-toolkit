@@ -19,8 +19,14 @@ Input (--input, one JSON object; an unknown key is an error):
     "questions": [{"question": "...",         # optional: HUMAN decisions, left findings
                    "options": ["A: ...", "B: ..."], "recommendation": "A: ..."}],
     "blocking": ["..."],                      # optional: blocking reasons of the last review
-    "rejected": ["<finding>: <reason>"]       # optional: findings the fix round rejected
+    "rejected": ["<finding>: <reason>"],      # optional: findings the fix round rejected
+    "scope": ["<finding>: <why unclear>"]     # optional: findings of unclear scope (#379)
   }
+
+  "scope" holds findings the fix round could not place in or outside the
+  PR's scope; each becomes a question with fixed options (A: fix it in this
+  PR, recommended; B: a follow-up issue, out of this PR). A finding clearly
+  out of scope is a follow-up issue (pr-followup.py) and never on the card.
 
   --human  a /pre-merge HUMAN decisions file (the same question objects as a
            JSON list); its questions come after those of --input
@@ -29,7 +35,8 @@ Input (--input, one JSON object; an unknown key is an error):
            to "blocking"
 
 Questions, in this order:
-  1. the explicit questions (--input, then --human);
+  1. the explicit questions (--input "questions", then one per "scope"
+     finding, then --human);
   2. none, but blocking reasons and rejected findings: one derived question,
      the review against the fix round (A: rework round, B: merge as is;
      recommended A);
@@ -131,7 +138,7 @@ DATA_VERSION = 1
 
 ANSWER_CHOICES = "choices"
 ANSWER_GO = "go"
-INPUT_KEYS = ("reason", "review_url", "questions", "blocking", "rejected")
+INPUT_KEYS = ("reason", "review_url", "questions", "blocking", "rejected", "scope")
 
 PR_LABEL = "agent-pr"
 REWORK_LABEL = "agent-rework"
@@ -170,6 +177,16 @@ DERIVED_OPTIONS = ["The review: a rework round fixes the blocking findings",
                    "The fix round: the findings do not hold; the PR can be merged as it is"]
 DERIVED_RECOMMENDATION = "A: the review is the independent check"
 GO_TEXT = "no decision needed; reply `go` to start a rework round"
+# A finding of unclear scope (#379): in this PR, or a follow-up issue.
+SCOPE_QUESTION = "Is this finding in the scope of this PR? {finding}"
+SCOPE_OPTIONS = ["Fix it in this PR: a rework round addresses it",
+                 "Out of scope: the next round files a follow-up issue and leaves it out of this PR"]
+SCOPE_RECOMMENDATION = "A: the review raised it on this PR, and its scope is not clearly elsewhere"
+
+
+def scope_question(finding):
+    return {"question": SCOPE_QUESTION.format(finding=finding), "options": SCOPE_OPTIONS,
+            "recommendation": SCOPE_RECOMMENDATION}
 
 
 def _load_module(name, path):
@@ -216,6 +233,7 @@ def load_input(path, human_path=None, gates_path=None):
     questions = data.get("questions", [])
     if questions:
         P.validate_human(questions)
+    questions = [*questions, *(scope_question(f) for f in _strings(data, "scope"))]
     if human_path:
         human = P.load_json(human_path, "--human file")
         P.validate_human(human)

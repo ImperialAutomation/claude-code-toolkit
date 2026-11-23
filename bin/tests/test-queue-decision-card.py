@@ -272,6 +272,34 @@ check("--human: the pre-merge decisions file adds its questions after the input'
       r.returncode == 0 and data and len(data["questions"]) == 2
       and "### 1. Split the helper?" in r.stdout and "### 2. Change the public flag name?" in r.stdout)
 
+# --- scope: follow-up findings stay off the card, unclear scope is a question (#379) ----
+
+print("--- scope ---")
+gates = {"repo": REPO, "pr": 42, "tests": {"passed": 3, "failed": 0},
+         "correctness_findings": [{"file": "lib/live-checkout.sh", "line": 9, "summary": "redirect gap",
+                                   "shadow_severity": "HIGH", "followup": "lib/live-checkout.sh:redirect"}]}
+r, _ = run("render", "--input", write_json("followup.json", {"reason": "re-review BLOCKING"}),
+           "--gates", write_json("gates-followup.json", gates))
+check("a follow-up finding is neither blocking nor a question on the card",
+      r.returncode == 0 and "redirect gap" not in r.stdout and "### 1." not in r.stdout
+      and data_block(r.stdout) == {"version": 1, "answer": "go", "questions": []})
+
+r, _ = run("render", "--input", write_json("scope.json", {
+    "reason": "left finding",
+    "questions": [{"question": "Split the helper?", "options": ["A: yes", "B: no"], "recommendation": "B"}],
+    "scope": ["bin/x.sh:3 hint edge case: the hint predates this PR but this PR edits its caller"]}))
+body = r.stdout
+data = data_block(body)
+check("scope: an unclear-scope finding becomes a numbered question after the explicit ones",
+      r.returncode == 0 and data and len(data["questions"]) == 2
+      and "### 2. Is this finding in the scope of this PR? bin/x.sh:3 hint edge case" in body)
+check("scope: its options are fix in this PR (A, recommended) or a follow-up issue (B)",
+      "- **A**: Fix it in this PR: a rework round addresses it (recommended)" in body
+      and "- **B**: Out of scope: the next round files a follow-up issue" in body
+      and data["questions"][1] == {"n": 2, "options": ["A", "B"], "recommendation": "A"})
+r, _ = run("render", "--input", write_json("scope-bad.json", {"reason": "x", "scope": [""]}))
+check("scope: an empty finding is invalid input (exit 2)", r.returncode == 2)
+
 # --- post: create, update, never a second card -----------------------------------------
 
 print("--- post ---")

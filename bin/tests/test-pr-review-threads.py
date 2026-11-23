@@ -225,6 +225,24 @@ check("left: exit 0, reply 'left: see decision card' with the marker",
       r.returncode == 0 and body == f"{MARKER}\nleft: see decision card")
 check("left: the thread stays open (no resolve)", of_kind("resolve") == [])
 
+# --- reply: followup (#379) -----------------------------------------------------------
+
+print("--- reply followup ---")
+r, out = run(*REPLY, "followup", "#123")
+replies, resolves = of_kind("reply"), of_kind("resolve")
+body = replies[0]["input"]["variables"]["body"] if replies else ""
+check("followup: exit 0, reply with the marker and the follow-up issue",
+      r.returncode == 0 and body == f"{MARKER}\nfollowup: out of scope for this PR, tracked in #123")
+check("followup: the thread is resolved after the reply (the issue owns the finding now)",
+      len(resolves) == 1 and resolves[0]["input"]["variables"]["thread"] == "PRRT_open"
+      and calls().index(replies[0]) < calls().index(resolves[0]))
+check("followup: the result says resolved", out and out.get("resolved") is True
+      and out.get("outcome") == "followup")
+r, out = run(*REPLY, "followup", "https://github.com/owner/repo/issues/123")
+check("followup: an issue URL is accepted too",
+      r.returncode == 0 and of_kind("reply")
+      and of_kind("reply")[0]["input"]["variables"]["body"].endswith("tracked in https://github.com/owner/repo/issues/123"))
+
 # --- --app ----------------------------------------------------------------------------
 
 print("--- --app ---")
@@ -243,6 +261,9 @@ for name, args in [("fixed without sha", [*REPLY, "fixed"]),
                    ("rejected without reason", [*REPLY, "rejected"]),
                    ("left with text", [*REPLY, "left", "why"]),
                    ("unknown outcome", [*REPLY, "resolved"]),
+                   ("followup without issue", [*REPLY, "followup"]),
+                   ("followup with a bare number", [*REPLY, "followup", "123"]),
+                   ("followup with a PR url", [*REPLY, "followup", "https://github.com/owner/repo/pull/5"]),
                    ("empty thread", ["reply", "--repo", "owner/repo", "--thread", " ", "left"]),
                    ("bad --repo", ["list", "--repo", "repo", "--pr", "42"]),
                    ("bad --pr", ["list", "--repo", "owner/repo", "--pr", "0"]),

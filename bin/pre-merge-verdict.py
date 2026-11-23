@@ -31,6 +31,12 @@ unknown top-level key is an error, so a typo cannot drop a gate):
                               "shadow_severity": "HIGH|MEDIUM|LOW"}]
   }
 
+  Either kind of finding may carry "followup": "<key>" (#379): the reviewer
+  judged it clearly outside the PR's scope, and it becomes a follow-up issue
+  (pr-followup.py, the key is its --key). Such a finding never blocks,
+  whatever its severity: it goes to "followup_findings", not to
+  "blocking_reasons" or "listed_findings".
+
 escalation.hits are the lines of escalation-check.sh (categories 1 to 4,
 keys permissions, leakage, interface, global) plus category 5 as "scope". A
 hit is approved, and does not escalate, when there is at least one linked
@@ -61,6 +67,7 @@ Output:
     "human_reasons": ["..."],
     "blocking_reasons": ["..."],
     "listed_findings": ["..."],          # /code-review MEDIUM/LOW, /review MEDIUM/LOW/INFO
+    "followup_findings": ["..."],        # any finding with "followup", never blocking
     "approved_escalations": ["..."],
     "correctness": {"total": M, "downgraded": N,
                     "line": "N of M correctness findings downgraded (MEDIUM/LOW: listed, not blocking)"},
@@ -122,6 +129,9 @@ SCOPE_CATEGORY = "scope"
 TOP_LEVEL_KEYS = ("repo", "pr", "branch", "escalation", "acceptance", "runtime",
                   "tests", "review_findings", "correctness_findings")
 TEST_COUNT_KEYS = ("passed", "failed", "skipped")
+FINDING_KINDS = ("review_findings", "correctness_findings")
+# A finding outside the PR's scope, tracked in a follow-up issue (#379).
+FOLLOWUP_KEY = "followup"
 
 EXIT_OK = 0
 EXIT_INVALID = 2
@@ -187,6 +197,11 @@ def validate(data):
     for f in _list(data, "correctness_findings"):
         _text(f, "file", "correctness finding", required=True)
         _choice(f, "shadow_severity", SHADOW_SEVERITIES, "correctness finding")
+    for kind in FINDING_KINDS:
+        for f in data.get(kind, []):
+            key = f.get(FOLLOWUP_KEY)
+            if key is not None and (not isinstance(key, str) or not key.strip()):
+                raise Invalid(f"{kind}: '{FOLLOWUP_KEY}' must be a non-empty follow-up key")
 
     tests = data.get("tests", {})
     if not isinstance(tests, dict):
@@ -211,8 +226,12 @@ def is_approved(category, linked_issues):
     return all(label in issue.get("labels", []) for issue in linked_issues)
 
 
+def is_followup(finding):
+    return bool(finding.get(FOLLOWUP_KEY))
+
+
 def evaluate(data):
-    human, blocking, listed, approved = [], [], [], []
+    human, blocking, listed, approved, followup = [], [], [], [], []
 
     escalation = data.get("escalation", {})
     linked = escalation.get("linked_issues", [])
@@ -231,14 +250,20 @@ def evaluate(data):
             detail = f" ({check['detail']})" if check.get("detail") else ""
             human.append(f"runtime {RUNTIME_FAIL}: {check.get('check', '')}{detail}")
 
+    def sort(finding, text, blocks):
+        if is_followup(finding):
+            followup.append(f"{text} (follow-up {finding[FOLLOWUP_KEY].strip()})")
+        else:
+            (blocking if blocks else listed).append(text)
+
     correctness = data.get("correctness_findings", [])
     for f in correctness:
         text = f"correctness {location(f)}: {f.get('summary', '')} (shadow {f['shadow_severity']})"
-        (blocking if f["shadow_severity"] in CORRECTNESS_BLOCKING else listed).append(text)
+        sort(f, text, f["shadow_severity"] in CORRECTNESS_BLOCKING)
 
     for f in data.get("review_findings", []):
         text = f"review {f['severity']}: {f.get('finding', '')} ({f.get('location') or '-'})"
-        (blocking if f["severity"] in REVIEW_BLOCKING else listed).append(text)
+        sort(f, text, f["severity"] in REVIEW_BLOCKING)
 
     failed = data.get("tests", {}).get("failed", 0)
     if failed:
@@ -252,6 +277,7 @@ def evaluate(data):
         "human_reasons": human,
         "blocking_reasons": blocking,
         "listed_findings": listed,
+        "followup_findings": followup,
         "approved_escalations": approved,
         "correctness": {
             "total": len(correctness),
