@@ -120,7 +120,7 @@ GLOBAL_OPTS_WITH_VALUE=' -c --git-dir --work-tree --namespace --config-env --sup
 # Shell operators that end one command and start the next. `$(` must come
 # before `(` so a command substitution leaves no stray `$`.
 # shellcheck disable=SC2016  # literal `$(`, not an expansion
-CHAIN_SEPARATORS=('$(' '&&''||' ';' '&' '|' '(' ')' '`')
+CHAIN_SEPARATORS=('$(' '&&' '||' ';' '&' '|' '(' ')' '`')
 
 strip_quotes() { # word -> the word without one layer of surrounding quotes
     local w=$1
