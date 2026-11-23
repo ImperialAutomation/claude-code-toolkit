@@ -383,6 +383,33 @@ check("thread reply error after the review: exit 3, stage thread, review_posted 
       r.returncode == 3 and out.get("stage") == "thread" and out.get("review_posted") is True
       and "PRRT_open" in out.get("error", "") and "verdict" not in out)
 
+# --- follow-up findings (#379) ----------------------------------------------------
+
+print("--- follow-up findings ---")
+r, out = run(gates(
+    correctness_findings=[dict(finding(line=2, shadow="HIGH", summary="redirect gap"),
+                               followup="bin/x.sh:redirect-gap"),
+                          dict(finding(line=3, shadow="HIGH", summary="old hint"),
+                               thread="PRRT_open", followup="PRRT_open")],
+    review_findings=[{"severity": "MEDIUM", "finding": "magic number", "location": "a.py:11"}]),
+    human=False)
+rc = review_calls()
+review = rc[0]["input"] if len(rc) == 1 else {}
+body = review.get("body", "")
+check("follow-up HIGH findings only: exit 0, event APPROVE (they do not block)",
+      r.returncode == 0 and review.get("event") == "APPROVE" and out.get("verdict") == "APPROVE")
+check("a follow-up finding is no inline comment",
+      not any("redirect gap" in c.get("body", "") or "old hint" in c.get("body", "")
+              for c in review.get("comments", [])))
+check("the in-scope finding next to them is still inline",
+      any("magic number" in c.get("body", "") for c in review.get("comments", [])))
+check("the body lists the follow-ups with their keys under the follow-up heading",
+      "Out of scope: follow-up issues" in body and "redirect gap" in body
+      and "bin/x.sh:redirect-gap" in body and "old hint" in body)
+check("a follow-up finding on an open thread gets no 'still applies' reply (pr-followup.py answers it)",
+      graphql_calls("addPullRequestReviewThreadReply") == [] and graphql_calls("reviewThreads") == [])
+check("output counts the follow-ups", out.get("followups") == 2 and out.get("body_findings") == 0)
+
 # --- post failures: distinct, never a verdict ---------------------------------
 
 print("--- post failures ---")

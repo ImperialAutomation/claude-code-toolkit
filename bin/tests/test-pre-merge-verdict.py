@@ -183,6 +183,31 @@ check("scope (category 5) is never approvable by label",
                                "linked_issues": [{"number": 1, "labels": ["approved:scope"]}]}))
       == "HUMAN")
 
+print("--- follow-up findings (#379) ---")
+r, out = run(base(correctness_findings=[dict(finding(shadow="HIGH", summary="redirect gap"),
+                                             followup="lib/live-checkout.sh:redirect-gap")],
+                  review_findings=[{"severity": "CRITICAL", "finding": "old hint edge case",
+                                    "location": "e.py:2", "followup": "PRRT_abc"}],
+                  tests={"passed": 1, "failed": 0, "skipped": 0}))
+check("a HIGH/CRITICAL finding marked followup does not block -> APPROVE",
+      r.returncode == 0 and out.get("verdict") == "APPROVE" and out.get("blocking_reasons") == [])
+check("follow-up findings are in followup_findings with their key, not in listed_findings",
+      len(out.get("followup_findings", [])) == 2
+      and any("redirect gap" in f and "lib/live-checkout.sh:redirect-gap" in f
+              for f in out.get("followup_findings", []))
+      and any("old hint edge case" in f and "PRRT_abc" in f for f in out.get("followup_findings", []))
+      and out.get("listed_findings") == [])
+r, out = run(base(correctness_findings=[dict(finding(shadow="HIGH", summary="out of scope"),
+                                             followup="k1"),
+                                        finding(line=9, shadow="HIGH", summary="in scope")]))
+check("a follow-up next to an in-scope HIGH finding: still BLOCKING on the in-scope one only",
+      out.get("verdict") == "BLOCKING" and len(out.get("blocking_reasons", [])) == 1
+      and "in scope" in out["blocking_reasons"][0])
+check("no follow-up -> followup_findings is an empty list", run(base())[1].get("followup_findings") == [])
+for bad in ("", "  ", 3, True):
+    r, out = run(base(correctness_findings=[dict(finding(), followup=bad)]))
+    check(f"followup {bad!r}: exit 2, no verdict", r.returncode == 2 and out == {})
+
 print("--- shadow severity count ---")
 r, out = run(base(correctness_findings=[finding(shadow="HIGH"), finding(line=8, shadow="MEDIUM"),
                                         finding(line=9, shadow="LOW")]))

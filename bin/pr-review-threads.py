@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 Review threads of a PR for the queue runner (#378): list the open ones, and
-reply on one with the queue-runner marker, resolving it when it was fixed.
+reply on one with the queue-runner marker, resolving it when it was fixed or
+moved to a follow-up issue (#379).
 
 Usage:
   pr-review-threads.py list  --repo <owner/name> --pr <N> [--app]
   pr-review-threads.py reply --repo <owner/name> --thread <id> [--app] fixed <sha>
   pr-review-threads.py reply --repo <owner/name> --thread <id> [--app] rejected <reason>
   pr-review-threads.py reply --repo <owner/name> --thread <id> [--app] left
+  pr-review-threads.py reply --repo <owner/name> --thread <id> [--app] followup <#N|issue url>
 
   --app     run gh under the review GitHub App of the repo's owner
             (gh-app-token.sh; PR_THREADS_TOKEN_SCRIPT overrides the path),
@@ -33,6 +35,11 @@ rework.md) never reads it as review input. The outcome fixes the text:
   fixed <sha>        "fixed in <sha>", then the thread is resolved
   rejected <reason>  "rejected: <reason>", the thread stays open
   left               "left: see decision card", the thread stays open
+  followup <#N|url>  "followup: out of scope for this PR, tracked in <#N|url>",
+                     then the thread is resolved (#379): the follow-up issue
+                     owns the finding now, not the PR. Only an outcome that
+                     ends the PR's part resolves (fixed, followup); rejected
+                     and left wait for a human, so they stay open
 
   Result on stdout:
     {"status": "replied", "thread": "...", "outcome": "fixed",
@@ -44,8 +51,8 @@ the reply is on the thread but the resolve failed).
 
 Exit codes:
   0  listed, or replied (and resolved for fixed)
-  2  usage error (unknown outcome, sha not hex, empty reason, bad --repo or
-     --pr); nothing was sent, stderr says why
+  2  usage error (unknown outcome, sha not hex, empty reason, followup
+     without an issue, bad --repo or --pr); nothing was sent, stderr says why
   3  a gh or GitHub GraphQL error; see the JSON result
 """
 
@@ -68,8 +75,14 @@ MARKER = "<!-- queue-runner -->"
 OUTCOME_FIXED = "fixed"
 OUTCOME_REJECTED = "rejected"
 OUTCOME_LEFT = "left"
-OUTCOMES = (OUTCOME_FIXED, OUTCOME_REJECTED, OUTCOME_LEFT)
+OUTCOME_FOLLOWUP = "followup"
+OUTCOMES = (OUTCOME_FIXED, OUTCOME_REJECTED, OUTCOME_LEFT, OUTCOME_FOLLOWUP)
+# After these the PR no longer owns the finding, so the thread is resolved.
+RESOLVING_OUTCOMES = (OUTCOME_FIXED, OUTCOME_FOLLOWUP)
 LEFT_TEXT = "left: see decision card"
+FOLLOWUP_PREFIX = "followup: out of scope for this PR, tracked in"
+# A follow-up issue: "#123" or its GitHub issue URL.
+ISSUE_REF = re.compile(r"^(#\d+|https://github\.com/[^/\s]+/[^/\s]+/issues/\d+)$")
 
 STATUS_REPLIED = "replied"
 STATUS_FAILED = "failed"
@@ -150,6 +163,10 @@ def outcome_text(outcome, value=None):
         if value:
             raise Usage("left takes no text: the question goes on the decision card")
         return LEFT_TEXT
+    if outcome == OUTCOME_FOLLOWUP:
+        if not ISSUE_REF.match(value):
+            raise Usage(f"followup needs the follow-up issue as #N or its issue URL, got {value!r}")
+        return f"{FOLLOWUP_PREFIX} {value}"
     raise Usage(f"unknown outcome {outcome!r}; one of {', '.join(OUTCOMES)}")
 
 
@@ -269,7 +286,7 @@ def main(argv=None):
     p_reply.add_argument("--thread", required=True)
     p_reply.add_argument("--app", action="store_true")
     p_reply.add_argument("outcome", choices=OUTCOMES)
-    p_reply.add_argument("value", nargs="*", help="the sha (fixed) or the reason (rejected)")
+    p_reply.add_argument("value", nargs="*", help="the sha (fixed), the reason (rejected) or the issue (followup)")
     args = parser.parse_args(argv)
 
     run = gh_runner(args.repo, args.app)
@@ -280,7 +297,7 @@ def main(argv=None):
         if not args.thread.strip():
             raise Usage("--thread must not be empty")
         text = outcome_text(args.outcome, " ".join(args.value))
-        result = reply(run, args.thread, text, resolve=args.outcome == OUTCOME_FIXED)
+        result = reply(run, args.thread, text, resolve=args.outcome in RESOLVING_OUTCOMES)
     except Usage as exc:
         print(f"pr-review-threads: {exc}", file=sys.stderr)
         return EXIT_USAGE
