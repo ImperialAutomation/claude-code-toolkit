@@ -37,8 +37,8 @@
 #   0    every script that ran passed
 #   1    at least one script failed
 #   2    usage error, a named script does not exist, a PREREQS tool is
-#        missing, or --repo or a test path is not a checkout of this
-#        repository
+#        missing, --repo or a test path is not a checkout of this
+#        repository, or the git environment cannot be cleared for that check
 
 set -uo pipefail
 
@@ -48,9 +48,16 @@ SELF_REPO_DIR=$(dirname "$SELF_BIN_DIR")
 # shellcheck source=bin/lib/live-checkout.sh
 . "$SELF_BIN_DIR/lib/live-checkout.sh"
 
-# An exported GIT_DIR or GIT_WORK_TREE would make every git call below
-# describe that repository instead of the directory it is asked about.
+# shellcheck source=bin/lib/git-env.sh
+. "$SELF_BIN_DIR/lib/git-env.sh"
+
+# An exported GIT_DIR or GIT_WORK_TREE would send the tests' fixture git calls
+# into that repository. The admission check below clears the full set itself.
 unset GIT_DIR GIT_WORK_TREE
+
+# Exit status of a command substitution whose git_env_isolate failed, told
+# apart from the status of the git call it guards.
+GIT_ENV_ISOLATE_FAILED=125
 
 # Tests skipped under --ci, keyed by path relative to the repo, with the reason
 # printed in the job log, e.g.
@@ -99,14 +106,23 @@ done
 # repository this script lives in (the main one and its linked ones), read
 # once by load_self_trees. A directory merely pointing at this repository's
 # .git is not registered, so it does not qualify.
+#
+# The git calls of this check run with the git environment cleared, each in its
+# own subshell: an exported GIT_DIR, GIT_COMMON_DIR or the like would make git
+# describe that repository instead of the directory it is asked about (#338).
+# The tests themselves run with only GIT_DIR and GIT_WORK_TREE cleared (above).
 SELF_TREES=()
 SELF_TREES_LOADED=false
 load_self_trees() {
     $SELF_TREES_LOADED && return 0
     local path rest
+    git_env_load || {
+        echo "cannot clear the git environment: git rev-parse --local-env-vars failed" >&2
+        exit 2
+    }
     while IFS=$'\t' read -r path rest; do
         path=$(realpath -e "$path" 2>/dev/null) && SELF_TREES+=("$path")
-    done < <(worktree_list "$SELF_REPO_DIR")
+    done < <(git_env_isolate && worktree_list "$SELF_REPO_DIR")
     SELF_TREES_LOADED=true
     if [[ ${#SELF_TREES[@]} -eq 0 ]]; then
         echo "cannot determine the worktrees of $SELF_REPO_DIR" >&2
@@ -119,9 +135,15 @@ load_self_trees() {
 # repository's own trees run without a prompt, never an arbitrary
 # toolkit-shaped directory. Call load_self_trees first.
 checkout_of_self() {
-    local dir="$1" what="$2" top t
-    top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) \
-        || { echo "$what is not inside a git checkout: $dir" >&2; exit 2; }
+    local dir="$1" what="$2" top t status
+    top=$(git_env_isolate || exit "$GIT_ENV_ISOLATE_FAILED"
+          git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
+    status=$?
+    if [[ $status -eq $GIT_ENV_ISOLATE_FAILED ]]; then
+        echo "cannot clear the git environment for $what: $dir" >&2; exit 2
+    elif [[ $status -ne 0 ]]; then
+        echo "$what is not inside a git checkout: $dir" >&2; exit 2
+    fi
     top=$(realpath -e "$top")
     for t in "${SELF_TREES[@]}"; do
         [[ "$t" == "$top" ]] && { echo "$top"; return 0; }

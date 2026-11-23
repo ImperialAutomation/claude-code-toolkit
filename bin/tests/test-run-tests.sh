@@ -44,7 +44,11 @@ export GIT_CONFIG_NOSYSTEM=1
 # Pinned explicitly: an exported GIT_CONFIG_GLOBAL would otherwise win over
 # $HOME and the writes below would land in the user's real global config.
 export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
-unset GIT_DIR GIT_WORK_TREE
+# An exported GIT_DIR, GIT_COMMON_DIR, GIT_INDEX_FILE or the like would send
+# the fixture's init/add/commit into another repository.
+# shellcheck source=bin/lib/git-env.sh
+. "$(dirname "$RUNNER")/lib/git-env.sh"
+git_env_isolate || { echo "cannot clear the git environment" >&2; exit 1; }
 git config --global user.name test
 git config --global user.email test@example.com
 git config --global init.defaultBranch main
@@ -67,7 +71,7 @@ EOF
 make_repo() {
     mkdir -p "$1/bin/tests" "$1/bin/lib"
     cp "$RUNNER" "$1/bin/run-tests.sh"
-    cp "$(dirname "$RUNNER")/lib/live-checkout.sh" "$1/bin/lib/"
+    cp "$(dirname "$RUNNER")/lib/live-checkout.sh" "$(dirname "$RUNNER")/lib/git-env.sh" "$1/bin/lib/"
     stub "$1/bin/tests/test-alpha.sh" 0 "alpha says hello"
     git -C "$1" init -q
     git -C "$1" add -A
@@ -163,6 +167,27 @@ rm -f "$MARK"
 OUT=$(env -C "$T" GIT_DIR="$MAIN/.git" bash "$LIVE" --repo "$OTHER" 2>&1); STATUS=$?
 check "an exported GIT_DIR does not admit an unrelated repository" "2" "$STATUS"
 check "nothing ran under an exported GIT_DIR" "" "$(ran)"
+
+# GIT_COMMON_DIR at the unrelated repository makes `git worktree list` of the
+# runner's own tree describe that repository's worktrees instead (#338).
+rm -f "$MARK"
+OUT=$(env -C "$T" GIT_COMMON_DIR="$OTHER/.git" bash "$LIVE" --repo "$OTHER" 2>&1); STATUS=$?
+check "an exported GIT_COMMON_DIR does not admit an unrelated repository" "2" "$STATUS"
+check "nothing ran under an exported GIT_COMMON_DIR" "" "$(ran)"
+check "the GIT_COMMON_DIR refusal says why" "yes" "$(contains "$OUT" "not a checkout of")"
+
+# Redirecting variables do not refuse a real worktree, and the test itself
+# runs without GIT_DIR and GIT_WORK_TREE, so its fixture git calls cannot
+# reach the caller's repository.
+cat > "$WT/bin/tests/test-env.sh" <<'EOF'
+#!/bin/bash
+echo "$(basename "$0") $PWD ${GIT_DIR:-unset} ${GIT_WORK_TREE:-unset}" >> "$MARK"
+EOF
+rm -f "$MARK"
+OUT=$(env -C "$T" GIT_COMMON_DIR="$OTHER/.git" GIT_DIR="$OTHER/.git" GIT_WORK_TREE="$OTHER" \
+    bash "$LIVE" --repo "$WT" test-env.sh 2>&1); STATUS=$?
+check "exported git redirect variables still admit a registered worktree" "0" "$STATUS"
+check "the test ran in the worktree without GIT_DIR and GIT_WORK_TREE" "test-env.sh $WT unset unset" "$(ran)"
 
 echo "== absolute path to a test =="
 run "$LIVE" "$WT/bin/tests/test-alpha.sh"
