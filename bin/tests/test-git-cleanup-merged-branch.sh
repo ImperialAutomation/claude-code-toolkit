@@ -37,6 +37,9 @@
 #   41-43. tree on an integration branch with the base auto-detected, feature
 #          worktree directory gone, feature worktree with the base not named
 #                                                        -> refuse, right hint
+#   44-46. feature worktree prunable with its directory there, base checked
+#          out in another worktree, base tracking a local branch -> right hint
+#   47.   toolkit: unlocked prunable worktree           -> prune hint, not "locked"
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -807,6 +810,48 @@ check "exit one" 1 "$RC"
 contains "run the cleanup there" "run the cleanup there" "$OUT"
 contains "path quoted" 'r43\ wt issue-43-feature' "$OUT"
 lacks "no base from this tree in the hint" "issue-43-feature develop" "$OUT"
+
+echo "== 44. feature worktree prunable, its directory still there: prune first =="
+# Unlocked and prunable: the empty <locked> field must not shift "prunable" away.
+R=$(taken_over r44 issue-44-feature issue-93-other)
+git_q "$R" worktree add -q "$R-wt" issue-44-feature
+rm "$R-wt/.git"
+OUT=$(run_notty_yes "$R" issue-44-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "says to prune" "git worktree prune" "$OUT"
+lacks "no hint to run there" "run the cleanup there" "$OUT"
+
+echo "== 45. feature and base each in another worktree: run in the base's =="
+# A run in the feature's worktree would die on `checkout develop`.
+R=$(taken_over r45 issue-45-feature issue-92-other)
+git_q "$R" worktree add -q "$R-wt" issue-45-feature
+git_q "$R" worktree add -q "$R-base" develop
+OUT=$(run_notty_yes "$R" issue-45-feature develop); RC=$?
+check "exit one" 1 "$RC"
+lacks "no hint to run in the feature's worktree" "run the cleanup there" "$OUT"
+contains "names the base's worktree" "r45-base issue-45-feature develop" "$OUT"
+check "feature worktree untouched" issue-45-feature "$(git_q "$R-wt" branch --show-current)"
+
+echo "== 46. base tracks a local branch: no fetch in the manual check =="
+R=$(taken_over r46 issue-46-feature issue-91-other)
+git_q "$R" branch -q base-src develop
+git_q "$R" branch -q --set-upstream-to=base-src develop
+OUT=$(run_notty_yes "$R" issue-46-feature develop); RC=$?
+check "exit one" 1 "$RC"
+lacks "no fetch of a local branch" "git fetch" "$OUT"
+contains "checks against the local upstream" "git log --oneline base-src..issue-46-feature" "$OUT"
+
+echo "== 47. toolkit: unlocked prunable worktree, directory there -> prune hint, not locked =="
+L=$(tk_fixture tk47)
+tk_worktree "$L" 47 widget
+tk_merge_on_remote "$L" issue-47-widget
+rm "$L-47/.git"
+BEFORE=$(tk_state "$L" "$L-47" issue-47-widget)
+OUT=$(run_tk "$L" "$L" issue-47-widget); RC=$?
+check "exit one" 1 "$RC"
+contains "gives the prune hint" "git -C $L worktree prune" "$OUT"
+lacks "not refused as locked" "is locked" "$OUT"
+check "nothing changed" "$BEFORE" "$(tk_state "$L" "$L-47" issue-47-widget)"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

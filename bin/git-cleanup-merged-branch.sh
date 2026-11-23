@@ -152,10 +152,13 @@ upstream_of() { # branch
     git_filtered rev-parse --abbrev-ref --symbolic-full-name "$1@{upstream}" 2>/dev/null
 }
 
-# Print the worktree_list line (`<path>\t<branch>\t<locked>\t<prunable>`) of
-# the worktree that has <branch> checked out, or nothing when none has.
+# Print the worktree_list fields (<path> <branch> <locked> <prunable>) of the
+# worktree that has <branch> checked out, or nothing when none has. The fields
+# are separated by WT_SEP, not a tab: tab is IFS whitespace, so `IFS=$'\t' read`
+# would collapse an empty <locked> and shift "prunable" into its place.
+readonly WT_SEP=$'\037'
 worktree_of_branch() { # dir branch
-    worktree_list "$1" | awk -F'\t' -v b="$2" '$2 == b { print; exit }'
+    worktree_list "$1" | awk -F'\t' -v OFS="$WT_SEP" -v b="$2" '$2 == b { $1 = $1; print; exit }'
 }
 
 # Color output
@@ -248,7 +251,7 @@ toolkit_cleanup() {
     git_filtered show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH" \
         || tk_refuse "branch '$FEATURE_BRANCH' does not exist"
 
-    IFS=$'\t' read -r worktree _ locked prunable \
+    IFS="$WT_SEP" read -r worktree _ locked prunable \
         < <(worktree_of_branch "$LIVE_ROOT" "$FEATURE_BRANCH") || true
     [ "$worktree" != "$LIVE_ROOT" ] \
         || tk_refuse "'$FEATURE_BRANCH' is checked out in the live checkout itself"
@@ -396,40 +399,64 @@ if [ -n "${POSITIONAL[0]:-}" ]; then
     NAMED_BASE="${POSITIONAL[1]:-}"
     if [ "$CURRENT_BRANCH" != "$FEATURE_BRANCH" ] \
             && { [ -z "$NAMED_BASE" ] || [ "$CURRENT_BRANCH" != "$NAMED_BASE" ]; }; then
-        echo -e "${RED}Error: this tree is on '${CURRENT_BRANCH:-detached HEAD}', not '$FEATURE_BRANCH'${NC}" >&2
-        echo "Another session may be working in it; it is left as it is." >&2
+        # shellcheck disable=SC2088  # printed for the user to run, not expanded here
+        SELF="~/.claude/bin/$(basename "$0")"
+        Q_FEATURE=$(printf '%q' "$FEATURE_BRANCH")
+        HINT=("Another session may be working in it; it is left as it is.")
         if [ -z "$NAMED_BASE" ] && [ "$CURRENT_BRANCH" = "$BASE_BRANCH" ]; then
-            echo "If '$CURRENT_BRANCH' is the base '$FEATURE_BRANCH' was merged into, name it:" >&2
-            echo "  ~/.claude/bin/$(basename "$0") --repo $(printf '%q' "$PWD") $(printf '%q' "$FEATURE_BRANCH") $(printf '%q' "$CURRENT_BRANCH")" >&2
+            HINT+=("If '$CURRENT_BRANCH' is the base '$FEATURE_BRANCH' was merged into, name it:"
+                   "  $SELF --repo $(printf '%q' "$PWD") $Q_FEATURE $(printf '%q' "$CURRENT_BRANCH")")
         fi
-        IFS=$'\t' read -r FEATURE_WORKTREE _ _ FEATURE_PRUNABLE \
+        IFS="$WT_SEP" read -r FEATURE_WORKTREE _ _ FEATURE_PRUNABLE \
             < <(worktree_of_branch . "$FEATURE_BRANCH") || true
+        BASE_WORKTREE=""
+        if [ -n "$NAMED_BASE" ]; then
+            IFS="$WT_SEP" read -r BASE_WORKTREE _ \
+                < <(worktree_of_branch . "$NAMED_BASE") || true
+        fi
         if [ -n "$FEATURE_WORKTREE" ] && [ -z "$FEATURE_PRUNABLE" ] && [ -d "$FEATURE_WORKTREE" ]; then
-            # Without a named base the run there detects it from the feature's
-            # own tree; this tree's base may belong to an unrelated branch.
-            echo "'$FEATURE_BRANCH' is checked out in $FEATURE_WORKTREE; run the cleanup there:" >&2
-            echo "  ~/.claude/bin/$(basename "$0") --repo $(printf '%q' "$FEATURE_WORKTREE") $(printf '%q' "$FEATURE_BRANCH")${NAMED_BASE:+ $(printf '%q' "$NAMED_BASE")}" >&2
+            if [ -n "$BASE_WORKTREE" ]; then
+                # A run in the feature's worktree would die on `checkout <base>`:
+                # git checks a branch out in one worktree only.
+                HINT+=("'$FEATURE_BRANCH' is checked out in $FEATURE_WORKTREE and '$NAMED_BASE' in $BASE_WORKTREE,"
+                       "so a cleanup in $FEATURE_WORKTREE cannot check out '$NAMED_BASE'."
+                       "Once $FEATURE_WORKTREE is off '$FEATURE_BRANCH' (or removed), run the cleanup in $BASE_WORKTREE:"
+                       "  $SELF --repo $(printf '%q' "$BASE_WORKTREE") $Q_FEATURE $(printf '%q' "$NAMED_BASE")")
+            else
+                # Without a named base the run there detects it from the feature's
+                # own tree; this tree's base may belong to an unrelated branch.
+                HINT+=("'$FEATURE_BRANCH' is checked out in $FEATURE_WORKTREE; run the cleanup there:"
+                       "  $SELF --repo $(printf '%q' "$FEATURE_WORKTREE") $Q_FEATURE${NAMED_BASE:+ $(printf '%q' "$NAMED_BASE")}")
+            fi
         else
             if [ -n "$FEATURE_WORKTREE" ]; then
-                echo "'$FEATURE_BRANCH' is registered in $FEATURE_WORKTREE, but that directory is gone." >&2
-                echo "Unregister it first: git worktree prune" >&2
+                HINT+=("'$FEATURE_BRANCH' is registered in $FEATURE_WORKTREE, but that directory is gone."
+                       "Unregister it first: git worktree prune")
             else
-                echo "'$FEATURE_BRANCH' is not checked out in any worktree." >&2
+                HINT+=("'$FEATURE_BRANCH' is not checked out in any worktree.")
             fi
             if [ -n "$NAMED_BASE" ]; then
                 BASE_REF=$(upstream_of "$NAMED_BASE") || BASE_REF="origin/$NAMED_BASE"
                 BASE_REF=$(printf '%q' "$BASE_REF")
+                # The remote from the branch's config, not from the abbreviated
+                # upstream: a remote name may contain '/', and a local upstream
+                # (remote '.') has nothing to fetch.
+                BASE_REMOTE=$(git_filtered config "branch.$NAMED_BASE.remote") || BASE_REMOTE=origin
             else
                 BASE_REF="origin/<base>"
+                BASE_REMOTE=origin
             fi
-            echo "To delete it by hand, fetch the base first, so a fresh merge counts:" >&2
-            echo "  git fetch ${BASE_REF%%/*}" >&2
-            echo "  git log --oneline $BASE_REF..$(printf '%q' "$FEATURE_BRANCH")   # must print nothing" >&2
-            echo "  git branch -D $(printf '%q' "$FEATURE_BRANCH")" >&2
-            echo "(Plain -d is no check here: it compares with the branch's upstream, or else with this tree's HEAD, not with the base.)" >&2
+            if [ "$BASE_REMOTE" = "." ]; then
+                HINT+=("To delete it by hand:")
+            else
+                HINT+=("To delete it by hand, fetch the base first, so a fresh merge counts:"
+                       "  git fetch $(printf '%q' "$BASE_REMOTE")")
+            fi
+            HINT+=("  git log --oneline $BASE_REF..$Q_FEATURE   # must print nothing"
+                   "  git branch -D $Q_FEATURE"
+                   "(Plain -d is no check here: it compares with the branch's upstream, or else with this tree's HEAD, not with the base.)")
         fi
-        echo "Nothing was changed." >&2
-        exit 1
+        tk_refuse "this tree is on '${CURRENT_BRANCH:-detached HEAD}', not '$FEATURE_BRANCH'" "${HINT[@]}"
     fi
 fi
 
