@@ -31,6 +31,12 @@ unknown top-level key is an error, so a typo cannot drop a gate):
                               "shadow_severity": "HIGH|MEDIUM|LOW"}]
   }
 
+  Either kind of finding may carry "followup": "<key>" (#379): the reviewer
+  judged it clearly outside the PR's scope, and it becomes a follow-up issue
+  (pr-followup.py, the key is its --key). Such a finding never blocks,
+  whatever its severity: it goes to "followup_findings", not to
+  "blocking_reasons" or "listed_findings".
+
 escalation.hits are the lines of escalation-check.sh (categories 1 to 4,
 keys permissions, leakage, interface, global) plus category 5 as "scope". A
 hit is approved, and does not escalate, when there is at least one linked
@@ -40,18 +46,21 @@ approved by a label.
 Mapping, top to bottom; HUMAN wins over BLOCKING, whose reasons stay listed:
 
   HUMAN     an unapproved escalation hit, an UNVERIFIABLE AC, a runtime FAIL
-  BLOCKING  any /code-review finding (each counts as HIGH, whatever its shadow
-            severity), a /review CRITICAL or HIGH finding, a failed test, a
-            NOT MET AC
-  APPROVE   otherwise; MEDIUM/LOW/INFO /review findings are listed anyway
+  BLOCKING  a /code-review finding with HIGH shadow severity, a /review
+            CRITICAL or HIGH finding, a failed test, a NOT MET AC
+  APPROVE   otherwise; MEDIUM/LOW /code-review findings and MEDIUM/LOW/INFO
+            /review findings are listed anyway, under every verdict
 
 Review event of each verdict, for /pre-merge --post (pre-merge-post.py):
 APPROVE -> APPROVE, BLOCKING -> REQUEST_CHANGES, HUMAN -> COMMENT plus the
 label needs-human.
 
-The shadow severity of a /code-review finding is reported and logged but never
-changes the verdict. A MEDIUM or LOW shadow severity counts as "would have
-been downgraded".
+The shadow severity of a /code-review finding decides whether it blocks (#374):
+HIGH blocks, MEDIUM and LOW are downgraded to listed findings. Every finding
+is logged with it, so the log shows what the downgrade let through. A finding
+with "followup" (#379) never blocks and is counted as routed (K), not as
+downgraded (N); the part in brackets of the line appears only when K > 0, and
+M - N - K correctness findings block.
 
 Output:
 
@@ -60,10 +69,11 @@ Output:
     "review_event": "APPROVE|REQUEST_CHANGES|COMMENT",
     "human_reasons": ["..."],
     "blocking_reasons": ["..."],
-    "listed_findings": ["..."],          # /review MEDIUM, LOW and INFO
+    "listed_findings": ["..."],          # /code-review MEDIUM/LOW, /review MEDIUM/LOW/INFO
+    "followup_findings": ["..."],        # any finding with "followup", never blocking
     "approved_escalations": ["..."],
-    "correctness": {"total": M, "downgraded": N,
-                    "line": "N of M correctness findings would have been downgraded"},
+    "correctness": {"total": M, "downgraded": N, "followups": K,
+                    "line": "N of M correctness findings downgraded (MEDIUM/LOW: listed, not blocking)[, K routed to follow-ups (not blocking)]"},
     "log": {"path": "...", "rows": M, "written": true}
   }
 
@@ -112,6 +122,8 @@ REVIEW_BLOCKING = ("CRITICAL", "HIGH")
 
 SHADOW_HIGH = "HIGH"
 SHADOW_SEVERITIES = (SHADOW_HIGH, "MEDIUM", "LOW")
+# Only these /code-review shadow severities block; the rest are listed (#374).
+CORRECTNESS_BLOCKING = (SHADOW_HIGH,)
 
 APPROVED_LABEL_PREFIX = "approved:"
 # Category 5 of docs/escalation-list.md: judgment, never approved by a label.
@@ -120,6 +132,9 @@ SCOPE_CATEGORY = "scope"
 TOP_LEVEL_KEYS = ("repo", "pr", "branch", "escalation", "acceptance", "runtime",
                   "tests", "review_findings", "correctness_findings")
 TEST_COUNT_KEYS = ("passed", "failed", "skipped")
+FINDING_KINDS = ("review_findings", "correctness_findings")
+# A finding outside the PR's scope, tracked in a follow-up issue (#379).
+FOLLOWUP_KEY = "followup"
 
 EXIT_OK = 0
 EXIT_INVALID = 2
@@ -185,6 +200,11 @@ def validate(data):
     for f in _list(data, "correctness_findings"):
         _text(f, "file", "correctness finding", required=True)
         _choice(f, "shadow_severity", SHADOW_SEVERITIES, "correctness finding")
+    for kind in FINDING_KINDS:
+        for f in data.get(kind, []):
+            key = f.get(FOLLOWUP_KEY)
+            if key is not None and (not isinstance(key, str) or not key.strip()):
+                raise Invalid(f"{kind}: '{FOLLOWUP_KEY}' must be a non-empty follow-up key")
 
     tests = data.get("tests", {})
     if not isinstance(tests, dict):
@@ -209,8 +229,12 @@ def is_approved(category, linked_issues):
     return all(label in issue.get("labels", []) for issue in linked_issues)
 
 
+def is_followup(finding):
+    return bool(finding.get(FOLLOWUP_KEY))
+
+
 def evaluate(data):
-    human, blocking, listed, approved = [], [], [], []
+    human, blocking, listed, approved, followup = [], [], [], [], []
 
     escalation = data.get("escalation", {})
     linked = escalation.get("linked_issues", [])
@@ -229,32 +253,48 @@ def evaluate(data):
             detail = f" ({check['detail']})" if check.get("detail") else ""
             human.append(f"runtime {RUNTIME_FAIL}: {check.get('check', '')}{detail}")
 
+    def sort(finding, text, blocks):
+        if is_followup(finding):
+            followup.append(f"{text} (follow-up {finding[FOLLOWUP_KEY].strip()})")
+        else:
+            (blocking if blocks else listed).append(text)
+
     correctness = data.get("correctness_findings", [])
     for f in correctness:
-        blocking.append(f"correctness {location(f)}: {f.get('summary', '')} "
-                        f"(shadow {f['shadow_severity']})")
+        text = f"correctness {location(f)}: {f.get('summary', '')} (shadow {f['shadow_severity']})"
+        sort(f, text, f["shadow_severity"] in CORRECTNESS_BLOCKING)
 
     for f in data.get("review_findings", []):
         text = f"review {f['severity']}: {f.get('finding', '')} ({f.get('location') or '-'})"
-        (blocking if f["severity"] in REVIEW_BLOCKING else listed).append(text)
+        sort(f, text, f["severity"] in REVIEW_BLOCKING)
 
     failed = data.get("tests", {}).get("failed", 0)
     if failed:
         blocking.append(f"tests: {failed} failed")
 
     verdict = HUMAN if human else BLOCKING if blocking else APPROVE
-    downgraded = sum(f["shadow_severity"] != SHADOW_HIGH for f in correctness)
+    # Disjoint counts: a follow-up of any severity counts as routed, not as
+    # downgraded, so a HIGH one that no longer blocks still shows up.
+    routed = sum(is_followup(f) for f in correctness)
+    downgraded = sum(f["shadow_severity"] not in CORRECTNESS_BLOCKING and not is_followup(f)
+                     for f in correctness)
+    line = (f"{downgraded} of {len(correctness)} correctness findings downgraded "
+            "(MEDIUM/LOW: listed, not blocking)")
+    if routed:
+        line += f", {routed} routed to follow-ups (not blocking)"
     return {
         "verdict": verdict,
         "review_event": REVIEW_EVENTS[verdict],
         "human_reasons": human,
         "blocking_reasons": blocking,
         "listed_findings": listed,
+        "followup_findings": followup,
         "approved_escalations": approved,
         "correctness": {
             "total": len(correctness),
             "downgraded": downgraded,
-            "line": f"{downgraded} of {len(correctness)} correctness findings would have been downgraded",
+            "followups": routed,
+            "line": line,
         },
     }
 

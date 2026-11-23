@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Pre-tool-use hook: refuse a git checkout/switch that moves the LIVE toolkit
-# checkout off its base branch.
+# Pre-tool-use hook: refuse a git checkout/switch, git bisect or gh pr checkout
+# that moves the LIVE toolkit checkout off its base branch.
 #
 # Why this exists
 # ---------------
@@ -15,7 +15,13 @@
 # the rule), and this hook enforces it at the one moment it can go wrong: the
 # checkout or switch that would put something other than the base branch in
 # the live tree. That covers new branches (-b/-B/--orphan, -c/-C), existing
-# branches, detached commits and `switch -`.
+# branches, detached commits and `switch -`; `gh pr checkout` (also with
+# --detach, and its alias `gh co`), which a review sub-agent reached for in
+# #375; and `git bisect`, which detaches HEAD at every step.
+#
+# Left to other guards or harmless: `git reset --hard <ref>` is refused
+# everywhere by hook-block-destructive.sh, and `git worktree add` builds a new
+# tree beside the live one, which is the intended route.
 #
 # Scope:
 #   - Only the live checkout: the main worktree whose top level equals
@@ -30,7 +36,9 @@
 #
 # The target tree is the hook input's cwd, followed through `cd <dir>` earlier
 # in the same command chain, through an `env -C`/`--chdir` prefix and through
-# git's own -C options. Leading VAR=value assignments are skipped.
+# git's own -C options. Leading VAR=value assignments are skipped, and a
+# command-running wrapper (`cmd-save.sh <out> gh pr checkout 1`) is judged by
+# the command it runs.
 #
 # Installation: register in settings.json under PreToolUse / matcher "Bash":
 #   { "type": "command", "command": "~/.claude/bin/hook-block-toolkit-live-checkout.sh" }
@@ -50,8 +58,8 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 [ -z "$CWD" ] && CWD=$PWD
 
 [ -z "$COMMAND" ] && exit 0
-# Cheap prefilter: most commands never mention either verb.
-echo "$COMMAND" | grep -qE '(checkout|switch)' || exit 0
+# Cheap prefilter: most commands never mention a verb that moves HEAD.
+echo "$COMMAND" | grep -qE '(checkout|switch|bisect|\<co\>)' || exit 0
 
 LIVE_ROOT=$(live_checkout_root)
 [ -z "$LIVE_ROOT" ] && exit 0
@@ -59,17 +67,57 @@ LIVE_ROOT=$(live_checkout_root)
 # Tokenize like a shell would (quotes, chains), one NUL-terminated token per
 # word or operator. Unparseable input yields nothing and is allowed: git will
 # reject it too, and a guard that blocks on its own parse errors gets disabled.
+#
+# A segment that runs a command-running wrapper (cmd-save.sh, repeat-cmd.sh,
+# venv-run.sh, gh-app-token.sh, nested too) is replaced by the command it runs,
+# behind the same env/assignment prefixes judge_segment skips. The wrapper
+# grammar is the one of COMMAND_RUNNING_WRAPPERS in hook-auto-approve-bash.py,
+# imported, not copied; its prefix stripping is not used, since it strips
+# `env -C` only where approval is safe. When that file cannot be loaded,
+# segments are judged as written.
 mapfile -d '' TOKENS < <(python3 -c '
-import shlex, sys
+import importlib.util, os, shlex, sys
 try:
     lex = shlex.shlex(sys.argv[1].replace("\n", ";"), posix=True, punctuation_chars=";&|()<>")
     lex.whitespace_split = True
     tokens = list(lex)
 except ValueError:
     sys.exit(0)
-for t in tokens:
-    sys.stdout.write(t + "\0")
-' "$COMMAND")
+try:
+    spec = importlib.util.spec_from_file_location("hook_auto_approve_bash", sys.argv[2])
+    approve = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(approve)
+    wrappers = approve.COMMAND_RUNNING_WRAPPERS
+except Exception:
+    wrappers = {}
+def command_start(seg):
+    # The prefixes judge_segment skips: VAR=value, then env with its options.
+    i = 0
+    while i < len(seg) and "=" in seg[i] and seg[i].split("=")[0].isidentifier():
+        i += 1
+    if seg[i:i + 1] == ["env"]:
+        i += 1
+        while i < len(seg) and (seg[i].startswith("-") or "=" in seg[i]):
+            i += 2 if seg[i] in ("-C", "--chdir", "-u", "--unset") else 1
+    return i
+def unwrap(seg):
+    while wrappers:
+        start = command_start(seg)
+        spec = wrappers.get(os.path.basename(seg[start])) if start < len(seg) else None
+        inner = spec.parse(seg[start + 1:]) if spec else None
+        if not inner:
+            return seg
+        seg = seg[:start] + list(inner)
+    return seg
+seg = []
+for t in tokens + [";"]:
+    if t and all(c in ";&|()<>" for c in t):
+        for w in unwrap(seg) + [t]:
+            sys.stdout.write(w + "\0")
+        seg = []
+    else:
+        seg.append(t)
+' "$COMMAND" "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/hook-auto-approve-bash.py")
 
 # Resolve <dir> against <base> the way cd and git -C do, expanding a leading ~.
 resolve_dir() { # base dir
@@ -102,6 +150,45 @@ EOF
     exit 2
 }
 
+# Succeed when <dir> lies in the live checkout's own working tree. A linked
+# worktree has its own top level, so it never matches.
+in_live_tree() { # dir
+    local root
+    root=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+    [ "$root" = "$LIVE_ROOT" ]
+}
+
+# Judge `git bisect <sub>` run in <dir>. Every step of a bisect (start with or
+# without revisions, good/bad/new/old/skip, next, run, replay and custom terms)
+# detaches HEAD onto a commit under test. Only the subcommands that move no
+# HEAD pass, and `reset <commit>` only when it returns to the base branch.
+judge_bisect() { # dir words...
+    local dir=$1; shift
+    in_live_tree "$dir" || return 0
+    local base
+    base=$(live_base_branch "$LIVE_ROOT")
+    case "${1:-}" in
+        ""|log|view|visualize|terms|help|-h|--help) return 0 ;;
+        reset)
+            [ $# -lt 2 ] && return 0
+            [ "$2" = "$base" ] && return 0
+            ;;
+    esac
+    block "$LIVE_ROOT" "$base"
+}
+
+# Judge one `gh ...` invocation run from <dir>. Words exclude the leading gh.
+# `gh pr checkout` (and its stock alias `gh co`) checks the PR out in the git
+# repository of the current directory: on the PR's branch, or detached with
+# --detach. Either way the live checkout leaves its base branch. -R/--repo
+# only picks which repository's PR to fetch, not where it lands.
+judge_gh() { # dir words...
+    local dir=$1; shift
+    [ "${1:-}" = co ] || { [ "${1:-}" = pr ] && [ "${2:-}" = checkout ]; } || return 0
+    in_live_tree "$dir" || return 0
+    block "$LIVE_ROOT" "$(live_base_branch "$LIVE_ROOT")"
+}
+
 # Judge one `git ...` invocation run from <cwd>. Words exclude the leading git.
 judge_git() { # cwd words...
     local dir=$1; shift
@@ -118,11 +205,14 @@ judge_git() { # cwd words...
             *) sub=$1; shift; break ;;
         esac
     done
-    [ "$sub" = checkout ] || [ "$sub" = switch ] || return 0
+    case "$sub" in
+        checkout|switch) ;;
+        bisect) judge_bisect "$dir" "$@"; return 0 ;;
+        *) return 0 ;;
+    esac
 
-    local root base
-    root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 0
-    [ "$root" = "$LIVE_ROOT" ] || return 0
+    in_live_tree "$dir" || return 0
+    local base
     base=$(live_base_branch "$LIVE_ROOT")
 
     # Short options that create a branch or detach. git accepts them stuck to
@@ -186,6 +276,7 @@ judge_segment() { # words...
     case "$1" in
         cd) [ $# -ge 2 ] && CWD=$(resolve_dir "$CWD" "$2") ;;
         git) shift; judge_git "$dir" "$@" ;;
+        gh) shift; judge_gh "$dir" "$@" ;;
     esac
 }
 

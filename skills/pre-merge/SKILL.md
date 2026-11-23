@@ -34,6 +34,7 @@ Every file this skill writes is unique per project and PR, so two reviews can ru
 | `/tmp/<project>-pre-merge-gates-<key>.json` | Input of `pre-merge-verdict.py` (Phase 8) |
 | `/tmp/<project>-pre-merge-report-<key>.md` | The Phase 9 report, the review body (Phase 10) |
 | `/tmp/<project>-pre-merge-human-<key>.json` | `HUMAN` decisions for the review (Phase 10) |
+| `/tmp/<project>-pre-merge-threads-<key>.json` | Open review threads of the PR (Phase 8, `--post` only) |
 
 ### If PR number provided:
 ```bash
@@ -72,7 +73,7 @@ Call the `/code-review` skill through the Skill tool, level first and always exp
 
 Do not pass `--comment` or `--fix`: this phase only collects findings. Each finding has a file, a line, a summary and a failure scenario.
 
-**Every `/code-review` finding counts as HIGH for the verdict.** Next to that, assign each finding a **shadow severity** against these fixed criteria:
+Assign each finding a **shadow severity** against these fixed criteria. **Only a HIGH finding blocks**; MEDIUM and LOW are listed in the report and can go into a follow-up issue, but do not block:
 
 | Shadow severity | Criterion |
 |---|---|
@@ -80,7 +81,7 @@ Do not pass `--comment` or `--fix`: this phase only collects findings. Each find
 | MEDIUM | A wrong result in an edge case |
 | LOW | Cosmetic, or unclear whether it is a bug at all |
 
-The shadow severity is reported and logged (Phase 8), but never changes the verdict. It measures what a downgrade of MEDIUM and LOW findings would have changed.
+The shadow severity is reported and logged with every finding (Phase 8), so the log shows what the downgrade of MEDIUM and LOW findings let through.
 
 ## Phase 4: Tests
 
@@ -175,23 +176,35 @@ The verdict comes from one helper, so this skill and `/pre-merge --post` read th
 }
 ```
 
-`pr` is `null` without a PR number; leave a section out (or empty) when its phase did not run. Then:
+`pr` is `null` without a PR number; leave a section out (or empty) when its phase did not run.
+
+**Out-of-scope findings.** A finding of either review that is clearly outside the PR's scope (its code is untouched by the diff and the gap already exists on the base branch, or fixing it goes beyond the issue's acceptance criteria; the full rule is "Out-of-scope findings" in `~/.claude/skills/queue-run/references/review-and-fix.md`) gets `"followup": "<key>"`: its thread id, or a short slug such as `bin/x.sh:redirect-gap`. It never blocks, whatever its severity; the helper reports it under `followup_findings`. With `--post`, read the PR body's Follow-ups first (`~/.claude/bin/pr-followup.py list --repo <repo> --pr <PR>`): a finding listed there is a follow-up under its listed key. When the scope is unclear, leave the finding as it is.
+
+**Open review threads (only with `--post`).** An earlier review may have left open threads on the PR; a finding one of them already raises must not open a second thread. List them first:
+
+```bash
+~/.claude/bin/cmd-save.sh /tmp/<project>-pre-merge-threads-<key>.json ~/.claude/bin/pr-review-threads.py list --repo <repo> --pr <PR>
+```
+
+Each entry is an unresolved thread with its `id`, `path`, `line` (`null` when outdated), `original_line` and `comments`. When a finding is the same problem as a thread (same file, and its comments describe that problem; an outdated thread counts too), add `"thread": "<id>"` to that finding in the gates file. Phase 10 then replies on that thread instead of posting a new inline comment. Only add a thread id when it is the same problem, not merely the same line. When the list fails, add no thread ids and say so in the report.
+
+Then:
 
 ```bash
 ~/.claude/bin/pre-merge-verdict.py --input /tmp/<project>-pre-merge-gates-<key>.json
 ```
 
-It prints JSON with `verdict`, `human_reasons`, `blocking_reasons`, `listed_findings`, `approved_escalations` and `correctness.line`, and appends one row per `/code-review` finding to `~/.claude/pre-merge-findings.tsv` (date, repo, PR or branch, `file:line`, shadow severity, verdict). Exit 2 means the input was invalid: fix the JSON and run it again; never pick a verdict yourself.
+It prints JSON with `verdict`, `human_reasons`, `blocking_reasons`, `listed_findings`, `followup_findings`, `approved_escalations` and `correctness.line`, and appends one row per `/code-review` finding to `~/.claude/pre-merge-findings.tsv` (date, repo, PR or branch, `file:line`, shadow severity, verdict). Exit 2 means the input was invalid: fix the JSON and run it again; never pick a verdict yourself.
 
 The mapping it applies, top to bottom:
 
 | Condition | Verdict |
 |---|---|
 | An escalation hit (category 1 to 5) without approval, an `UNVERIFIABLE` AC, or a runtime check that fails | `HUMAN` |
-| Any `/code-review` finding, a `/review` HIGH/CRITICAL finding, a failing test, or a `NOT MET` AC | `BLOCKING` |
+| A `/code-review` finding with HIGH shadow severity, a `/review` HIGH/CRITICAL finding, a failing test, or a `NOT MET` AC | `BLOCKING` |
 | Otherwise | `APPROVE` |
 
-`HUMAN` takes precedence over `BLOCKING`; the `BLOCKING` reasons stay listed. MEDIUM/LOW findings are listed under every verdict.
+`HUMAN` takes precedence over `BLOCKING`; the `BLOCKING` reasons stay listed. MEDIUM/LOW findings of both reviews never block: they are in `listed_findings` under every verdict, so a review with only MEDIUM/LOW findings reaches `APPROVE` and still shows them.
 
 ## Phase 9: Gate Report
 
@@ -229,7 +242,7 @@ Then the detail sections, each only when it has content:
   |---|----------|---------|------------------|-----------------|
   | 1 | bin/x.sh:7 | Off by one | The last item is skipped | MEDIUM |
 
-  `1 of 1 correctness findings would have been downgraded`
+  `1 of 1 correctness findings downgraded (MEDIUM/LOW: listed, not blocking)`
 - **Code Review**: the findings table from `/review`, MEDIUM/LOW included under every verdict.
 - **Tests**: failure details.
 - **Acceptance**: the AC table with a `VERIFIED` / `NOT MET` / `UNVERIFIABLE` status per criterion.
@@ -251,12 +264,12 @@ Then:
 ~/.claude/bin/pre-merge-post.py --gates /tmp/<project>-pre-merge-gates-<key>.json --body /tmp/<project>-pre-merge-report-<key>.md [--human /tmp/<project>-pre-merge-human-<key>.json]
 ```
 
-It recomputes the verdict with the Phase 8 rules and posts the matching event: `APPROVE` → `APPROVE`, `BLOCKING` → `REQUEST_CHANGES`, `HUMAN` → `COMMENT` with the decisions on top of the body. Findings on a diff line become inline comments of that review; the rest are listed in its body. On `HUMAN` it then adds `needs-human` to the PR and to every linked issue (`escalation.linked_issues`). The app has `Contents: Read-only`, so its `APPROVE` does not count toward a required-approvals rule.
+It recomputes the verdict with the Phase 8 rules and posts the matching event: `APPROVE` → `APPROVE`, `BLOCKING` → `REQUEST_CHANGES`, `HUMAN` → `COMMENT` with the decisions on top of the body. Findings on a diff line become inline comments of that review; the rest are listed in its body. A finding with a `thread` that is still open gets no new inline comment: after the review it is a reply on that thread (starting with the `<!-- queue-runner -->` marker, so the queue runner's rework never reads it as new review input), and the body lists it under "Findings on an open review thread" with the thread id. On `HUMAN` it adds `needs-human` to the PR and to every linked issue (`escalation.linked_issues`) right after the review, before the thread replies, so a failed reply cannot leave the review unlabeled; a failed reply does not stop the others. A `followup` finding is neither an inline comment nor a thread reply; the body lists it under "Out of scope: follow-up issues". After the post, file each one under the app: write its description with the Write tool, then `~/.claude/bin/pr-followup.py file --repo <repo> --pr <PR> --key <key> --title "<title>" --body-file <file> [--thread <id>] --app` (idempotent; it adds the issue to the PR body's Follow-ups and answers the thread). The app has `Contents: Read-only`, so its `APPROVE` does not count toward a required-approvals rule.
 
 | Exit | `status` | Meaning |
 |---|---|---|
 | 0 | `posted` | Review on the PR (and labels set on `HUMAN`) |
-| 3 | `post_failed` | No token or an API error; `stage` (`files`, `review`, `label`), `error`, `review_posted` |
+| 3 | `post_failed` | No token or an API error; `stage` (`files`, `threads`, `review`, `thread`, `label`), `error`, `review_posted`; with the review posted also `review_url` and `thread_replies` (the replies that went out) |
 | 2 | (no JSON) | Invalid input, nothing sent: fix it and run again |
 
 A post failure is not a verdict: report the verdict from Phase 8 plus `review not posted (<error>)`, and never retry as the user's own account.

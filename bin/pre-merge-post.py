@@ -27,22 +27,41 @@ What one run does:
      or a /review finding whose location is file:line) is an inline comment of
      that review; findings with a file but no diff line are listed in the body,
      because GitHub rejects the whole review for one comment off the diff.
-  3. HUMAN only: add the label needs-human to the PR and to every linked issue
-     (escalation.linked_issues of the gates file), after the review is in.
+  3. A finding with "thread": "<review thread id>" (from `pr-review-threads.py
+     list`) that is still open gets no new inline comment (#378): after the
+     review, it is a reply on that thread (pr-review-threads.py, so the reply
+     starts with the `<!-- queue-runner -->` marker), and the review body
+     lists it with the thread id. A thread that is no longer open is ignored:
+     the finding is posted as one without a thread. The open threads are read
+     only when a finding names one. A failed reply does not stop the replies
+     to the other threads.
+     A finding with "followup" (#379, out of the PR's scope) gets neither an
+     inline comment nor a thread reply: the body lists it under "Out of
+     scope: follow-up issues", and pr-followup.py files the issue and
+     answers its thread.
+  4. HUMAN only: add the label needs-human to the PR and to every linked issue
+     (escalation.linked_issues of the gates file), after the review is in and
+     before the thread replies of step 3, so a failed reply cannot leave a
+     HUMAN review unlabeled.
 
 Result, one JSON object on stdout (exit 0 and 3):
 
   posted:      {"status": "posted", "verdict": "APPROVE|BLOCKING|HUMAN",
                 "event": "APPROVE|REQUEST_CHANGES|COMMENT", "review_id": 1,
                 "review_url": "...", "inline_comments": N, "body_findings": N,
+                "followups": N, "thread_replies": ["<reply url>", ...],
                 "labeled": [<PR>, <issue>, ...]}
-  post_failed: {"status": "post_failed", "stage": "files|review|label",
+  post_failed: {"status": "post_failed",
+                "stage": "files|threads|review|thread|label",
                 "error": "...", "review_posted": false|true,
-                "review_url": "..." (only when review_posted)}
+                "review_url": "...", "thread_replies": ["<reply url>", ...]
+                (both only when review_posted)}
 
 A post failure is never a verdict: post_failed carries no "verdict" or
 "event", so a caller cannot mistake it for one. review_posted true means the
-review is on the PR but a label is missing (stage label). A missing app or
+review is on the PR but a thread reply (stage thread) or a label (stage
+label) is missing; thread_replies lists the replies that did go out, and
+"error" names every thread whose reply failed. A missing app or
 token surfaces as a failure of the first call (stage files), with the token
 script's message in "error".
 
@@ -65,6 +84,7 @@ from pathlib import Path
 
 BIN_DIR = Path(__file__).resolve().parent
 VERDICT_SCRIPT = BIN_DIR / "pre-merge-verdict.py"
+THREADS_SCRIPT = BIN_DIR / "pr-review-threads.py"
 TOKEN_SCRIPT_ENV = "PRE_MERGE_TOKEN_SCRIPT"
 DEFAULT_TOKEN_SCRIPT = BIN_DIR / "gh-app-token.sh"
 
@@ -73,6 +93,13 @@ STATUS_POST_FAILED = "post_failed"
 STAGE_FILES = "files"
 STAGE_REVIEW = "review"
 STAGE_LABEL = "label"
+STAGE_THREADS = "threads"
+STAGE_THREAD = "thread"
+
+# A finding may name the open review thread that already raises it (#378).
+THREAD_KEY = "thread"
+REREVIEW_PREFIX = "Still applies at this re-review:"
+FOLLOWUP_HEADING = "Out of scope: follow-up issues (not blocking, see the PR's Follow-ups)"
 
 EXIT_POSTED = 0
 EXIT_INVALID = 2
@@ -88,20 +115,22 @@ HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 LOCATION = re.compile(r"^(?P<path>.+?):(?P<line>\d+)$")
 
 
-def _load_verdict_module():
-    spec = importlib.util.spec_from_file_location("pre_merge_verdict", VERDICT_SCRIPT)
+def _load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-V = _load_verdict_module()
+V = _load_module("pre_merge_verdict", VERDICT_SCRIPT)
+T = _load_module("pr_review_threads", THREADS_SCRIPT)
 
 
 class PostFailed(Exception):
-    def __init__(self, stage, error, review=None):
+    def __init__(self, stage, error, review=None, thread_replies=None):
         super().__init__(error)
         self.stage, self.error, self.review = stage, error, review
+        self.thread_replies = thread_replies or []
 
 
 # --- input ----------------------------------------------------------------------
@@ -156,8 +185,18 @@ def _line(value):
     return line if line > 0 else None
 
 
+def validate_threads(gates):
+    """The optional "thread" of a finding: a non-empty review thread id."""
+    for key in ("correctness_findings", "review_findings"):
+        for f in gates.get(key, []):
+            thread = f.get(THREAD_KEY)
+            if thread is not None and (not isinstance(thread, str) or not thread.strip()):
+                raise V.Invalid(f"{key}: '{THREAD_KEY}' must be a non-empty review thread id")
+
+
 def collect_findings(gates):
-    """Every finding with a file: (path, line or None, inline text, list text)."""
+    """Every finding with a file, a thread or a follow-up key:
+    (path, line or None, inline text, list text, thread id or None, follow-up key or None)."""
     found = []
     for f in gates.get("correctness_findings", []):
         line = _line(f.get("line"))
@@ -165,13 +204,17 @@ def collect_findings(gates):
                 f"{f.get('summary', '')}")
         if f.get("failure_scenario"):
             text += f"\n\nFailure scenario: {f['failure_scenario']}"
-        found.append((f["file"], line, text, f"correctness: {f.get('summary', '')}"))
+        found.append((f["file"], line, text, f"correctness: {f.get('summary', '')}",
+                      f.get(THREAD_KEY), f.get(V.FOLLOWUP_KEY)))
     for f in gates.get("review_findings", []):
         match = LOCATION.match(str(f.get("location") or ""))
-        if match:
-            found.append((match["path"], int(match["line"]),
+        if match or f.get(THREAD_KEY) or f.get(V.FOLLOWUP_KEY):
+            path, line = (match["path"], int(match["line"])) if match else (
+                str(f.get("location") or "-"), None)
+            found.append((path, line,
                           f"**/review {f['severity']}**: {f.get('finding', '')}",
-                          f"/review {f['severity']}: {f.get('finding', '')}"))
+                          f"/review {f['severity']}: {f.get('finding', '')}",
+                          f.get(THREAD_KEY), f.get(V.FOLLOWUP_KEY)))
     return found
 
 
@@ -221,7 +264,7 @@ def human_section(decisions, reasons):
     return "\n".join(parts)
 
 
-def build_body(result, report, decisions, off_diff):
+def build_body(result, report, decisions, off_diff, on_thread=(), followups=()):
     verdict, event = result["verdict"], V.REVIEW_EVENTS[result["verdict"]]
     head = [f"**/pre-merge verdict: {verdict}** (review event `{event}`)", ""]
     if verdict == V.HUMAN:
@@ -231,7 +274,12 @@ def build_body(result, report, decisions, off_diff):
     tail = []
     if off_diff:
         tail = ["", "### Findings not on a line of the diff", bullet_list(off_diff)]
-    fixed = "\n".join(head) + "\n---\n\n"
+    if on_thread:
+        tail += ["", "### Findings on an open review thread (replied there, no new thread)",
+                 bullet_list(on_thread)]
+    if followups:
+        tail += ["", f"### {FOLLOWUP_HEADING}", bullet_list(followups)]
+    fixed ="\n".join(head) + "\n---\n\n"
     tail_text = "\n".join(tail)
     room = MAX_BODY - len(fixed) - len(tail_text)
     note = "\n\n(report truncated: GitHub limits the review body)"
@@ -269,16 +317,34 @@ def post(repo, pr, issues, result, report, decisions, gates):
     except ValueError as exc:
         raise PostFailed(STAGE_FILES, f"unreadable answer for the PR files: {exc}")
     on_diff = diff_lines(files)
+    findings = collect_findings(gates)
+    run_thread = thread_runner(repo)
+    open_ids = set()
+    if any(thread and not followup for *_, thread, followup in findings):
+        try:
+            open_ids = {t["id"] for t in T.list_open_threads(run_thread, repo, pr)}
+        except T.ThreadsFailed as exc:
+            raise PostFailed(STAGE_THREADS, exc.error)
 
-    comments, off_diff = [], []
-    for path, line, inline, listed in collect_findings(gates):
-        if line is not None and line in on_diff.get(path, ()):
+    comments, off_diff, on_thread, replies, followups = [], [], [], [], []
+    for path, line, inline, listed, thread, followup in findings:
+        where = f"`{path}{f':{line}' if line else ''}` {listed}"
+        if followup:
+            # Out of the PR's scope (#379): pr-followup.py files the issue and
+            # answers the thread; the review neither comments nor replies.
+            followups.append(f"{where} (follow-up `{followup}`)")
+        elif thread in open_ids:
+            # An open thread already raises it: reply there, open no new thread.
+            on_thread.append(f"{where} (thread `{thread}`)")
+            replies.append((thread, f"{REREVIEW_PREFIX}\n\n{inline}"))
+        elif line is not None and line in on_diff.get(path, ()):
             comments.append({"path": path, "line": line, "side": DIFF_SIDE, "body": inline})
         else:
-            off_diff.append(f"`{path}{f':{line}' if line else ''}` {listed}")
+            off_diff.append(where)
 
     event = V.REVIEW_EVENTS[result["verdict"]]
-    request = {"event": event, "body": build_body(result, report, decisions, off_diff),
+    request = {"event": event, "body": build_body(result, report, decisions, off_diff, on_thread,
+                                                  followups),
                "comments": comments}
     answer = gh_api(repo, STAGE_REVIEW, "-X", "POST", f"repos/{repo}/pulls/{pr}/reviews",
                     payload=request)
@@ -287,6 +353,8 @@ def post(repo, pr, issues, result, report, decisions, gates):
     except ValueError:
         review = {}
 
+    # The labels before the replies: a human acts on needs-human, while a
+    # missing reply only repeats what the review already says.
     labeled = []
     if result["verdict"] == V.HUMAN:
         for number in dict.fromkeys([pr, *issues]):
@@ -298,10 +366,30 @@ def post(repo, pr, issues, result, report, decisions, gates):
                 raise
             labeled.append(number)
 
+    # One failed reply does not stop the others; the failure names every
+    # failed thread and the replies already posted.
+    reply_urls, reply_errors = [], []
+    for thread, text in replies:
+        try:
+            reply_urls.append(T.reply(run_thread, thread, text)["reply_url"])
+        except (T.ThreadsFailed, PostFailed) as exc:
+            reply_errors.append(f"thread {thread}: {exc.error}")
+    if reply_errors:
+        raise PostFailed(STAGE_THREAD, " | ".join(reply_errors), review=review,
+                         thread_replies=reply_urls)
+
     return {"status": STATUS_POSTED, "verdict": result["verdict"], "event": event,
             "review_id": review.get("id"), "review_url": review.get("html_url", ""),
             "inline_comments": len(comments), "body_findings": len(off_diff),
-            "labeled": labeled}
+            "followups": len(followups), "thread_replies": reply_urls, "labeled": labeled}
+
+
+def thread_runner(repo):
+    """run(stage, payload) for pr-review-threads.py: GraphQL under the app token."""
+    def run(stage, payload):
+        own_stage = STAGE_THREADS if stage == T.STAGE_LIST else STAGE_THREAD
+        return gh_api(repo, own_stage, "graphql", payload=payload)
+    return run
 
 
 # --- CLI ----------------------------------------------------------------------------
@@ -318,6 +406,7 @@ def main(argv=None):
         gates = load_json(args.gates, "gates file")
         V.validate(gates)
         repo, pr, issues = validate_target(gates)
+        validate_threads(gates)
         try:
             report = Path(args.body).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -341,6 +430,7 @@ def main(argv=None):
                "review_posted": exc.review is not None}
         if exc.review is not None:
             out["review_url"] = exc.review.get("html_url", "")
+            out["thread_replies"] = exc.thread_replies
         print(json.dumps(out, indent=2))
         return EXIT_POST_FAILED
     print(json.dumps(out, indent=2))

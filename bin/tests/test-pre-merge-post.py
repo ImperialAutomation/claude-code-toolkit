@@ -7,8 +7,9 @@ Run directly: python3 bin/tests/test-pre-merge-post.py
 Hermetic: `gh` is a stub first on PATH and the token script is a stub named
 by PRE_MERGE_TOKEN_SCRIPT, so nothing reaches GitHub and no app credentials
 are read. The gh stub records every call (arguments, GH_TOKEN, the --input
-body) and answers from fixtures; STUB_FAIL=files|review|label makes that call
-fail, STUB_NO_TOKEN makes the token stub fail like a missing app.
+body) and answers from fixtures; STUB_FAIL=files|threads|review|thread|label
+makes that call fail, STUB_FAIL_THREAD=<id> only the reply on that thread,
+STUB_NO_TOKEN makes the token stub fail like a missing app.
 PRE_MERGE_FINDINGS_LOG points at a temp file, which posting must not write.
 
 Covers the verdict-to-review-event mapping (APPROVE, REQUEST_CHANGES,
@@ -68,7 +69,23 @@ with (stub / "calls.jsonl").open("a") as fh:
     fh.write(json.dumps({"args": args, "gh_token": os.environ.get("GH_TOKEN"), "input": body}) + "\n")
 fail = os.environ.get("STUB_FAIL", "")
 path = next((a for a in args if a.startswith("repos/")), "")
-if re.search(r"/pulls/\d+/files", path):
+if args[:2] == ["api", "graphql"]:
+    q = (body or {}).get("query", "")
+    if "reviewThreads" in q:
+        if fail == "threads":
+            print("gh: Bad credentials (HTTP 401)", file=sys.stderr); sys.exit(1)
+        print(json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": json.loads((stub / "threads.json").read_text())}}}}}))
+    elif "addPullRequestReviewThreadReply" in q:
+        thread = (body or {}).get("variables", {}).get("thread")
+        if fail == "thread" or thread == os.environ.get("STUB_FAIL_THREAD"):
+            print("gh: Resource not accessible by integration (HTTP 403)", file=sys.stderr); sys.exit(1)
+        print(json.dumps({"data": {"addPullRequestReviewThreadReply": {"comment": {
+            "url": "https://github.com/owner/repo/pull/42#discussion_r555"}}}}))
+    else:
+        print(f"gh stub: unexpected query {q}", file=sys.stderr); sys.exit(1)
+elif re.search(r"/pulls/\d+/files", path):
     if fail == "files":
         print("gh: Not Found (HTTP 404)", file=sys.stderr); sys.exit(1)
     sys.stdout.write((stub / "files.out").read_text())
@@ -108,6 +125,16 @@ PAGE1 = [{"filename": "bin/x.sh", "patch": "@@ -1,3 +1,4 @@\n line1\n+line2\n li
 PAGE2 = [{"filename": "a.py", "patch": "@@ -10,2 +10,3 @@\n ctx\n+new\n ctx2"},
          {"filename": "img.png"}]
 (STUB / "files.out").write_text(json.dumps(PAGE1) + json.dumps(PAGE2) + "\n")
+# Open review threads of the PR (unresolved; one outdated). PRRT_gone is not
+# in the list: resolved since, or never there.
+(STUB / "threads.json").write_text(json.dumps([
+    {"id": "PRRT_open", "isResolved": False, "isOutdated": False, "path": "bin/x.sh",
+     "line": 2, "originalLine": 2, "comments": {"nodes": []}},
+    {"id": "PRRT_outdated", "isResolved": False, "isOutdated": True, "path": "a.py",
+     "line": None, "originalLine": 9, "comments": {"nodes": []}},
+    {"id": "PRRT_resolved", "isResolved": True, "isOutdated": False, "path": "a.py",
+     "line": 11, "originalLine": 11, "comments": {"nodes": []}}]))
+MARKER = "<!-- queue-runner -->"
 
 REPORT = "## Pre-Merge Quality Gate\n\nthe Phase 9 report\n"
 REPORT_FILE = TMP / "report.md"
@@ -141,6 +168,11 @@ def reset_stub():
 def calls():
     path = STUB / "calls.jsonl"
     return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+
+
+def graphql_calls(needle):
+    return [c for c in calls() if c["args"][:2] == ["api", "graphql"]
+            and needle in (c["input"] or {}).get("query", "")]
 
 
 def review_calls():
@@ -291,6 +323,115 @@ for name, content in [("an empty list", []),
     r, out = run(gates(escalation={"hits": [ESC_HIT]}), raw_args=[
         "--gates", str(TMP / "gates.json"), "--body", str(REPORT_FILE), "--human", str(bad)])
     check(f"--human with {name}: exit 2, nothing posted", r.returncode == 2 and calls() == [])
+
+# --- findings on an open review thread (#378) ---------------------------------
+
+print("--- findings on an open thread ---")
+r, out = run(gates(tests={"passed": 1, "failed": 0, "skipped": 0}), human=False)
+check("no finding names a thread: the open threads are not read",
+      r.returncode == 0 and graphql_calls("reviewThreads") == [] and out.get("thread_replies") == [])
+
+r, out = run(gates(
+    correctness_findings=[dict(finding(line=2, summary="off by one"), thread="PRRT_open"),
+                          dict(finding(line=3, summary="gone thread"), thread="PRRT_gone"),
+                          dict(finding(line=4, summary="resolved thread"), thread="PRRT_resolved")],
+    review_findings=[{"severity": "MEDIUM", "finding": "outdated one", "location": "a.py:9",
+                      "thread": "PRRT_outdated"}]), human=False)
+rc = review_calls()
+review = rc[0]["input"] if len(rc) == 1 else {}
+comments = review.get("comments", [])
+replies = graphql_calls("addPullRequestReviewThreadReply")
+reply_vars = [c["input"]["variables"] for c in replies]
+check("thread findings: exit 0, posted", r.returncode == 0 and out.get("status") == "posted")
+check("the open threads are read once, under the app token",
+      len(graphql_calls("reviewThreads")) == 1
+      and all(c["gh_token"] == APP_TOKEN for c in graphql_calls("reviewThreads")))
+check("a finding on an open thread opens no new inline comment",
+      not any("off by one" in c.get("body", "") for c in comments))
+check("a finding on an open thread is a reply on that thread",
+      any(v["thread"] == "PRRT_open" and "off by one" in v["body"] for v in reply_vars))
+check("an outdated open thread is replied on too (no line needed)",
+      any(v["thread"] == "PRRT_outdated" and "outdated one" in v["body"] for v in reply_vars))
+check("exactly the two open threads get a reply", sorted(v["thread"] for v in reply_vars)
+      == ["PRRT_open", "PRRT_outdated"])
+check("every reply starts with the queue-runner marker line",
+      reply_vars and all(v["body"].startswith(MARKER + "\n") for v in reply_vars))
+check("the replies go out under the app token",
+      replies and all(c["gh_token"] == APP_TOKEN for c in replies))
+check("a finding whose thread is no longer open is posted as a new inline comment",
+      any(c.get("line") == 3 and "gone thread" in c.get("body", "") for c in comments)
+      and any(c.get("line") == 4 and "resolved thread" in c.get("body", "") for c in comments))
+check("the review body lists the threaded findings with their thread ids",
+      "Findings on an open review thread" in review.get("body", "")
+      and "PRRT_open" in review.get("body", "") and "PRRT_outdated" in review.get("body", ""))
+kinds = ["review" if c in rc else "reply" if c in replies else "other" for c in calls()]
+check("the replies go out after the review",
+      "reply" in kinds and kinds.index("review") < kinds.index("reply"))
+check("output lists the reply urls",
+      out.get("thread_replies") == ["https://github.com/owner/repo/pull/42#discussion_r555"] * 2)
+
+r, out = run(gates(correctness_findings=[dict(finding(line=2), thread="")]), human=False)
+check("an empty thread id: exit 2, nothing posted", r.returncode == 2 and calls() == [])
+
+r, out = run(gates(correctness_findings=[dict(finding(line=2), thread="PRRT_open")]), human=False,
+             env_extra={"STUB_FAIL": "threads"})
+check("open threads unreadable: exit 3, stage threads, no review posted",
+      r.returncode == 3 and out.get("stage") == "threads" and review_calls() == []
+      and out.get("review_posted") is False)
+
+r, out = run(gates(correctness_findings=[dict(finding(line=2), thread="PRRT_open")]), human=False,
+             env_extra={"STUB_FAIL": "thread"})
+check("thread reply error after the review: exit 3, stage thread, review_posted true",
+      r.returncode == 3 and out.get("stage") == "thread" and out.get("review_posted") is True
+      and "PRRT_open" in out.get("error", "") and "verdict" not in out)
+
+r, out = run(gates(
+    correctness_findings=[dict(finding(line=2, summary="off by one"), thread="PRRT_open")],
+    review_findings=[{"severity": "MEDIUM", "finding": "outdated one", "location": "a.py:9",
+                      "thread": "PRRT_outdated"}]), human=False,
+    env_extra={"STUB_FAIL_THREAD": "PRRT_open"})
+replied = [c["input"]["variables"]["thread"] for c in graphql_calls("addPullRequestReviewThreadReply")]
+check("one failed reply: the other thread is still replied on",
+      r.returncode == 3 and replied == ["PRRT_open", "PRRT_outdated"])
+check("one failed reply: the error names only the failed thread",
+      "PRRT_open" in out.get("error", "") and "PRRT_outdated" not in out.get("error", ""))
+check("one failed reply: thread_replies lists the reply that went out",
+      out.get("thread_replies") == ["https://github.com/owner/repo/pull/42#discussion_r555"])
+
+r, out = run(gates(escalation={"hits": [ESC_HIT], "linked_issues": [{"number": 7, "labels": []}]},
+                   correctness_findings=[dict(finding(line=2), thread="PRRT_open")]),
+             env_extra={"STUB_FAIL": "thread"})
+check("HUMAN with a failed reply: exit 3, stage thread, yet the PR and the issue are labeled",
+      r.returncode == 3 and out.get("stage") == "thread"
+      and sorted(a for c in label_calls() for a in c["args"] if a.endswith("/labels")) == [
+          "repos/owner/repo/issues/42/labels", "repos/owner/repo/issues/7/labels"])
+
+# --- follow-up findings (#379) ----------------------------------------------------
+
+print("--- follow-up findings ---")
+r, out = run(gates(
+    correctness_findings=[dict(finding(line=2, shadow="HIGH", summary="redirect gap"),
+                               followup="bin/x.sh:redirect-gap"),
+                          dict(finding(line=3, shadow="HIGH", summary="old hint"),
+                               thread="PRRT_open", followup="PRRT_open")],
+    review_findings=[{"severity": "MEDIUM", "finding": "magic number", "location": "a.py:11"}]),
+    human=False)
+rc = review_calls()
+review = rc[0]["input"] if len(rc) == 1 else {}
+body = review.get("body", "")
+check("follow-up HIGH findings only: exit 0, event APPROVE (they do not block)",
+      r.returncode == 0 and review.get("event") == "APPROVE" and out.get("verdict") == "APPROVE")
+check("a follow-up finding is no inline comment",
+      not any("redirect gap" in c.get("body", "") or "old hint" in c.get("body", "")
+              for c in review.get("comments", [])))
+check("the in-scope finding next to them is still inline",
+      any("magic number" in c.get("body", "") for c in review.get("comments", [])))
+check("the body lists the follow-ups with their keys under the follow-up heading",
+      "Out of scope: follow-up issues" in body and "redirect gap" in body
+      and "bin/x.sh:redirect-gap" in body and "old hint" in body)
+check("a follow-up finding on an open thread gets no 'still applies' reply (pr-followup.py answers it)",
+      graphql_calls("addPullRequestReviewThreadReply") == [] and graphql_calls("reviewThreads") == [])
+check("output counts the follow-ups", out.get("followups") == 2 and out.get("body_findings") == 0)
 
 # --- post failures: distinct, never a verdict ---------------------------------
 

@@ -8,8 +8,9 @@ Hermetic: every run points PRE_MERGE_FINDINGS_LOG at a temp file, so the real
 ~/.claude/pre-merge-findings.tsv is never touched.
 
 Covers every row of the verdict mapping (#295): escalation hit, UNVERIFIABLE
-AC, runtime FAIL (HUMAN); /code-review finding, /review HIGH/CRITICAL finding,
-failing test, NOT MET AC (BLOCKING); only MEDIUM/LOW, nothing (APPROVE); a
+AC, runtime FAIL (HUMAN); /code-review finding with HIGH shadow severity,
+/review HIGH/CRITICAL finding, failing test, NOT MET AC (BLOCKING); only
+MEDIUM/LOW findings of either review (#374), nothing (APPROVE); a
 review that meets both HUMAN and BLOCKING; approved escalations; and the
 measurement log rows.
 
@@ -95,8 +96,11 @@ check("runtime FAIL -> HUMAN",
       == "HUMAN")
 
 print("--- BLOCKING rows ---")
-check("any /code-review finding -> BLOCKING, even with LOW shadow severity",
-      verdict(base(correctness_findings=[finding(shadow="LOW")])) == "BLOCKING")
+check("/code-review finding with HIGH shadow severity -> BLOCKING",
+      verdict(base(correctness_findings=[finding(shadow="HIGH")])) == "BLOCKING")
+check("/code-review MEDIUM finding next to a HIGH one -> still BLOCKING",
+      verdict(base(correctness_findings=[finding(shadow="MEDIUM"),
+                                         finding(line=8, shadow="HIGH")])) == "BLOCKING")
 check("/review HIGH finding -> BLOCKING",
       verdict(base(review_findings=[{"severity": "HIGH", "finding": "uncaught error",
                                      "location": "a.py:3"}])) == "BLOCKING")
@@ -120,6 +124,18 @@ check("only MEDIUM/LOW findings, WARN/SKIP runtime, green tests -> APPROVE",
 check("MEDIUM/LOW findings are still listed under APPROVE",
       any("magic number" in f for f in out.get("listed_findings", []))
       and any("todo" in f for f in out.get("listed_findings", [])))
+r, out = run(base(correctness_findings=[finding(shadow="MEDIUM", summary="edge case"),
+                                        finding(line=8, shadow="LOW", summary="cosmetic")],
+                  review_findings=[{"severity": "MEDIUM", "finding": "magic number", "location": "c.py:9"}],
+                  tests={"passed": 3, "failed": 0, "skipped": 0},
+                  acceptance=[{"criterion": "x", "status": "VERIFIED"}]))
+check("only MEDIUM/LOW /code-review findings -> APPROVE (#374)", out.get("verdict") == "APPROVE")
+check("MEDIUM/LOW /code-review findings are listed with location and shadow severity",
+      any("bin/x.sh:7" in f and "edge case" in f and "shadow MEDIUM" in f
+          for f in out.get("listed_findings", []))
+      and any("bin/x.sh:8" in f and "cosmetic" in f and "shadow LOW" in f
+              for f in out.get("listed_findings", [])))
+check("MEDIUM/LOW /code-review findings are not blocking reasons", out.get("blocking_reasons") == [])
 check("nothing at all -> APPROVE", verdict(base()) == "APPROVE")
 check("review_event: APPROVE -> APPROVE, BLOCKING -> REQUEST_CHANGES",
       run(base())[1].get("review_event") == "APPROVE"
@@ -167,17 +183,56 @@ check("scope (category 5) is never approvable by label",
                                "linked_issues": [{"number": 1, "labels": ["approved:scope"]}]}))
       == "HUMAN")
 
+print("--- follow-up findings (#379) ---")
+r, out = run(base(correctness_findings=[dict(finding(shadow="HIGH", summary="redirect gap"),
+                                             followup="lib/live-checkout.sh:redirect-gap")],
+                  review_findings=[{"severity": "CRITICAL", "finding": "old hint edge case",
+                                    "location": "e.py:2", "followup": "PRRT_abc"}],
+                  tests={"passed": 1, "failed": 0, "skipped": 0}))
+check("a HIGH/CRITICAL finding marked followup does not block -> APPROVE",
+      r.returncode == 0 and out.get("verdict") == "APPROVE" and out.get("blocking_reasons") == [])
+check("follow-up findings are in followup_findings with their key, not in listed_findings",
+      len(out.get("followup_findings", [])) == 2
+      and any("redirect gap" in f and "lib/live-checkout.sh:redirect-gap" in f
+              for f in out.get("followup_findings", []))
+      and any("old hint edge case" in f and "PRRT_abc" in f for f in out.get("followup_findings", []))
+      and out.get("listed_findings") == [])
+r, out = run(base(correctness_findings=[dict(finding(shadow="HIGH", summary="out of scope"),
+                                             followup="k1"),
+                                        finding(line=9, shadow="HIGH", summary="in scope")]))
+check("a follow-up next to an in-scope HIGH finding: still BLOCKING on the in-scope one only",
+      out.get("verdict") == "BLOCKING" and len(out.get("blocking_reasons", [])) == 1
+      and "in scope" in out["blocking_reasons"][0])
+check("no follow-up -> followup_findings is an empty list", run(base())[1].get("followup_findings") == [])
+r, out = run(base(correctness_findings=[dict(finding(shadow="HIGH"), followup="k1"),
+                                        dict(finding(line=8, shadow="MEDIUM"), followup="k2"),
+                                        finding(line=9, shadow="LOW")]))
+check("follow-ups of any severity count as routed, not as downgraded",
+      out.get("correctness", {}).get("followups") == 2
+      and out.get("correctness", {}).get("downgraded") == 1)
+check("the report line names the follow-ups",
+      out.get("correctness", {}).get("line")
+      == "1 of 3 correctness findings downgraded (MEDIUM/LOW: listed, not blocking), "
+         "2 routed to follow-ups (not blocking)")
+for bad in ("", "  ", 3, True):
+    r, out = run(base(correctness_findings=[dict(finding(), followup=bad)]))
+    check(f"followup {bad!r}: exit 2, no verdict", r.returncode == 2 and out == {})
+
 print("--- shadow severity count ---")
 r, out = run(base(correctness_findings=[finding(shadow="HIGH"), finding(line=8, shadow="MEDIUM"),
                                         finding(line=9, shadow="LOW")]))
-check("downgrade count: MEDIUM and LOW would have been downgraded",
+check("downgrade count: MEDIUM and LOW are downgraded",
       out.get("correctness", {}).get("downgraded") == 2 and out.get("correctness", {}).get("total") == 3)
 check("report line wording",
-      out.get("correctness", {}).get("line") == "2 of 3 correctness findings would have been downgraded")
-check("shadow severity never lowers the verdict", out.get("verdict") == "BLOCKING")
-check("each correctness finding is listed as BLOCKING with its shadow severity",
-      sum("shadow LOW" in b for b in out.get("blocking_reasons", [])) == 1
-      and len(out.get("blocking_reasons", [])) == 3)
+      out.get("correctness", {}).get("line")
+      == "2 of 3 correctness findings downgraded (MEDIUM/LOW: listed, not blocking)")
+check("no follow-ups: followups 0", out.get("correctness", {}).get("followups") == 0)
+check("one HIGH among MEDIUM/LOW findings -> BLOCKING", out.get("verdict") == "BLOCKING")
+check("only the HIGH correctness finding is a blocking reason",
+      len(out.get("blocking_reasons", [])) == 1
+      and "shadow HIGH" in out.get("blocking_reasons", [""])[0])
+check("the MEDIUM and LOW correctness findings are listed",
+      sum("shadow MEDIUM" in f or "shadow LOW" in f for f in out.get("listed_findings", [])) == 2)
 
 print("--- measurement log ---")
 if LOG.exists():

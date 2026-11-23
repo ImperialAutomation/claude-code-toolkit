@@ -99,7 +99,10 @@ of adding one (#300, D4).
 ```
 
 It prints `<N>` of the highest-priority `agent-rework` issue (oldest first
-within a priority), or nothing. A number:
+within a priority), or nothing. A PR the human handed back on the PR itself
+(a reply to its decision card, or `agent-rework` on the PR) is moved onto
+its issue first, one line on stderr per PR; a warning there (a reply not in
+the card's answer format) goes into the Step 7 line. A number:
 follow `~/.claude/skills/queue-run/references/rework.md` (Read it now)
 instead of Steps 2 to 5, then Steps 6 and 7. Exit 1: as for Step 2.
 Nothing: check capacity.
@@ -305,7 +308,10 @@ first matching row wins. `pr <url> <note>` keeps the PR, swaps `agent-ready`
 for `agent-pr` and adds `needs-human` with the text of
 `/tmp/<project>-queue-review-<N>.md` in the comment: write that file first
 with the Write tool (what happened, the review URLs, and the error or
-`NOT_ADDRESSED` of a report). The PR is never lost.
+`NOT_ADDRESSED` of a report). The PR is never lost. Before a `<note>`
+release after a review (every row with a note but the fix round's), post the
+PR's decision card ("Decision card" in `review-and-fix.md`) and put its URL
+in the note.
 
 | Review outcome (Step 4c) | Release |
 |---|---|
@@ -313,8 +319,8 @@ with the Write tool (what happened, the review URLs, and the error or
 | First review `HUMAN` (question, options and recommendation are in the review) | `release <N> pr <url> <note>` |
 | First review not posted | `release <N> pr <url> <note>`, the error in the note |
 | Fix round `ESCALATED`, `FAILED` or no report | `release <N> pr <url> <note>` |
-| Re-review `APPROVE` | `release <N> pr <url>` |
-| Re-review `BLOCKING`, `HUMAN` or not posted | `release <N> pr <url> <note>` |
+| Re-review `APPROVE` and no `left` finding | `release <N> pr <url>` |
+| Re-review `BLOCKING`, `HUMAN` or not posted, or a `left` finding (`left (scope)` included) | `release <N> pr <url> <note>` |
 
 These releases also pass, before `release`, each run log option that has a
 value: `--review <V>` (first review: `APPROVE`, `BLOCKING`, `HUMAN`, or
@@ -388,6 +394,19 @@ measure.
 - `queue: #<N> failed (first failure, back in queue) (<summary>) [budget 3/10]` or `(second failure, needs-human) (<summary>) [budget 3/10]`
 - `queue: idle (empty queue) [idle 2/16]` or `queue: idle (WIP limit <open>/<limit>) [idle 2/16]`
 - `queue: stopped (<why>) [<the line of queue-budget.sh stop>]`, e.g. `queue: stopped (stop: budget used up (10/10)) [runner: in 0.0k / cw 32k / cr 2.47M / out 13k, 1 agent]`
+
+**Waiting on you.** Under the line of a worked iteration and under a stop
+report, add the fixed block of PRs that wait on the human, one row per PR
+with its question count and decision card link (#376):
+
+```bash
+~/.claude/bin/queue-decision-card.py waiting --repo <owner/name>
+```
+
+`<owner/name>` is the GitHub repository of `<repo>`. Print its output as it
+is; it is empty when no PR waits, and then there is no block. An exit 3
+becomes the one line `Waiting on you: unknown (<error>)`. Idle lines get no
+block: they changed nothing.
 
 ## Pacing
 
