@@ -51,6 +51,14 @@ SELF_REPO_DIR=$(dirname "$SELF_BIN_DIR")
 # shellcheck source=bin/lib/git-env.sh
 . "$SELF_BIN_DIR/lib/git-env.sh"
 
+# An exported GIT_DIR or GIT_WORK_TREE would send the tests' fixture git calls
+# into that repository. The admission check below clears the full set itself.
+unset GIT_DIR GIT_WORK_TREE
+
+# Exit status of a command substitution whose git_env_isolate failed, told
+# apart from the status of the git call it guards.
+GIT_ENV_ISOLATE_FAILED=125
+
 # Tests skipped under --ci, keyed by path relative to the repo, with the reason
 # printed in the job log, e.g.
 #   [bin/tests/test-foo.sh]="reads the real ~/.claude/settings.json"
@@ -102,14 +110,14 @@ done
 # The git calls of this check run with the git environment cleared, each in its
 # own subshell: an exported GIT_DIR, GIT_COMMON_DIR or the like would make git
 # describe that repository instead of the directory it is asked about (#338).
-# The tests themselves inherit the caller's environment unchanged.
+# The tests themselves run with only GIT_DIR and GIT_WORK_TREE cleared (above).
 SELF_TREES=()
 SELF_TREES_LOADED=false
 load_self_trees() {
     $SELF_TREES_LOADED && return 0
     local path rest
-    ( git_env_isolate ) || {
-        echo "cannot clear the git environment: git rev-parse --local-env-vars failed or a git variable is readonly" >&2
+    git_env_load || {
+        echo "cannot clear the git environment: git rev-parse --local-env-vars failed" >&2
         exit 2
     }
     while IFS=$'\t' read -r path rest; do
@@ -127,9 +135,15 @@ load_self_trees() {
 # repository's own trees run without a prompt, never an arbitrary
 # toolkit-shaped directory. Call load_self_trees first.
 checkout_of_self() {
-    local dir="$1" what="$2" top t
-    top=$(git_env_isolate && git -C "$dir" rev-parse --show-toplevel 2>/dev/null) \
-        || { echo "$what is not inside a git checkout: $dir" >&2; exit 2; }
+    local dir="$1" what="$2" top t status
+    top=$(git_env_isolate || exit "$GIT_ENV_ISOLATE_FAILED"
+          git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
+    status=$?
+    if [[ $status -eq $GIT_ENV_ISOLATE_FAILED ]]; then
+        echo "cannot clear the git environment for $what: $dir" >&2; exit 2
+    elif [[ $status -ne 0 ]]; then
+        echo "$what is not inside a git checkout: $dir" >&2; exit 2
+    fi
     top=$(realpath -e "$top")
     for t in "${SELF_TREES[@]}"; do
         [[ "$t" == "$top" ]] && { echo "$top"; return 0; }

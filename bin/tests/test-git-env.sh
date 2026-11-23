@@ -23,9 +23,11 @@ check() { # name expected actual
     else echo "  FAIL: $1 (expected '$2', got '$3')"; FAIL=$((FAIL+1)); fi
 }
 
-# The variables named by git itself, plus the two discovery controls.
+# The variables named by git itself, plus the two discovery controls, each
+# once (a later git may list a discovery control itself).
 mapfile -t LOCAL_VARS < <(git rev-parse --local-env-vars)
-EXPECTED=("${LOCAL_VARS[@]}" GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM)
+mapfile -t EXPECTED < <(printf '%s\n' "${LOCAL_VARS[@]}" \
+    GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM | sort -u)
 
 # Export each with a marker value; print the ones a child still sees.
 leftover() { # [PATH override]
@@ -60,12 +62,19 @@ OUT=$(env GIT_COMMON_DIR=/redirected "$BASH" -c '
     git_env_isolate; echo "status $? ${GIT_COMMON_DIR-unset}"' _ "$LIB")
 check "clears under a caller IFS without newline" "status 0 unset" "$OUT"
 
-# A readonly variable fails it before anything is unset.
+# A readonly variable fails it, so the guarded git call does not run.
 # shellcheck disable=SC2016 # expanded by the child, not here
-OUT=$(env GIT_COMMON_DIR=/redirected GIT_DIR=/redirected "$BASH" -c '
+OUT=$(env GIT_DIR=/redirected "$BASH" -c '
     . "$1"; readonly GIT_DIR
-    git_env_isolate; echo "status $? ${GIT_COMMON_DIR-unset}"' _ "$LIB")
-check "a readonly variable fails and changes nothing" "status 1 /redirected" "$OUT"
+    git_env_isolate; echo "status $?"' _ "$LIB")
+check "a readonly variable fails it" "status 1" "$OUT"
+
+# git_env_load asks git once: with git gone afterwards, isolation still works.
+# shellcheck disable=SC2016 # expanded by the child, not here
+OUT=$(env GIT_COMMON_DIR=/redirected "$BASH" -c '
+    . "$1"; git_env_load; PATH=$2
+    git_env_isolate; echo "status $? ${GIT_COMMON_DIR-unset}"' _ "$LIB" "$EMPTY")
+check "reuses the list git_env_load read" "status 0 unset" "$OUT"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

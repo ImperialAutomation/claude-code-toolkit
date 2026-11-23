@@ -176,16 +176,18 @@ check "an exported GIT_COMMON_DIR does not admit an unrelated repository" "2" "$
 check "nothing ran under an exported GIT_COMMON_DIR" "" "$(ran)"
 check "the GIT_COMMON_DIR refusal says why" "yes" "$(contains "$OUT" "not a checkout of")"
 
-# The same variable does not refuse a real worktree, and only the admission
-# check clears it: the test itself still sees the caller's environment.
+# Redirecting variables do not refuse a real worktree, and the test itself
+# runs without GIT_DIR and GIT_WORK_TREE, so its fixture git calls cannot
+# reach the caller's repository.
 cat > "$WT/bin/tests/test-env.sh" <<'EOF'
 #!/bin/bash
-echo "$(basename "$0") $PWD ${GIT_COMMON_DIR:-unset}" >> "$MARK"
+echo "$(basename "$0") $PWD ${GIT_DIR:-unset} ${GIT_WORK_TREE:-unset}" >> "$MARK"
 EOF
 rm -f "$MARK"
-OUT=$(env -C "$T" GIT_COMMON_DIR="$OTHER/.git" bash "$LIVE" --repo "$WT" test-env.sh 2>&1); STATUS=$?
-check "an exported GIT_COMMON_DIR still admits a registered worktree" "0" "$STATUS"
-check "the test ran in the worktree with the caller's environment" "test-env.sh $WT $OTHER/.git" "$(ran)"
+OUT=$(env -C "$T" GIT_COMMON_DIR="$OTHER/.git" GIT_DIR="$OTHER/.git" GIT_WORK_TREE="$OTHER" \
+    bash "$LIVE" --repo "$WT" test-env.sh 2>&1); STATUS=$?
+check "exported git redirect variables still admit a registered worktree" "0" "$STATUS"
+check "the test ran in the worktree without GIT_DIR and GIT_WORK_TREE" "test-env.sh $WT unset unset" "$(ran)"
 
 echo "== absolute path to a test =="
 run "$LIVE" "$WT/bin/tests/test-alpha.sh"

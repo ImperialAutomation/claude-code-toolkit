@@ -5,6 +5,7 @@
 #
 #     # shellcheck source=bin/lib/git-env.sh
 #     . "$(dirname "${BASH_SOURCE[0]}")/lib/git-env.sh"
+#     git_env_load || exit 2   # once, in the parent shell
 #     top=$(git_env_isolate && git -C "$dir" rev-parse --show-toplevel)
 #
 # WHY THIS EXISTS
@@ -25,20 +26,27 @@
 # --local-env-vars list.
 GIT_ENV_DISCOVERY_VARS=(GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM)
 
-# Unset every repository-local git variable and the discovery controls in the
-# calling shell. Fails, changing nothing, when git cannot list them or one of
-# them is readonly. Call it in a subshell (`( git_env_isolate && git ... )`,
-# `$(git_env_isolate && git ...)`) to clear only that git call's environment.
-git_env_isolate() {
-    local vars v decl names=()
+# The names git_env_isolate clears, filled once by git_env_load.
+GIT_ENV_NAMES=()
+
+# Fill GIT_ENV_NAMES with every repository-local git variable and the discovery
+# controls, unsetting nothing. Asks git only on the first call: call it in the
+# parent shell before the subshells, so git_env_isolate in each of them reuses
+# the list instead of forking git again. Fails when git cannot list them.
+git_env_load() {
+    [[ ${#GIT_ENV_NAMES[@]} -gt 0 ]] && return 0
+    local vars
     vars=$(git rev-parse --local-env-vars 2>/dev/null) && [[ -n "$vars" ]] || return 1
     # One name per line; read as lines so the caller's IFS does not matter.
-    mapfile -t names <<<"$vars"
-    names+=("${GIT_ENV_DISCOVERY_VARS[@]}")
-    for v in "${names[@]}"; do
-        decl=$(declare -p "$v" 2>/dev/null) || continue
-        decl=${decl#declare -}
-        [[ "${decl%% *}" == *r* ]] && return 1
-    done
-    unset "${names[@]}"
+    mapfile -t GIT_ENV_NAMES <<<"$vars"
+    GIT_ENV_NAMES+=("${GIT_ENV_DISCOVERY_VARS[@]}")
+}
+
+# Unset every name of git_env_load in the calling shell. Fails, changing
+# nothing, when git cannot list them; fails too when one of them is readonly.
+# Call it in a subshell (`( git_env_isolate && git ... )`,
+# `$(git_env_isolate && git ...)`) to clear only that git call's environment.
+git_env_isolate() {
+    git_env_load || return 1
+    unset "${GIT_ENV_NAMES[@]}" 2>/dev/null
 }
