@@ -25,6 +25,13 @@
 #     directory; the live checkout's path is printed at the end
 # In every other repository the route below the toolkit section is unchanged.
 #
+# A named feature branch must be the branch of the tree the script runs in (or
+# that tree must be on the base branch). On any other branch, or a detached
+# HEAD, another session may be working there: the script refuses before any
+# change (exit 1), names the worktree that has the feature branch checked out,
+# or, when none has, prints the `git log` check and the `git branch -D` to
+# delete it by hand.
+#
 # Options (anywhere on the command line):
 #   --repo DIR       Run git in repository DIR (avoids a leading `cd`, which
 #                    would break the Bash(~/.claude/bin/*) permission match)
@@ -365,6 +372,36 @@ fi
 if [ "$FEATURE_BRANCH" = "$BASE_BRANCH" ]; then
     echo -e "${RED}Error: Cannot cleanup base branch '$BASE_BRANCH'${NC}"
     exit 1
+fi
+
+# A named feature branch must be the one this tree is on (#321). Another
+# session may have taken the tree over since the PR was opened; checking out
+# the base would then take that session's checkout away. A tree already on the
+# base is not switched, so that stays allowed (#321, D2). This runs before the
+# uncommitted-changes guard, so a dirty tree is refused for the right reason.
+if [ -n "${POSITIONAL[0]:-}" ]; then
+    CURRENT_BRANCH=$(git_filtered branch --show-current)
+    if [ "$CURRENT_BRANCH" != "$FEATURE_BRANCH" ] && [ "$CURRENT_BRANCH" != "$BASE_BRANCH" ]; then
+        echo -e "${RED}Error: this tree is on '${CURRENT_BRANCH:-detached HEAD}', not '$FEATURE_BRANCH'${NC}" >&2
+        echo "Another session may be working in it; it is left as it is." >&2
+        FEATURE_WORKTREE=""
+        while IFS=$'\t' read -r wt_path wt_branch _ _; do
+            [ "$wt_branch" != "$FEATURE_BRANCH" ] || FEATURE_WORKTREE="$wt_path"
+        done < <(worktree_list .)
+        if [ -n "$FEATURE_WORKTREE" ]; then
+            echo "'$FEATURE_BRANCH' is checked out in $FEATURE_WORKTREE; run the cleanup there:" >&2
+            echo "  ~/.claude/bin/$(basename "$0") --repo $FEATURE_WORKTREE $FEATURE_BRANCH $BASE_BRANCH" >&2
+        else
+            BASE_REF=$(git_filtered rev-parse --abbrev-ref --symbolic-full-name "$BASE_BRANCH@{upstream}" 2>/dev/null) \
+                || BASE_REF="origin/$BASE_BRANCH"
+            echo "'$FEATURE_BRANCH' is not checked out in any worktree. To delete it by hand:" >&2
+            echo "  git log --oneline $BASE_REF..$FEATURE_BRANCH   # must print nothing" >&2
+            echo "  git branch -D $FEATURE_BRANCH" >&2
+            echo "(Plain -d checks against this tree's current branch, which may be behind.)" >&2
+        fi
+        echo "Nothing was changed." >&2
+        exit 1
+    fi
 fi
 
 # Warn if there are uncommitted changes

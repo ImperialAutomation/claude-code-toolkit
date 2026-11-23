@@ -31,6 +31,9 @@
 #   31-32. toolkit: ignored files listed; --delete-remote -> cleans
 #   33-34. toolkit: a step fails after the checks        -> says what was done,
 #                                                           a re-run finishes
+#   35-38. tree not on the named feature branch (clean, dirty, feature checked
+#          out elsewhere, detached)                      -> refuse, nothing changed
+#   39-40. tree on the feature branch, named or not      -> cleans up as before
 #
 # Cases 3 and 4 assert the feature branch SURVIVES. A cleanup that fails after
 # deleting the branch is worse than one that never ran, and exit-status-only
@@ -676,6 +679,91 @@ check "branch still there" yes "$(branch_exists "$L" issue-34-widget)"
 OUT=$(run_tk "$L" "$L" issue-34-widget main); RC=$?
 check "re-run exits zero" 0 "$RC"
 check_cleaned "$L" "$L-34" issue-34-widget
+
+# --- Tree not on the named feature branch (#321) -------------------------------
+#
+# Another session may have taken the tree over since the PR was opened: it is
+# then on that session's branch, and checking out the base would take that
+# checkout away. The refusal must come before any change and before the
+# uncommitted-changes guard, so a dirty tree is refused for the right reason.
+
+# The post-merge fixture, with the tree switched to someone else's new branch.
+taken_over() { # name feature other
+    local d
+    d=$(newremote "$1" develop)
+    add_merged_feature "$d" develop "$2" >/dev/null
+    git -C "$d" checkout -q -b "$3"
+    echo "$d"
+}
+
+tree_state() { # repodir -> branch and HEAD
+    printf '%s %s\n' "$(git -C "$1" branch --show-current)" "$(git -C "$1" rev-parse HEAD)"
+}
+
+echo "== 35. tree on another branch, clean: refused, nothing changed =="
+R=$(taken_over r35 issue-35-feature issue-99-other)
+BEFORE=$(tree_state "$R")
+OUT=$(run_notty_yes "$R" issue-35-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "names the tree's branch" "is on 'issue-99-other', not 'issue-35-feature'" "$OUT"
+check "branch and HEAD unchanged" "$BEFORE" "$(tree_state "$R")"
+check "feature branch survives" yes "$(branch_exists "$R" issue-35-feature)"
+contains "says it is checked out nowhere" "not checked out in any worktree" "$OUT"
+contains "prints the unmerged-commit check" "git log --oneline origin/develop..issue-35-feature" "$OUT"
+contains "prints the force delete" "git branch -D issue-35-feature" "$OUT"
+
+echo "== 36. tree on another branch, dirty: wrong-branch refusal, not the dirty one =="
+R=$(taken_over r36 issue-36-feature issue-98-other)
+printf 'other session edit\n' >> "$R/README.md"
+BEFORE=$(tree_state "$R")
+OUT=$(run_notty_yes "$R" issue-36-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "wrong-branch message" "is on 'issue-98-other', not 'issue-36-feature'" "$OUT"
+lacks "not the uncommitted-changes message" "uncommitted changes" "$OUT"
+check "branch and HEAD unchanged" "$BEFORE" "$(tree_state "$R")"
+check "edit still there" "other session edit" "$(tail -n 1 "$R/README.md")"
+check "feature branch survives" yes "$(branch_exists "$R" issue-36-feature)"
+
+echo "== 37. feature branch checked out in another worktree: that path is named =="
+R=$(taken_over r37 issue-37-feature issue-97-other)
+git_q "$R" worktree add -q "$R-wt" issue-37-feature
+OUT=$(run_notty_yes "$R" issue-37-feature develop); RC=$?
+check "exit one" 1 "$RC"
+# git prints the worktree's resolved path, which differs from $R-wt where the
+# temp dir sits behind a symlink; the basename is what identifies it.
+contains "names the other worktree" "is checked out in " "$OUT"
+contains "with that worktree's path" "r37-wt; run the cleanup there" "$OUT"
+lacks "no force delete for a checked-out branch" "git branch -D" "$OUT"
+check "feature worktree untouched" issue-37-feature "$(git_q "$R-wt" branch --show-current)"
+
+echo "== 38. detached HEAD with a named feature branch: refused =="
+R=$(taken_over r38 issue-38-feature issue-96-other)
+git_q "$R" checkout -q --detach
+BEFORE=$(git_q "$R" rev-parse HEAD)
+OUT=$(run_notty_yes "$R" issue-38-feature develop); RC=$?
+check "exit one" 1 "$RC"
+contains "says detached" "detached HEAD" "$OUT"
+check "HEAD unchanged" "$BEFORE" "$(git_q "$R" rev-parse HEAD)"
+check "still detached" "" "$(git_q "$R" branch --show-current)"
+check "feature branch survives" yes "$(branch_exists "$R" issue-38-feature)"
+
+echo "== 39. tree on the named feature branch: cleans up as before =="
+R=$(newremote r39 develop)
+add_merged_feature "$R" develop issue-39-feature
+git_q "$R" checkout -q issue-39-feature
+OUT=$(run_notty "$R" issue-39-feature develop); RC=$?
+check "exit zero" 0 "$RC"
+check "feature branch deleted" no "$(branch_exists "$R" issue-39-feature)"
+check "on base branch" develop "$(git_q "$R" branch --show-current)"
+
+echo "== 40. no feature argument: the current branch is the feature =="
+R=$(newremote r40 develop)
+add_merged_feature "$R" develop issue-40-feature
+git_q "$R" checkout -q issue-40-feature
+OUT=$(run_notty "$R"); RC=$?
+check "exit zero" 0 "$RC"
+check "feature branch deleted" no "$(branch_exists "$R" issue-40-feature)"
+lacks "no wrong-branch refusal" "is on '" "$OUT"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
