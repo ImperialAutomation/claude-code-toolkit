@@ -67,7 +67,7 @@ EOF
 make_repo() {
     mkdir -p "$1/bin/tests" "$1/bin/lib"
     cp "$RUNNER" "$1/bin/run-tests.sh"
-    cp "$(dirname "$RUNNER")/lib/live-checkout.sh" "$1/bin/lib/"
+    cp "$(dirname "$RUNNER")/lib/live-checkout.sh" "$(dirname "$RUNNER")/lib/git-env.sh" "$1/bin/lib/"
     stub "$1/bin/tests/test-alpha.sh" 0 "alpha says hello"
     git -C "$1" init -q
     git -C "$1" add -A
@@ -163,6 +163,14 @@ rm -f "$MARK"
 OUT=$(env -C "$T" GIT_DIR="$MAIN/.git" bash "$LIVE" --repo "$OTHER" 2>&1); STATUS=$?
 check "an exported GIT_DIR does not admit an unrelated repository" "2" "$STATUS"
 check "nothing ran under an exported GIT_DIR" "" "$(ran)"
+
+# GIT_COMMON_DIR at the unrelated repository makes `git worktree list` of the
+# runner's own tree describe that repository's worktrees instead (#338).
+rm -f "$MARK"
+OUT=$(env -C "$T" GIT_COMMON_DIR="$OTHER/.git" bash "$LIVE" --repo "$OTHER" 2>&1); STATUS=$?
+check "an exported GIT_COMMON_DIR does not admit an unrelated repository" "2" "$STATUS"
+check "nothing ran under an exported GIT_COMMON_DIR" "" "$(ran)"
+check "the GIT_COMMON_DIR refusal says why" "yes" "$(contains "$OUT" "not a checkout of")"
 
 echo "== absolute path to a test =="
 run "$LIVE" "$WT/bin/tests/test-alpha.sh"

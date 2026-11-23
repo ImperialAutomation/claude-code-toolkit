@@ -48,9 +48,12 @@ SELF_REPO_DIR=$(dirname "$SELF_BIN_DIR")
 # shellcheck source=bin/lib/live-checkout.sh
 . "$SELF_BIN_DIR/lib/live-checkout.sh"
 
-# An exported GIT_DIR or GIT_WORK_TREE would make every git call below
-# describe that repository instead of the directory it is asked about.
-unset GIT_DIR GIT_WORK_TREE
+# shellcheck source=bin/lib/git-env.sh
+. "$SELF_BIN_DIR/lib/git-env.sh"
+
+# An exported GIT_DIR, GIT_COMMON_DIR or the like would make every git call
+# below describe that repository instead of the directory it is asked about.
+git_env_isolate || { echo "cannot clear the git environment: is git on PATH?" >&2; exit 2; }
 
 # Tests skipped under --ci, keyed by path relative to the repo, with the reason
 # printed in the job log, e.g.
