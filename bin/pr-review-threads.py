@@ -50,7 +50,7 @@ A GitHub failure prints {"status": "failed", "stage": "list|reply|resolve",
 the reply is on the thread but the resolve failed).
 
 Exit codes:
-  0  listed, or replied (and resolved for fixed)
+  0  listed, or replied (and resolved for fixed and followup)
   2  usage error (unknown outcome, sha not hex, empty reason, followup
      without an issue, bad --repo or --pr); nothing was sent, stderr says why
   3  a gh or GitHub GraphQL error; see the JSON result
