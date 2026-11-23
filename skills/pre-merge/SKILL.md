@@ -72,7 +72,7 @@ Call the `/code-review` skill through the Skill tool, level first and always exp
 
 Do not pass `--comment` or `--fix`: this phase only collects findings. Each finding has a file, a line, a summary and a failure scenario.
 
-**Every `/code-review` finding counts as HIGH for the verdict.** Next to that, assign each finding a **shadow severity** against these fixed criteria:
+Assign each finding a **shadow severity** against these fixed criteria. **Only a HIGH finding blocks**; MEDIUM and LOW are listed in the report and can go into a follow-up issue, but do not block:
 
 | Shadow severity | Criterion |
 |---|---|
@@ -80,7 +80,7 @@ Do not pass `--comment` or `--fix`: this phase only collects findings. Each find
 | MEDIUM | A wrong result in an edge case |
 | LOW | Cosmetic, or unclear whether it is a bug at all |
 
-The shadow severity is reported and logged (Phase 8), but never changes the verdict. It measures what a downgrade of MEDIUM and LOW findings would have changed.
+The shadow severity is reported and logged with every finding (Phase 8), so the log shows what the downgrade of MEDIUM and LOW findings let through.
 
 ## Phase 4: Tests
 
@@ -188,10 +188,10 @@ The mapping it applies, top to bottom:
 | Condition | Verdict |
 |---|---|
 | An escalation hit (category 1 to 5) without approval, an `UNVERIFIABLE` AC, or a runtime check that fails | `HUMAN` |
-| Any `/code-review` finding, a `/review` HIGH/CRITICAL finding, a failing test, or a `NOT MET` AC | `BLOCKING` |
+| A `/code-review` finding with HIGH shadow severity, a `/review` HIGH/CRITICAL finding, a failing test, or a `NOT MET` AC | `BLOCKING` |
 | Otherwise | `APPROVE` |
 
-`HUMAN` takes precedence over `BLOCKING`; the `BLOCKING` reasons stay listed. MEDIUM/LOW findings are listed under every verdict.
+`HUMAN` takes precedence over `BLOCKING`; the `BLOCKING` reasons stay listed. MEDIUM/LOW findings of both reviews never block: they are in `listed_findings` under every verdict, so a review with only MEDIUM/LOW findings reaches `APPROVE` and still shows them.
 
 ## Phase 9: Gate Report
 
@@ -229,7 +229,7 @@ Then the detail sections, each only when it has content:
   |---|----------|---------|------------------|-----------------|
   | 1 | bin/x.sh:7 | Off by one | The last item is skipped | MEDIUM |
 
-  `1 of 1 correctness findings would have been downgraded`
+  `1 of 1 correctness findings downgraded (MEDIUM/LOW: listed, not blocking)`
 - **Code Review**: the findings table from `/review`, MEDIUM/LOW included under every verdict.
 - **Tests**: failure details.
 - **Acceptance**: the AC table with a `VERIFIED` / `NOT MET` / `UNVERIFIABLE` status per criterion.

@@ -40,18 +40,18 @@ approved by a label.
 Mapping, top to bottom; HUMAN wins over BLOCKING, whose reasons stay listed:
 
   HUMAN     an unapproved escalation hit, an UNVERIFIABLE AC, a runtime FAIL
-  BLOCKING  any /code-review finding (each counts as HIGH, whatever its shadow
-            severity), a /review CRITICAL or HIGH finding, a failed test, a
-            NOT MET AC
-  APPROVE   otherwise; MEDIUM/LOW/INFO /review findings are listed anyway
+  BLOCKING  a /code-review finding with HIGH shadow severity, a /review
+            CRITICAL or HIGH finding, a failed test, a NOT MET AC
+  APPROVE   otherwise; MEDIUM/LOW /code-review findings and MEDIUM/LOW/INFO
+            /review findings are listed anyway, under every verdict
 
 Review event of each verdict, for /pre-merge --post (pre-merge-post.py):
 APPROVE -> APPROVE, BLOCKING -> REQUEST_CHANGES, HUMAN -> COMMENT plus the
 label needs-human.
 
-The shadow severity of a /code-review finding is reported and logged but never
-changes the verdict. A MEDIUM or LOW shadow severity counts as "would have
-been downgraded".
+The shadow severity of a /code-review finding decides whether it blocks (#374):
+HIGH blocks, MEDIUM and LOW are downgraded to listed findings. Every finding
+is logged with it, so the log shows what the downgrade let through.
 
 Output:
 
@@ -60,10 +60,10 @@ Output:
     "review_event": "APPROVE|REQUEST_CHANGES|COMMENT",
     "human_reasons": ["..."],
     "blocking_reasons": ["..."],
-    "listed_findings": ["..."],          # /review MEDIUM, LOW and INFO
+    "listed_findings": ["..."],          # /code-review MEDIUM/LOW, /review MEDIUM/LOW/INFO
     "approved_escalations": ["..."],
     "correctness": {"total": M, "downgraded": N,
-                    "line": "N of M correctness findings would have been downgraded"},
+                    "line": "N of M correctness findings downgraded (MEDIUM/LOW: listed, not blocking)"},
     "log": {"path": "...", "rows": M, "written": true}
   }
 
@@ -112,6 +112,8 @@ REVIEW_BLOCKING = ("CRITICAL", "HIGH")
 
 SHADOW_HIGH = "HIGH"
 SHADOW_SEVERITIES = (SHADOW_HIGH, "MEDIUM", "LOW")
+# Only these /code-review shadow severities block; the rest are listed (#374).
+CORRECTNESS_BLOCKING = (SHADOW_HIGH,)
 
 APPROVED_LABEL_PREFIX = "approved:"
 # Category 5 of docs/escalation-list.md: judgment, never approved by a label.
@@ -231,8 +233,8 @@ def evaluate(data):
 
     correctness = data.get("correctness_findings", [])
     for f in correctness:
-        blocking.append(f"correctness {location(f)}: {f.get('summary', '')} "
-                        f"(shadow {f['shadow_severity']})")
+        text = f"correctness {location(f)}: {f.get('summary', '')} (shadow {f['shadow_severity']})"
+        (blocking if f["shadow_severity"] in CORRECTNESS_BLOCKING else listed).append(text)
 
     for f in data.get("review_findings", []):
         text = f"review {f['severity']}: {f.get('finding', '')} ({f.get('location') or '-'})"
@@ -243,7 +245,7 @@ def evaluate(data):
         blocking.append(f"tests: {failed} failed")
 
     verdict = HUMAN if human else BLOCKING if blocking else APPROVE
-    downgraded = sum(f["shadow_severity"] != SHADOW_HIGH for f in correctness)
+    downgraded = sum(f["shadow_severity"] not in CORRECTNESS_BLOCKING for f in correctness)
     return {
         "verdict": verdict,
         "review_event": REVIEW_EVENTS[verdict],
@@ -254,7 +256,8 @@ def evaluate(data):
         "correctness": {
             "total": len(correctness),
             "downgraded": downgraded,
-            "line": f"{downgraded} of {len(correctness)} correctness findings would have been downgraded",
+            "line": (f"{downgraded} of {len(correctness)} correctness findings downgraded "
+                     "(MEDIUM/LOW: listed, not blocking)"),
         },
     }
 
