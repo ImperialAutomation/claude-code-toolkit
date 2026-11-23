@@ -26,10 +26,11 @@ nothing is live and none of this applies. Other repositories are never live.
   `git-resolve-worktree.sh --issue <N> --create <slug>`. From the live checkout
   that yields the sibling `../claude-code-toolkit-<N>` on `issue-<N>-<slug>`,
   branched from `origin/main`, created on first use and reused after.
-- `hook-block-toolkit-live-checkout.sh` refuses `git checkout`/`git switch` that
-  would take the live checkout off `main` (new branches, existing branches,
-  detached commits), and names the worktree route in its message. Path checkouts
-  pass. It sees only Claude's tool calls, not a human's terminal.
+- `hook-block-toolkit-live-checkout.sh` refuses `git checkout`/`git switch`,
+  `gh pr checkout` (also `--detach`) and `git bisect` that would take the live
+  checkout off `main` (new branches, existing branches, detached commits, PR
+  checkouts for a review), and names the worktree route in its message. Path
+  checkouts pass. It sees only Claude's tool calls, not a human's terminal.
 
 **Working by hand:** create the worktree yourself and work there with
 `git -C <worktree>` and absolute paths:

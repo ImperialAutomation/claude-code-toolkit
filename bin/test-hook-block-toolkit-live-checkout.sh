@@ -86,6 +86,24 @@ check 2 "env var assignment before git"           "$TK" "FOO=1 git checkout -b x
 check 2 "env before git"                          "$TK" "env FOO=1 git switch feature"
 check 2 "env -C <live>"                           "$OTHER" "env -C $TK git switch feature"
 check 2 "env --chdir=<live>"                      "$OTHER" "env --chdir=$TK git switch feature"
+check 2 "checkout --detach <sha>"                 "$TK" "git checkout --detach $SHA"
+# gh pr checkout moves HEAD to the PR branch, or detaches with --detach: a
+# review that checks out a PR in the live checkout makes that PR live (#375).
+check 2 "gh pr checkout in the live checkout"     "$TK" "gh pr checkout 365"
+check 2 "gh pr checkout --detach"                 "$TK" "gh pr checkout 365 --detach"
+check 2 "gh pr checkout -b <name>"                "$TK" "gh pr checkout -b pr-365 365"
+check 2 "gh co alias"                             "$TK" "gh co 365"
+check 2 "gh pr checkout from a subdirectory"      "$TK/bin" "gh pr checkout 365"
+check 2 "cd <live>, then gh pr checkout"          "$OTHER" "cd $TK && gh pr checkout 365 --detach"
+check 2 "env -C <live> gh pr checkout"            "$OTHER" "env -C $TK gh pr checkout 365"
+check 2 "gh pr checkout in a later segment"       "$TK" "git fetch; gh pr checkout 365"
+# git bisect detaches HEAD at every step it takes.
+check 2 "bisect start <bad> <good>"               "$TK" "git bisect start feature main"
+check 2 "bisect start without revisions"          "$TK" "git bisect start"
+check 2 "bisect good"                             "$TK" "git bisect good"
+check 2 "bisect run"                              "$TK" "git bisect run make test"
+check 2 "bisect reset onto another commit"        "$TK" "git bisect reset feature"
+check 2 "-C <live> bisect start"                  "$OTHER" "git -C $TK bisect start"
 
 # The deny reason must name the way out, or the agent improvises one.
 check 2 "deny reason probe"                       "$TK" "git checkout -b x"
@@ -96,6 +114,11 @@ esac
 case "$LAST_STDERR" in
   *"git -C $TK worktree add"*) echo "ok   deny reason names git worktree add" ;;
   *) echo "FAIL deny reason lacks git worktree add: $LAST_STDERR"; fail=1 ;;
+esac
+check 2 "gh deny reason probe"                    "$TK" "gh pr checkout 365 --detach"
+case "$LAST_STDERR" in
+  *"git-resolve-worktree.sh --issue"*"git -C $TK worktree add"*) echo "ok   gh deny reason names the worktree route" ;;
+  *) echo "FAIL gh deny reason lacks the worktree route: $LAST_STDERR"; fail=1 ;;
 esac
 
 # Allowed: back to (or staying on) the base branch.
@@ -121,6 +144,23 @@ check 0 "switch in a linked worktree"             "$WT" "git switch feature"
 check 0 "-C <linked worktree> from the live tree" "$TK" "git -C $WT switch -c z"
 check 0 "cd elsewhere, then switch"               "$TK" "cd $OTHER && git switch -c z"
 check 0 "another repository"                      "$OTHER" "git checkout -b z"
+check 0 "gh pr checkout in a linked worktree"     "$WT" "gh pr checkout 365"
+check 0 "gh pr checkout --detach in a linked worktree" "$WT" "gh pr checkout 365 --detach"
+check 0 "gh pr checkout in another repository"    "$OTHER" "gh pr checkout 365 --detach"
+check 0 "gh co in another repository"             "$OTHER" "gh co 365"
+check 0 "cd <linked worktree>, then gh pr checkout" "$TK" "cd $WT && gh pr checkout 365"
+check 0 "env -C <linked worktree> gh pr checkout" "$TK" "env -C $WT gh pr checkout 365"
+check 0 "bisect in a linked worktree"             "$WT" "git bisect start feature main"
+check 0 "bisect in another repository"           "$OTHER" "git bisect start"
+
+# Allowed: gh and bisect commands that move no HEAD.
+check 0 "gh pr view"                              "$TK" "gh pr view 365"
+check 0 "gh pr diff"                              "$TK" "gh pr diff 365"
+check 0 "gh pr list mentioning checkout"          "$TK" "gh pr list --search checkout"
+check 0 "gh issue view"                           "$TK" "gh issue view 375"
+check 0 "bisect reset"                            "$TK" "git bisect reset"
+check 0 "bisect reset <base>"                     "$TK" "git bisect reset main"
+check 0 "bisect log"                              "$TK" "git bisect log"
 
 # Allowed: unrelated commands, and words that merely look like the verbs.
 check 0 "git status"                              "$TK" "git status"
@@ -130,6 +170,8 @@ check 0 "not a git command"                       "$TK" "ls -la"
 # ~/.claude/bin is not a symlink: nothing is live, the hook does nothing.
 check 0 "no symlink: checkout -b"                 "$TK" "git checkout -b x" "$PLAIN_HOME"
 check 0 "no symlink: switch feature"              "$TK" "git switch feature" "$PLAIN_HOME"
+check 0 "no symlink: gh pr checkout"              "$TK" "gh pr checkout 365" "$PLAIN_HOME"
+check 0 "no symlink: bisect start"                "$TK" "git bisect start" "$PLAIN_HOME"
 
 # The hook must only ever judge, never act.
 if [ "$(git -C "$TK" branch --show-current)" = main ]; then
