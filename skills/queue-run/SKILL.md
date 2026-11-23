@@ -319,8 +319,8 @@ in the note.
 | First review `HUMAN` (question, options and recommendation are in the review) | `release <N> pr <url> <note>` |
 | First review not posted | `release <N> pr <url> <note>`, the error in the note |
 | Fix round `ESCALATED`, `FAILED` or no report | `release <N> pr <url> <note>` |
-| Re-review `APPROVE` | `release <N> pr <url>` |
-| Re-review `BLOCKING`, `HUMAN` or not posted | `release <N> pr <url> <note>` |
+| Re-review `APPROVE` and no `left` finding | `release <N> pr <url>` |
+| Re-review `BLOCKING`, `HUMAN` or not posted, or a `left` finding (`left (scope)` included) | `release <N> pr <url> <note>` |
 
 These releases also pass, before `release`, each run log option that has a
 value: `--review <V>` (first review: `APPROVE`, `BLOCKING`, `HUMAN`, or
