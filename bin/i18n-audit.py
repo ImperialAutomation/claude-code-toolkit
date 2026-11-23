@@ -322,11 +322,17 @@ def scan_translator_calls(
 
 
 def _generic_call_paren(line: str, match: re.Match) -> Optional[int]:
-    """Offset in `line` of the `(` of a bare `t(` match, else None."""
-    position = line.find("t(", match.start())
-    if position < 0 or position >= match.end():
-        return None
-    return position + 1
+    """Offset in `line` of the `(` of a bare `t(` match, else None.
+
+    A bare call match starts at `t(` or at the one delimiter before it. Any
+    other match (`<Trans ... i18nKey=...>`) is not a call, even when a `t(`
+    sits inside its span, so it is never skipped as handled.
+    """
+    start = match.start()
+    for position in (start, start + 1):
+        if line.startswith("t(", position):
+            return position + 1
+    return None
 
 
 def flatten_json(obj: dict, prefix: str = "") -> Dict[str, str]:

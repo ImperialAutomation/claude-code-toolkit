@@ -767,6 +767,15 @@ check(
 )
 
 check(
+    "next-intl: a <Trans i18nKey> holding a resolved t() call keeps its key",
+    scan_keys(
+        "const t = useTranslations('ns');\n"
+        "const x = <Trans components={t('a.b')} i18nKey=\"trans.key\" />;\n"
+    )
+    == {"ns.a.b", "trans.key"},
+)
+
+check(
     "next-intl: getTranslations({ locale }) without namespace is the root",
     scan_keys("const t = await getTranslations({ locale });\nt('orders.title');\n")
     == {"orders.title"},
