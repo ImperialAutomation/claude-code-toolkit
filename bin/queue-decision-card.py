@@ -9,6 +9,7 @@ Usage:
   queue-decision-card.py post    --repo <owner/name> --pr <N> --input <file>
                                  [--human <file>] [--gates <file>]
   queue-decision-card.py waiting --repo <owner/name> [--json]
+  queue-decision-card.py handback --repo <owner/name>
 
 Input (--input, one JSON object; an unknown key is an error):
 
@@ -75,6 +76,28 @@ waiting: the PRs that wait on the human: the open issues with both
            [{"pr": 42, "pr_url": "...", "issues": [17], "questions": 2,
              "answer": "choices", "card_url": "..."}]
            ("questions", "answer" and "card_url" are null without a card)
+handback: the open PRs the human handed back to the loop for a rework
+         (#377), for `queue-claim.sh claim --rework`. A PR counts when it
+         closes an open `agent-pr` issue without `agent-wip` or `epic`, and
+           label  the PR has `agent-rework`, or
+           reply  `needs-human` is on the PR or on such an issue, the PR has
+                  a decision card, and a human replied after it: a PR
+                  comment without the `<!-- queue-runner -->` marker and not
+                  by a bot (the loop comments as the human's own gh user, so
+                  the marker, not the author, tells them apart), created
+                  after the cutoff. The cutoff is the card's last edit
+                  (`updated_at`: each round edits the card), or the last
+                  marker comment on the PR or on one of those issues when
+                  that is later, so a reply the loop already answered (a
+                  rework round, a failed or escalated release) never counts
+                  twice. The last such reply is the answer.
+         Prints a JSON list, [] when none:
+           [{"pr": 42, "pr_url": "...", "issues": [17], "trigger": "label|reply",
+             "reply_url": "...", "reply": "1A 2C", "answer_problem": null}]
+         "reply_url" and "reply" are null for "label". "answer_problem" says
+         why a reply is not in the card's answer format (the first non-empty
+         line: `go`, or one known <number><letter> per question), else null;
+         such a reply still hands the PR back, as a free-text answer.
 
 A gh failure prints {"status": "failed", "stage":
 "comments|create|update|issues|prs", "error": "..."} on stdout.
@@ -111,6 +134,14 @@ ANSWER_GO = "go"
 INPUT_KEYS = ("reason", "review_url", "questions", "blocking", "rejected")
 
 PR_LABEL = "agent-pr"
+REWORK_LABEL = "agent-rework"
+# A closing issue with one of these is not handed back: a round runs (#377).
+HANDBACK_SKIP_LABELS = {"agent-wip", "epic"}
+TRIGGER_LABEL = "label"
+TRIGGER_REPLY = "reply"
+BOT_USER_TYPE = "Bot"
+# One answer of a `choices` card: question number and option letter, "2C".
+ANSWER_TOKEN = re.compile(r"^(\d+)([A-Za-z])$")
 GH_FETCH_LIMIT = 200
 PAGE_SIZE = 100
 ERROR_LINES = 5
@@ -399,6 +430,113 @@ def waiting_text(rows):
     return "\n".join(lines) + "\n"
 
 
+# --- handback -----------------------------------------------------------------------
+
+def label_names(item):
+    return {label.get("name") for label in item.get("labels") or []}
+
+
+def is_marked(body):
+    return (body or "").replace("\r\n", "\n").startswith(MARKER)
+
+
+def last_marked(comments):
+    """Creation time of the last queue-runner comment, or ""."""
+    return max((c.get("created_at") or "" for c in comments if is_marked(c.get("body"))), default="")
+
+
+def answer_problem(text, data):
+    """Why a reply is not in the card's answer format, or None when it is.
+
+    The first non-empty line counts, without surrounding backticks."""
+    line = next((l.strip().strip("`").strip() for l in (text or "").splitlines() if l.strip()), "")
+    if not isinstance(data, dict):
+        return "the card has no readable data line"
+    if data.get("answer") == ANSWER_GO:
+        return None if line.casefold() == ANSWER_GO else f"not `{ANSWER_GO}`"
+    options = {q.get("n"): q.get("options") or [] for q in data.get("questions") or []
+               if isinstance(q, dict)}
+    seen = set()
+    for token in line.split():
+        match = ANSWER_TOKEN.match(token)
+        if not match:
+            return f"'{token}' is not <number><letter>"
+        n, letter = int(match.group(1)), match.group(2).upper()
+        if n not in options:
+            return f"no question {n}"
+        if letter not in options[n]:
+            return f"question {n} has no option {letter}"
+        if n in seen:
+            return f"question {n} answered twice"
+        seen.add(n)
+    missing = sorted(set(options) - seen)
+    if missing:
+        return "no answer to question " + ", ".join(str(n) for n in missing)
+    return None
+
+
+def human_reply(repo, pr, issues):
+    """The last human reply to the PR's decision card, with the card's data.
+
+    A reply is a PR comment without the queue-runner marker, not by a bot,
+    created after the cutoff: the card's last edit, or the last queue-runner
+    comment on the PR or on one of the issues when that is later."""
+    comments = pr_comments(repo, pr)
+    cards = sorted((c for c in comments if is_card(c.get("body"))), key=lambda c: c.get("id") or 0)
+    if not cards:
+        return None
+    card = cards[0]
+    cutoff = max(card.get("updated_at") or card.get("created_at") or "", last_marked(comments))
+
+    def replies(after):
+        return [c for c in comments if not is_marked(c.get("body"))
+                and (c.get("user") or {}).get("type") != BOT_USER_TYPE
+                and (c.get("created_at") or "") > after]
+
+    if not replies(cutoff):
+        return None
+    cutoff = max([cutoff, *(last_marked(pr_comments(repo, n)) for n in issues)])
+    found = replies(cutoff)
+    if not found:
+        return None
+    return max(found, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)), read_data(card.get("body"))
+
+
+def handback_rows(repo):
+    """One row per open PR the human handed back to the loop for a rework."""
+    issues = gh_json(STAGE_ISSUES, "api", "--paginate",
+                     f"repos/{repo}/issues?state=open&labels={PR_LABEL}&per_page={PAGE_SIZE}")
+    agent_issues = {i["number"]: label_names(i) for i in issues
+                    if "pull_request" not in i and not label_names(i) & HANDBACK_SKIP_LABELS}
+    if not agent_issues:
+        return []
+    prs = answer_json(STAGE_PRS, gh(STAGE_PRS, "pr", "list", "--repo", repo, "--state", "open",
+                                    "--limit", str(GH_FETCH_LIMIT),
+                                    "--json", "number,url,labels,closingIssuesReferences"))
+    rows = []
+    for pr in sorted(prs, key=lambda p: p["number"]):
+        closes = sorted(i["number"] for i in pr.get("closingIssuesReferences") or []
+                        if i.get("number") in agent_issues)
+        if not closes:
+            continue
+        row = {"pr": pr["number"], "pr_url": pr.get("url", ""), "issues": closes,
+               "trigger": None, "reply_url": None, "reply": None, "answer_problem": None}
+        pr_labels = label_names(pr)
+        waits = V.HUMAN_LABEL in pr_labels or any(V.HUMAN_LABEL in agent_issues[n] for n in closes)
+        if REWORK_LABEL in pr_labels:
+            row["trigger"] = TRIGGER_LABEL
+        elif waits:
+            found = human_reply(repo, pr["number"], closes)
+            if found:
+                reply, data = found
+                row.update(trigger=TRIGGER_REPLY, reply_url=reply.get("html_url", ""),
+                           reply=reply.get("body") or "",
+                           answer_problem=answer_problem(reply.get("body"), data))
+        if row["trigger"]:
+            rows.append(row)
+    return rows
+
+
 # --- CLI ----------------------------------------------------------------------------
 
 def repo_arg(value):
@@ -435,9 +573,14 @@ def main(argv=None):
     p_wait = sub.add_parser("waiting", help="the 'Waiting on you' block")
     p_wait.add_argument("--repo", required=True, type=repo_arg)
     p_wait.add_argument("--json", action="store_true")
+    p_back = sub.add_parser("handback", help="the PRs the human handed back for a rework (JSON)")
+    p_back.add_argument("--repo", required=True, type=repo_arg)
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "handback":
+            print(json.dumps(handback_rows(args.repo), indent=2))
+            return EXIT_OK
         if args.command == "waiting":
             rows = waiting_rows(args.repo)
             sys.stdout.write(json.dumps(rows, indent=2) + "\n" if args.json else waiting_text(rows))

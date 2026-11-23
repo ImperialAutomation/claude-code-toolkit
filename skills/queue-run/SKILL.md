@@ -99,7 +99,10 @@ of adding one (#300, D4).
 ```
 
 It prints `<N>` of the highest-priority `agent-rework` issue (oldest first
-within a priority), or nothing. A number:
+within a priority), or nothing. A PR the human handed back on the PR itself
+(a reply to its decision card, or `agent-rework` on the PR) is moved onto
+its issue first, one line on stderr per PR; a warning there (a reply not in
+the card's answer format) goes into the Step 7 line. A number:
 follow `~/.claude/skills/queue-run/references/rework.md` (Read it now)
 instead of Steps 2 to 5, then Steps 6 and 7. Exit 1: as for Step 2.
 Nothing: check capacity.

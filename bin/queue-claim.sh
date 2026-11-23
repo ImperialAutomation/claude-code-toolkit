@@ -62,6 +62,15 @@
 #           of `agent-wip`, `needs-human`, `epic` (#300, D4). Only a human sets
 #           `agent-rework`, on an issue whose agent PR needs another round, so
 #           one without a priority label is still claimed, after the others.
+#           First it takes the PRs the human handed back on the PR itself
+#           (#377, `queue-decision-card.py handback`): `agent-rework` on the
+#           PR, or a human reply to the PR's decision card while
+#           `needs-human` is on the PR or its issue. For each such PR it
+#           drops `needs-human` from its open `agent-pr` closing issues and
+#           adds `agent-rework` there, then drops `needs-human` and
+#           `agent-rework` from the PR, and names the PR (and the reply) on
+#           stderr, with a warning when the reply is not in the card's answer
+#           format. The human never edits issue labels for a rework.
 # release   Ends a claim; every outcome drops `agent-wip`:
 #   pr <url>               comments with the PR link and swaps `agent-ready`
 #                          for `agent-pr`, so no later claim opens a second
@@ -129,6 +138,9 @@ TRIAGE_LABEL="needs-triage"
 # gh issue list returns 30 issues by default; the queue is never this long.
 GH_FETCH_LIMIT=200
 COMMENT_MARKER="<!-- queue-runner -->"
+# Finds the PRs the human handed back for a rework (#377); absolute, since the
+# script cds into --repo before it runs.
+CARD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/queue-decision-card.py"
 RUNS_LOG="${QUEUE_RUNS_LOG:-$HOME/.claude/queue-runs.tsv}"
 UNKNOWN="unknown"
 # Keys of the agent-tokens.py --json totals, in log column order. The review_
@@ -355,9 +367,43 @@ triage() {
         || gh_fail "add '$TRIAGE_LABEL' to #$1"
 }
 
+# promote_handbacks: move each PR the human handed back (#377) onto its
+# closing issues, so the claim below takes them like an issue-side
+# `agent-rework`. Issues first (drop needs-human, add agent-rework), then the
+# PR (drop needs-human and agent-rework). Every step is idempotent: a retry
+# after a failure in between finds the same PR again (its label, or the
+# reply while needs-human is still on the PR) and finishes the move.
+promote_handbacks() {
+    local name rows parsed pr trigger issues url problem i
+    name=$(gh repo view --json nameWithOwner --jq .nameWithOwner) \
+        || gh_fail "read the repository name"
+    rows=$("$CARD_SCRIPT" handback --repo "$name") \
+        || gh_fail "list the PRs handed back for a rework: $rows"
+    parsed=$(jq -r '.[] | [.pr, .trigger, (.issues | map(tostring) | join(" ")),
+                           (.reply_url // ""), (.answer_problem // "")] | @tsv' <<< "$rows") \
+        || gh_fail "read the PRs handed back for a rework (not a JSON list): $rows"
+    while IFS=$'\t' read -r pr trigger issues url problem; do
+        [[ -n "$pr" ]] || continue
+        for i in $issues; do
+            gh issue edit "$i" --remove-label "$HUMAN_LABEL" --add-label "$REWORK_LABEL" >/dev/null \
+                || gh_fail "move the rework of PR #$pr onto #$i"
+        done
+        gh pr edit "$pr" --remove-label "$HUMAN_LABEL" --remove-label "$REWORK_LABEL" >/dev/null \
+            || gh_fail "drop '$HUMAN_LABEL' and '$REWORK_LABEL' from PR #$pr"
+        if [[ "$trigger" == reply ]]; then
+            echo "rework handed back on PR #$pr by the reply $url; moved to #${issues// /, #}" >&2
+            [[ -z "$problem" ]] \
+                || echo "warning: the reply $url is not in the card's answer format ($problem); the round takes it as free text" >&2
+        else
+            echo "rework handed back on PR #$pr by its '$REWORK_LABEL' label; moved to #${issues// /, #}" >&2
+        fi
+    done <<< "$parsed"
+}
+
 do_claim() {
     local skip_filter priorities listed n rank triaged before after
     local -a candidates=()
+    [[ "$claim_label" == "$REWORK_LABEL" ]] && promote_handbacks
     skip_filter=$(json_array "${claim_skip[@]}")
     priorities=$(json_array "${PRIORITY_LABELS[@]}")
     # One line per issue: number, rank (index of its first priority label,

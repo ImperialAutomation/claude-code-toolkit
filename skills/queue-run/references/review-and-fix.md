@@ -163,7 +163,12 @@ CRITICAL, a failing test, a NOT MET criterion). Fix every blocking finding
 that holds. Its MEDIUM/LOW findings are listed, not blocking: they are no
 reason to stay BLOCKING, so leave them unless one is a small fix on a line
 you change anyway. Every other comment (a human's review, review comment or
-answer) is addressed in full. A finding that does not hold, or that you
+answer) is addressed in full. A human comment like `1A 2C` or `go` answers
+the decision card (a comment starting with `<!-- queue-runner -->` and
+`<!-- queue-runner:decisions -->`, also in the list): apply the option each
+number and letter picks on that card; `go` means fix what the card's
+"Still blocking" list names. Any other wording is the human's answer in
+free text. A finding that does not hold, or that you
 cannot fix within the issue's scope, stays as it is, with the reason in your
 report. Change only what the findings need: no refactors, no scope change.
 
@@ -289,6 +294,8 @@ The card numbers its questions and letters the options. The human answers
 on the PR with `1A 2C` (one number and letter per question), or `go` on a
 card without questions. A last line `<!-- queue-runner:decisions-data {...} -->`
 carries the question numbers, option letters and recommendations as JSON.
+That reply hands the PR back: the next `claim --rework` takes it and moves
+the labels (#377, `references/rework.md`).
 
 Put the `card_url` of the result in the release note. Exit 3 (a gh error)
 is not retried: name the error in the note; the release goes on.

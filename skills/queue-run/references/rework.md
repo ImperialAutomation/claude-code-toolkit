@@ -7,11 +7,14 @@ the skill.
 
 Rework is a new round on the PR the queue runner already opened for the
 issue, after a review that arrived once the issue was released as `agent-pr`.
-Only the human starts it: they post what should change (a PR review, review
-comments, or a PR or issue comment holding their decision on a `HUMAN`
-question), remove `needs-human` when it is set, and add `agent-rework` to the
-issue (`docs/escalation-list.md`). The loop pushes to the existing PR branch
-and never opens a PR.
+Only the human starts it, on the PR (#377): a reply to the PR's decision card
+(`1A 2C`, or `go`) while it waits on them, or `agent-rework` on the PR, after
+posting what should change (a PR review, review comments, a PR comment).
+`claim --rework` finds both through the PR's closing issues and moves the
+labels itself: `needs-human` off the PR and the issues, `agent-rework` from
+the PR onto the issues. `agent-rework` on the issue, set by hand once it has
+no `needs-human`, still works (`docs/escalation-list.md`). The loop pushes to
+the existing PR branch and never opens a PR.
 
 The sub-agents are the **Fix round** and the **Reviewer** of
 `~/.claude/skills/queue-run/references/review-and-fix.md`, with unchanged
@@ -76,7 +79,11 @@ is, one URL per line:
   GitHub wraps each one in a `COMMENTED` review of its own with an empty
   body: that review is no review input;
 - the re-review named in the last round comment, when its verdict there was
-  not `APPROVE`: it was posted before that comment, but no round addressed it.
+  not `APPROVE`: it was posted before that comment, but no round addressed it;
+- the decision card (the PR comment whose body starts with
+  `<!-- queue-runner -->` and then `<!-- queue-runner:decisions -->`), when a
+  PR comment of the list above answers it: the card holds the questions the
+  answer's numbers and letters refer to.
 
 Empty: start no sub-agent. Comment on the issue as in R1 that there is no
 review input since the cutoff, and release as escalated (R5).
@@ -86,10 +93,14 @@ review input since the cutoff, and release as escalated (R5).
 1. Spawn the **Fix round** with `<N>`, `<title>`, `<repo>`, `<pr>`,
    `<pr-url>`, `<worktree>`, `<branch>` and `<comments>`; measure it into
    `/tmp/<project>-queue-tokens-<N>-fix.json` as in Step 4b.
-2. `FIXED`: spawn the **Reviewer** with the same inputs (the re-review);
-   measure it into `-review-1`. Exactly one fix round and one re-review.
-   `ESCALATED`, `FAILED` or no report: no re-review and no round comment, so a
-   retry or the human's answer sees the same input again; go to R5.
+2. Read the labels as in Step 5 now, before any re-review: `needs-human` on
+   the issue at this point can only come from the fix round (the claim
+   required it absent), so it counts as `ESCALATED`. Note it for R5.
+   `FIXED` without that label: spawn the **Reviewer** with the same inputs
+   (the re-review); measure it into `-review-1`. Exactly one fix round and
+   one re-review. `ESCALATED` (reported, or by the label), `FAILED` or no
+   report: no re-review and no round comment, so a retry or the human's
+   answer sees the same input again; go to R5.
 3. After a `FIXED`, the loop session posts the round comment (D8): Write
    `/tmp/<project>-queue-rework-round-<N>.md`, then
    `gh pr comment <pr> --body-file /tmp/<project>-queue-rework-round-<N>.md`.
@@ -119,8 +130,15 @@ every agent of this iteration measured.
 
 ## R5: Release
 
-Read the labels as in Step 5, then release in exactly one way; the first
-matching row wins. Each is `~/.claude/bin/queue-claim.sh --repo <repo> [<options>] release ...`
+Release in exactly one way; the first matching row wins. Two sources can put
+`needs-human` on the issue during a round, and only the first decides a row:
+
+- the **fix round** (an escalation it posted on the issue): read in R4
+  step 2, before the re-review;
+- the **re-review** (`/pre-merge --post` puts it on the PR and the issue
+  with a `HUMAN` verdict): never read as a label here; its verdict decides.
+
+Each release is `~/.claude/bin/queue-claim.sh --repo <repo> [<options>] release ...`
 with the options of Step 5 that have a value: `--tokens` (the whole),
 `--review-final <V>` (the re-review: `APPROVE`, `BLOCKING`, `HUMAN`, or
 `error` when not posted), `--review-tokens` and `--fix-tokens`. A rework has
@@ -129,10 +147,10 @@ no first review: leave out `--review` and `--review-findings`.
 | Situation | Release |
 |---|---|
 | No open PR, more than one, or no review input (R1, R3) | `release <N> escalated` (adds `needs-human`) |
-| Fix `ESCALATED`, or `needs-human` on the issue after the fix | `release <N> escalated` |
+| Fix round `ESCALATED`, or `needs-human` set by the fix round (the R4 step 2 read, before any re-review) | `release <N> escalated` |
 | Worktree not usable (R2), fix `FAILED` or no report | `release <N> failed /tmp/<project>-queue-failure-<N>.md` |
 | Re-review `APPROVE` and no `left` finding | `release <N> rework <pr-url>` |
-| Re-review `BLOCKING`, `HUMAN` or not posted, or a `left` finding | `release <N> rework <pr-url> /tmp/<project>-queue-review-<N>.md` |
+| Re-review `BLOCKING`, `HUMAN` (its own `needs-human` included) or not posted, or a `left` finding | `release <N> rework <pr-url> /tmp/<project>-queue-review-<N>.md` |
 
 `rework` swaps `agent-rework` for `agent-pr`; with the note it adds
 `needs-human` and puts the note in the issue comment. Before a `rework`
@@ -142,7 +160,10 @@ release with a note, post the PR's decision card ("Decision card" in
 Then write the note with the Write tool: the re-review verdict and URL, the
 round comment's URL, the decision card's URL and each `left` finding. `escalated` and `failed` keep `agent-rework`: a first
 failure gets its one retry through the next `claim --rework`, a second one
-adds `needs-human` (D5). Every rework release counts toward `--budget` (D2).
+adds `needs-human` (D5). A release with `needs-human` waits for the human's
+next hand-back on the PR; the claim only counts a reply posted after the
+loop's last marker comment on the PR or the issue, so the reply this round
+answered never starts another. Every rework release counts toward `--budget` (D2).
 Then `queue-budget.sh worked` as in Step 5.
 
 ## Report line (Step 7)

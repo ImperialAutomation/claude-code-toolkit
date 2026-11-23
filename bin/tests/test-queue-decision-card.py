@@ -15,7 +15,7 @@ recommendation, answer line, data block); upsert creates when absent, edits
 when present and never creates a second card, also across rounds; a quoted
 card in a human reply is not the card; the derived question for BLOCKING
 with rejected findings; the `go` fallback; the "Waiting on you" block rows and
-counts; usage errors send nothing; failures exit 3 with a JSON result.
+counts; the handback rows and the answer check (#377); usage errors send nothing; failures exit 3 with a JSON result.
 
 When adding a case, check it actually constrains the script: break the rule
 in queue-decision-card.py, confirm THIS test goes red, then revert.
@@ -404,6 +404,59 @@ for kind in ("issues", "prs"):
     r, out = run("waiting", "--repo", REPO, env_extra={"STUB_FAIL": kind}, keep=True)
     check(f"waiting: {kind} error -> exit 3, stage {kind}",
           r.returncode == 3 and out and out.get("status") == "failed" and out.get("stage") == kind)
+
+# --- handback (#377) -------------------------------------------------------------------
+
+print("--- handback ---")
+CARD_DATA = {"version": 1, "answer": "choices",
+             "questions": [{"n": 1, "options": ["A", "B"], "recommendation": "A"},
+                           {"n": 2, "options": ["A", "B", "C"], "recommendation": None}]}
+CARD_BODY = f"{MARKER}\n{CARD_MARKER}\n## card\n{DATA_PREFIX}{json.dumps(CARD_DATA)} -->"
+
+
+def handback_fixture(reply, issue_comments=()):
+    reset_stub()
+    (STUB / "issues.json").write_text(json.dumps([
+        {"number": 17, "labels": [{"name": "agent-pr"}, {"name": "needs-human"}]},
+        {"number": 18, "labels": [{"name": "agent-pr"}, {"name": "agent-wip"}]},
+    ]))
+    (STUB / "prs.json").write_text(json.dumps([
+        {"number": 42, "url": "https://github.com/owner/repo/pull/42", "labels": [],
+         "closingIssuesReferences": [{"number": 17}]},
+        {"number": 43, "url": "https://github.com/owner/repo/pull/43",
+         "labels": [{"name": "agent-rework"}], "closingIssuesReferences": [{"number": 18}]},
+    ]))
+    (STUB / "comments-42.json").write_text(json.dumps([
+        {"id": 1, "html_url": "c1", "body": CARD_BODY, "user": {"login": "jan", "type": "User"},
+         "created_at": "2026-01-01T10:00:00Z", "updated_at": "2026-01-02T10:00:00Z"},
+        {"id": 2, "html_url": "c2", "body": reply, "user": {"login": "jan", "type": "User"},
+         "created_at": "2026-01-03T10:00:00Z", "updated_at": "2026-01-03T10:00:00Z"},
+    ]))
+    (STUB / "comments-17.json").write_text(json.dumps(list(issue_comments)))
+    return run("handback", "--repo", REPO, keep=True)
+
+
+r, out = handback_fixture("`1b 2C`\nthanks")
+check("handback: exit 0, one reply row for PR 42 (PR 43's issue is claimed)",
+      r.returncode == 0 and isinstance(out, list) and [row["pr"] for row in out] == [42])
+check("handback: the row names the trigger, the issue and the reply",
+      out and out[0]["trigger"] == "reply" and out[0]["issues"] == [17]
+      and out[0]["reply_url"] == "c2" and out[0]["reply"].startswith("`1b 2C`"))
+check("handback: the first line in backticks, any case, is a valid answer",
+      out and out[0]["answer_problem"] is None)
+for reply, problem in (("2A", "no answer to question 1"), ("1A 1B 2A", "question 1 answered twice"),
+                       ("1C 2A", "question 1 has no option C"), ("sure", "'sure' is not <number><letter>")):
+    r, out = handback_fixture(reply)
+    check(f"handback: '{reply}' -> {problem}", out and out[0]["answer_problem"] == problem)
+r, out = handback_fixture("1A 2B", [{"id": 9, "body": f"{MARKER}\nfailed", "user": {"type": "User"},
+                                      "created_at": "2026-01-04T10:00:00Z"}])
+check("handback: a later marker comment on the issue answered the reply already",
+      r.returncode == 0 and out == [])
+reset_stub()
+(STUB / "issues.json").write_text(json.dumps([{"number": 17, "labels": [{"name": "agent-pr"}]}]))
+r, out = run("handback", "--repo", REPO, env_extra={"STUB_FAIL": "prs"}, keep=True)
+check("handback: prs error -> exit 3, stage prs",
+      r.returncode == 3 and out and out.get("stage") == "prs")
 
 # --- usage errors ----------------------------------------------------------------------
 
