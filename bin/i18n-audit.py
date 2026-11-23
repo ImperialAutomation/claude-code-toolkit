@@ -11,6 +11,11 @@ first. When none is found there, each direct subdirectory (not hidden, not a
 default exclude, not a virtualenv) is tried: exactly one match becomes the
 effective project root (a monorepo's `frontend/`), several exit 2 with a list.
 
+next-intl translators (`const t = useTranslations("ns")`, `await
+getTranslations("ns" | { namespace: "ns" })`) are resolved per file: calls on
+the bound name read `ns.<key>`. A non-literal namespace makes the binding
+unresolvable; it is reported, and its calls are not checked as missing.
+
 Usage:
   i18n-audit.py [options] [project-dir]
   i18n-audit.py --locale-dir src/i18n/locales --source-dir src
@@ -28,10 +33,11 @@ import json
 import os
 import re
 import sys
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 LOCALE_DIR_CANDIDATES = [
     "src/i18n/locales",
@@ -128,11 +134,383 @@ class ScanResult:
     evidence, safe to drive the missing-key check. `literal_keys` holds bare
     key-shaped strings found anywhere — weak evidence of use, strong evidence
     of NOT being dead, so it feeds only the unused check.
+    `unresolvable_bindings` holds next-intl translators whose namespace is not a
+    literal, as (argument text, file, line): their calls cannot be resolved.
     """
 
     key_locations: Dict[str, List[Tuple[str, int]]] = field(default_factory=dict)
     literal_keys: Set[str] = field(default_factory=set)
     dynamic_keys: List[Tuple[str, str, int]] = field(default_factory=list)
+    unresolvable_bindings: List[Tuple[str, str, int]] = field(default_factory=list)
+
+
+# --- next-intl scoped translators ---
+#
+# `const t = useTranslations("orders")` (or `await getTranslations(...)`) binds
+# a translator whose keys are relative to the namespace: `t("title")` reads
+# `orders.title`. Calls on such a binding are resolved here, not by the generic
+# TRANSLATION_PATTERNS, which would record the relative key as if it were full.
+
+# `const|let|var <name>[: <type>] = [await] useTranslations|getTranslations(`
+# up to the opening parenthesis; the argument is read by _call_argument, which
+# balances nested parentheses. The optional type annotation may hold `=>`.
+NEXT_INTL_BINDING_PATTERN = re.compile(
+    r'''\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::(?:[^=;]|=>)+?)?=\s*'''
+    r'''(?:await\s+)?(?:useTranslations|getTranslations)\s*\('''
+)
+
+# A namespace argument that is a plain string literal (no interpolation).
+NEXT_INTL_LITERAL_ARG = re.compile(r'''^(['"`])([^'"`$]*)\1$''')
+
+# The `namespace` property of the object form (key quoted or not), literal or
+# not. Anchored on the property position, so `cfg.namespace` is no property.
+NEXT_INTL_NAMESPACE_PROP = re.compile(r'''[{,]\s*(['"]?)namespace\1\s*[:,}]''')
+NEXT_INTL_NAMESPACE_LITERAL = re.compile(
+    r'''[{,]\s*(['"]?)namespace\1\s*:\s*(['"`])([^'"`$]*)\2\s*[,}]'''
+)
+
+# Other declarations of a name, which end the reach of an earlier translator
+# binding of that name: `const t = props.t`, `const { t } = ...`, and function
+# parameters (`function Row({ t })`, `({ t }) =>`, `t =>`).
+OTHER_DECLARATION_PATTERN = re.compile(r'''\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=]''')
+DESTRUCTURING_DECLARATION_PATTERN = re.compile(r'''\b(?:const|let|var)\s*\{([^}]*)\}\s*[:=]''')
+FUNCTION_PARAMS_PATTERN = re.compile(r'''\bfunction\b[\s*]*[\w$]*\s*(?:<[^>()]*>)?\s*\(''')
+ARROW_PARAMS_END_PATTERN = re.compile(r'''\)\s*(?::\s*[^=;{()]+?)?\s*=>''')
+ARROW_SINGLE_PARAM_PATTERN = re.compile(r'''(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>''')
+IDENTIFIER_PATTERN = re.compile(r'''(?<![\w$.])[A-Za-z_$][\w$]*''')
+
+# Comments and string literals, as spans that are not code. Strings stop at a
+# line break (only template literals span lines), so a stray quote in JSX text
+# hides at most the rest of its line.
+NON_CODE_PATTERN = re.compile(
+    r'''//[^\n]*|/\*[\s\S]*?(?:\*/|\Z)'''
+    r'''|'(?:\\.|[^'\\\n])*'?|"(?:\\.|[^"\\\n])*"?|`(?:\\[\s\S]|[^`\\])*`?'''
+)
+STRING_TOKEN_PATTERN = re.compile(
+    r''''(?:\\.|[^'\\\n])*'?|"(?:\\.|[^"\\\n])*"?|`(?:\\[\s\S]|[^`\\])*`?'''
+)
+
+# Translator methods taking a key. `has` only probes for existence, so its key
+# counts as referenced but never as missing.
+NEXT_INTL_KEY_METHODS = ("rich", "raw", "markup", "has")
+NEXT_INTL_PROBE_METHOD = "has"
+
+
+@dataclass
+class TranslatorBinding:
+    """One next-intl translator binding in a source file.
+
+    `namespace` is "" for the root translator and None when it is unresolvable.
+    `translator` is False for any other declaration of the name (a parameter,
+    a prop, a plain variable): calls under it are left to the generic scan.
+    """
+
+    offset: int
+    name: str
+    namespace: Optional[str]
+    argument: str
+    translator: bool = True
+
+
+def parse_next_intl_namespace(argument: str) -> Optional[str]:
+    """The namespace a useTranslations/getTranslations argument selects.
+
+    "" means the root (no argument, or an object without `namespace`); None
+    means the namespace is chosen at runtime and cannot be resolved. A
+    trailing comma (Prettier's multi-line call style) is ignored.
+    """
+    arg = argument.strip().rstrip(",").strip()
+    if not arg:
+        return ""
+    literal = NEXT_INTL_LITERAL_ARG.match(arg)
+    if literal:
+        return literal.group(2)
+    if arg.startswith("{"):
+        if not NEXT_INTL_NAMESPACE_PROP.search(arg):
+            return ""
+        prop = NEXT_INTL_NAMESPACE_LITERAL.search(arg)
+        return prop.group(3) if prop else None
+    return None
+
+
+def _non_code_starts_ends(content: str) -> Tuple[List[int], List[int]]:
+    """Start and end offsets of every comment and string literal, in order."""
+    starts, ends = [], []
+    for match in NON_CODE_PATTERN.finditer(content):
+        starts.append(match.start())
+        ends.append(match.end())
+    return starts, ends
+
+
+def _is_code(spans: Tuple[List[int], List[int]], offset: int) -> bool:
+    starts, ends = spans
+    index = bisect_right(starts, offset) - 1
+    return index < 0 or offset >= ends[index]
+
+
+def _call_argument(content: str, open_paren: int) -> Optional[str]:
+    """The text between `(` at `open_paren` and its balancing `)`.
+
+    Nested parentheses (`(await params).locale`) are balanced and string
+    literals skipped, so a `)` inside either does not end the argument. None
+    when the call is never closed.
+    """
+    depth = 0
+    position = open_paren
+    length = len(content)
+    while position < length:
+        char = content[position]
+        if char in "'\"`":
+            position = STRING_TOKEN_PATTERN.match(content, position).end()
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return content[open_paren + 1:position]
+        position += 1
+    return None
+
+
+def _arrow_params_start(content: str, close_paren: int) -> int:
+    """Offset of the `(` that balances the `)` at `close_paren`, or -1."""
+    depth = 0
+    for position in range(close_paren, -1, -1):
+        char = content[position]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                return position
+    return -1
+
+
+def _parameter_declarations(content: str) -> List[Tuple[int, str]]:
+    """(offset, name) for every identifier in a function's parameter list."""
+    declarations = []
+    param_lists = []
+    for match in FUNCTION_PARAMS_PATTERN.finditer(content):
+        params = _call_argument(content, match.end() - 1)
+        if params is not None:
+            param_lists.append((match.start(), params))
+    for match in ARROW_PARAMS_END_PATTERN.finditer(content):
+        start = _arrow_params_start(content, match.start())
+        if start >= 0:
+            param_lists.append((start, content[start + 1:match.start()]))
+    for match in ARROW_SINGLE_PARAM_PATTERN.finditer(content):
+        declarations.append((match.start(), match.group(1)))
+    for offset, params in param_lists:
+        for identifier in IDENTIFIER_PATTERN.finditer(params):
+            declarations.append((offset, identifier.group(0)))
+    return declarations
+
+
+def find_translator_bindings(content: str) -> List[TranslatorBinding]:
+    """Every declaration of a translator name in a file, in source order.
+
+    next-intl bindings carry their namespace. Any other declaration of the
+    same name (parameter, prop, plain variable) is kept as a non-translator
+    entry, so a later `t` that is not a next-intl translator is not resolved
+    against the previous component's namespace. Matches inside comments and
+    string literals are ignored.
+    """
+    candidates = list(NEXT_INTL_BINDING_PATTERN.finditer(content))
+    if not candidates:
+        return []
+    spans = _non_code_starts_ends(content)
+
+    bindings = []
+    for match in candidates:
+        if not _is_code(spans, match.start()):
+            continue
+        argument = _call_argument(content, match.end() - 1)
+        if argument is None:
+            continue
+        bindings.append(
+            TranslatorBinding(
+                offset=match.start(),
+                name=match.group(1),
+                namespace=parse_next_intl_namespace(argument),
+                argument=argument.strip(),
+            )
+        )
+    if not bindings:
+        return []
+
+    names = {binding.name for binding in bindings}
+    translator_offsets = {binding.offset for binding in bindings}
+    others: List[Tuple[int, str]] = [
+        (match.start(), match.group(1))
+        for match in OTHER_DECLARATION_PATTERN.finditer(content)
+    ]
+    for match in DESTRUCTURING_DECLARATION_PATTERN.finditer(content):
+        others.extend(
+            (match.start(), identifier.group(0))
+            for identifier in IDENTIFIER_PATTERN.finditer(match.group(1))
+        )
+    others.extend(_parameter_declarations(content))
+
+    for offset, name in others:
+        if name in names and offset not in translator_offsets and _is_code(spans, offset):
+            bindings.append(
+                TranslatorBinding(
+                    offset=offset, name=name, namespace=None, argument="", translator=False
+                )
+            )
+    bindings.sort(key=lambda binding: binding.offset)
+    return bindings
+
+
+class _BindingIndex:
+    """Nearest-binding lookup per name, by binary search over offsets."""
+
+    def __init__(self, bindings: List[TranslatorBinding]):
+        self._offsets: Dict[str, List[int]] = {}
+        self._bindings: Dict[str, List[TranslatorBinding]] = {}
+        for binding in bindings:
+            self._offsets.setdefault(binding.name, []).append(binding.offset)
+            self._bindings.setdefault(binding.name, []).append(binding)
+
+    def at(self, name: str, offset: int) -> Optional[TranslatorBinding]:
+        """The nearest binding of `name` above `offset`, if any.
+
+        Several components in one file each bind their own `t`; a call belongs
+        to the one whose body it sits in, which is the closest binding before
+        it.
+        """
+        offsets = self._offsets.get(name)
+        if not offsets:
+            return None
+        index = bisect_left(offsets, offset) - 1
+        return self._bindings[name][index] if index >= 0 else None
+
+
+def _qualify(namespace: str, key: str) -> str:
+    return f"{namespace}.{key}" if namespace else key
+
+
+def _translator_call_pattern(names: Set[str]) -> re.Pattern:
+    """Static-key calls on any of `names`: `t("k")`, `t.rich("k")`, ..."""
+    alternatives = "|".join(re.escape(name) for name in sorted(names))
+    methods = "|".join(NEXT_INTL_KEY_METHODS)
+    return re.compile(
+        rf'''(?<![\w$.])({alternatives})(?:\.({methods}))?(\()\s*(['"])([^'"]+)\4\s*[,)]'''
+    )
+
+
+def _translator_dynamic_pattern(names: Set[str]) -> re.Pattern:
+    """Template-literal calls on any of `names`: `` t(`a.${b}`) ``."""
+    alternatives = "|".join(re.escape(name) for name in sorted(names))
+    methods = "|".join(m for m in NEXT_INTL_KEY_METHODS if m != NEXT_INTL_PROBE_METHOD)
+    return re.compile(
+        rf'''(?<![\w$.])({alternatives})(?:\.(?:{methods}))?(\()\s*`([^`]*\$\{{[^`]*)`'''
+    )
+
+
+def _line_starts(content: str) -> List[int]:
+    """Offsets at which each line starts, for _line_of."""
+    return [0] + [match.end() for match in re.finditer("\n", content)]
+
+
+def _line_of(line_starts: List[int], offset: int) -> int:
+    return bisect_right(line_starts, offset)
+
+
+def _record_key(result: ScanResult, key: str, filepath: str, lineno: int) -> None:
+    result.key_locations.setdefault(key, []).append((filepath, lineno))
+
+
+# Placeholder for an unresolvable namespace in a dynamic key's pattern. It
+# starts with an interpolation, so the pattern yields no static prefix.
+UNRESOLVABLE_NAMESPACE_PLACEHOLDER = "${{{}}}"
+
+
+def scan_translator_calls(
+    content: str, filepath: str, result: ScanResult
+) -> Set[int]:
+    """Resolve calls on next-intl translators into `result`.
+
+    Returns the offsets of the opening parentheses of every call it handled,
+    so the generic patterns skip those calls instead of recording their
+    relative keys a second time.
+    """
+    bindings = find_translator_bindings(content)
+    handled: Set[int] = set()
+    if not bindings:
+        return handled
+
+    line_starts = _line_starts(content)
+    for binding in bindings:
+        if binding.translator and binding.namespace is None:
+            result.unresolvable_bindings.append(
+                (binding.argument, filepath, _line_of(line_starts, binding.offset))
+            )
+
+    names = {binding.name for binding in bindings}
+    index = _BindingIndex(bindings)
+
+    for match in _translator_call_pattern(names).finditer(content):
+        binding = index.at(match.group(1), match.start())
+        if binding is None or not binding.translator:
+            continue
+        handled.add(match.start(3))
+        if binding.namespace is None:
+            continue
+        key = _qualify(binding.namespace, match.group(5))
+        if not is_key_shaped(key):
+            continue
+        if match.group(2) == NEXT_INTL_PROBE_METHOD:
+            result.literal_keys.add(key)
+        else:
+            _record_key(result, key, filepath, _line_of(line_starts, match.start()))
+
+    for match in _translator_dynamic_pattern(names).finditer(content):
+        binding = index.at(match.group(1), match.start())
+        if binding is None or not binding.translator:
+            continue
+        handled.add(match.start(2))
+        # Qualifying before prefix extraction also covers `` t(`${k}`) ``: the
+        # namespace bounds what it reaches, so the prefix is `<namespace>.`.
+        # An unresolvable namespace is still listed, behind a placeholder
+        # that yields no prefix.
+        namespace = binding.namespace
+        if namespace is None:
+            namespace = UNRESOLVABLE_NAMESPACE_PLACEHOLDER.format(binding.argument)
+        result.dynamic_keys.append(
+            (
+                _qualify(namespace, match.group(3)),
+                filepath,
+                _line_of(line_starts, match.start()),
+            )
+        )
+
+    return handled
+
+
+def _handled_by_translator(
+    line: str, offset: int, match: re.Match, handled: Set[int]
+) -> bool:
+    """Whether a generic match on `line` (at `offset`) is a resolved call."""
+    if not handled:
+        return False
+    paren = _generic_call_paren(line, match)
+    return paren is not None and offset + paren in handled
+
+
+def _generic_call_paren(line: str, match: re.Match) -> Optional[int]:
+    """Offset in `line` of the `(` of a bare `t(` match, else None.
+
+    A bare call match starts at `t(` or at the one delimiter before it. Any
+    other match (`<Trans ... i18nKey=...>`) is not a call, even when a `t(`
+    sits inside its span, so it is never skipped as handled.
+    """
+    start = match.start()
+    for position in (start, start + 1):
+        if line.startswith("t(", position):
+            return position + 1
+    return None
 
 
 def flatten_json(obj: dict, prefix: str = "") -> Dict[str, str]:
@@ -313,7 +691,6 @@ def scan_source_files(
 ) -> ScanResult:
     """Scan source files for translation key usage."""
     result = ScanResult()
-    key_locations = result.key_locations
     dynamic_keys = result.dynamic_keys
 
     for root, dirs, files in os.walk(source_dir):
@@ -336,9 +713,23 @@ def scan_source_files(
             except (OSError, UnicodeDecodeError):
                 continue
 
-            for lineno, line in enumerate(content.splitlines(), 1):
+            handled = scan_translator_calls(content, filepath, result)
+
+            lines = content.splitlines()
+            # Line offsets are only needed to match resolved translator calls,
+            # so files without next-intl bindings skip computing them.
+            offsets = [0] * len(lines)
+            if handled:
+                line_offset = 0
+                for index, raw in enumerate(content.splitlines(keepends=True)):
+                    offsets[index] = line_offset
+                    line_offset += len(raw)
+
+            for lineno, (line, offset) in enumerate(zip(lines, offsets), 1):
                 # Check for dynamic keys
                 for match in DYNAMIC_KEY_PATTERN.finditer(line):
+                    if _handled_by_translator(line, offset, match, handled):
+                        continue
                     dynamic_keys.append((match.group(1), filepath, lineno))
 
                 # Any key-shaped string literal, wherever it sits. Covers the
@@ -352,6 +743,8 @@ def scan_source_files(
                 # Check for static keys
                 for pattern in TRANSLATION_PATTERNS:
                     for match in pattern.finditer(line):
+                        if _handled_by_translator(line, offset, match, handled):
+                            continue
                         key = match.group(1)
 
                         # Handle namespace:key syntax (i18next)
@@ -366,9 +759,7 @@ def scan_source_files(
                         if not is_key_shaped(key):
                             continue
 
-                        if key not in key_locations:
-                            key_locations[key] = []
-                        key_locations[key].append((filepath, lineno))
+                        _record_key(result, key, filepath, lineno)
 
     return result
 
@@ -490,12 +881,15 @@ def format_plain_text(
     checks: List[str],
     project_root: str,
     dynamic_limit: int = 0,
+    unresolvable_bindings: Sequence[Tuple[str, str, int]] = (),
 ) -> str:
     """Format results as plain text.
 
     `dynamic_limit` caps the dynamic-key listing; 0 shows all of them. Truncating
     by default would leave the reader unable to check by hand which prefixes
     caused keys to be filtered out of the unused list.
+    `unresolvable_bindings` are listed in full but not counted as issues: they
+    are a gap in what the audit can see, not a fault in the project.
     """
     lines = []
     lines.append("i18n Audit Report")
@@ -542,6 +936,15 @@ def format_plain_text(
             )
             lines.append(
                 "         Verify a key is truly dead before deleting it."
+            )
+            lines.append("")
+        if unresolvable_bindings:
+            lines.append(
+                f"WARNING: {len(unresolvable_bindings)} unresolvable translator(s); "
+                "keys reached only through them are still listed here."
+            )
+            lines.append(
+                "         See Unresolvable Translators below before deleting a key."
             )
             lines.append("")
         if unused:
@@ -609,6 +1012,20 @@ def format_plain_text(
             lines.append(f"  ... and {len(dynamic_keys) - len(shown)} more")
         lines.append("")
 
+    if unresolvable_bindings:
+        lines.append(
+            f"── Unresolvable Translators ({len(unresolvable_bindings)}) " + "─" * 18
+        )
+        lines.append(
+            "next-intl translators whose namespace is not a literal; their keys "
+            "are not checked as missing:"
+        )
+        lines.append("")
+        for argument, filepath, lineno in unresolvable_bindings:
+            rel_path = os.path.relpath(filepath, project_root)
+            lines.append(f"  ({argument})  {rel_path}:{lineno}")
+        lines.append("")
+
     lines.append("── Summary " + "─" * 39)
     parts = []
     if "missing" in checks or "all" in checks:
@@ -619,6 +1036,8 @@ def format_plain_text(
     if "consistency" in checks or "all" in checks:
         consistency_total = sum(len(v) for v in consistency.values())
         parts.append(f"Inconsistent: {consistency_total}")
+    if unresolvable_bindings:
+        parts.append(f"Unresolvable translators: {len(unresolvable_bindings)}")
     lines.append(" | ".join(parts))
 
     if total_issues == 0:
@@ -639,6 +1058,7 @@ def format_json_output(
     dynamic_keys: List[Tuple[str, str, int]],
     checks: List[str],
     project_root: str,
+    unresolvable_bindings: Sequence[Tuple[str, str, int]] = (),
 ) -> str:
     """Format results as JSON."""
     result = {"config": config}
@@ -676,6 +1096,15 @@ def format_json_output(
         for pattern, filepath, lineno in dynamic_keys
     ]
 
+    result["unresolvableBindings"] = [
+        {
+            "argument": argument,
+            "file": os.path.relpath(filepath, project_root),
+            "line": lineno,
+        }
+        for argument, filepath, lineno in unresolvable_bindings
+    ]
+
     total_issues = 0
     if "missing" in checks or "all" in checks:
         total_issues += len(missing)
@@ -696,6 +1125,7 @@ def format_json_output(
             len(undeterminable) if ("unused" in checks or "all" in checks) else None
         ),
         "dynamicKeyCount": len(dynamic_keys),
+        "unresolvableBindingCount": len(unresolvable_bindings),
         "totalIssues": total_issues,
         "status": "CLEAN" if total_issues == 0 else "ISSUES_FOUND",
     }
@@ -928,12 +1358,13 @@ Examples:
         print(format_json_output(
             config, missing, unused, undeterminable, consistency,
             key_locations, dynamic_keys, checks, str(project_root),
+            scan.unresolvable_bindings,
         ))
     else:
         print(format_plain_text(
             config, missing, unused, undeterminable, consistency,
             key_locations, dynamic_keys, checks, str(project_root),
-            args.dynamic_limit,
+            args.dynamic_limit, scan.unresolvable_bindings,
         ))
 
     # Exit code
