@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
@@ -150,19 +151,43 @@ class ScanResult:
 # `orders.title`. Calls on such a binding are resolved here, not by the generic
 # TRANSLATION_PATTERNS, which would record the relative key as if it were full.
 
-# `const|let|var <name> = [await] useTranslations|getTranslations(<args>)`
+# `const|let|var <name>[: <type>] = [await] useTranslations|getTranslations(`
+# up to the opening parenthesis; the argument is read by _call_argument, which
+# balances nested parentheses. The optional type annotation may hold `=>`.
 NEXT_INTL_BINDING_PATTERN = re.compile(
-    r'''\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?'''
-    r'''(?:useTranslations|getTranslations)\s*\(([^)]*)\)'''
+    r'''\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::(?:[^=;]|=>)+?)?=\s*'''
+    r'''(?:await\s+)?(?:useTranslations|getTranslations)\s*\('''
 )
 
 # A namespace argument that is a plain string literal (no interpolation).
 NEXT_INTL_LITERAL_ARG = re.compile(r'''^(['"`])([^'"`$]*)\1$''')
 
-# The `namespace` property of the object form, literal or not.
-NEXT_INTL_NAMESPACE_PROP = re.compile(r'''\bnamespace\b''')
+# The `namespace` property of the object form (key quoted or not), literal or
+# not. Anchored on the property position, so `cfg.namespace` is no property.
+NEXT_INTL_NAMESPACE_PROP = re.compile(r'''[{,]\s*(['"]?)namespace\1\s*[:,}]''')
 NEXT_INTL_NAMESPACE_LITERAL = re.compile(
-    r'''\bnamespace\s*:\s*(['"`])([^'"`$]*)\1'''
+    r'''[{,]\s*(['"]?)namespace\1\s*:\s*(['"`])([^'"`$]*)\2\s*[,}]'''
+)
+
+# Other declarations of a name, which end the reach of an earlier translator
+# binding of that name: `const t = props.t`, `const { t } = ...`, and function
+# parameters (`function Row({ t })`, `({ t }) =>`, `t =>`).
+OTHER_DECLARATION_PATTERN = re.compile(r'''\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=]''')
+DESTRUCTURING_DECLARATION_PATTERN = re.compile(r'''\b(?:const|let|var)\s*\{([^}]*)\}\s*[:=]''')
+FUNCTION_PARAMS_PATTERN = re.compile(r'''\bfunction\b[\s*]*[\w$]*\s*(?:<[^>()]*>)?\s*\(''')
+ARROW_PARAMS_END_PATTERN = re.compile(r'''\)\s*(?::\s*[^=;{()]+?)?\s*=>''')
+ARROW_SINGLE_PARAM_PATTERN = re.compile(r'''(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>''')
+IDENTIFIER_PATTERN = re.compile(r'''(?<![\w$.])[A-Za-z_$][\w$]*''')
+
+# Comments and string literals, as spans that are not code. Strings stop at a
+# line break (only template literals span lines), so a stray quote in JSX text
+# hides at most the rest of its line.
+NON_CODE_PATTERN = re.compile(
+    r'''//[^\n]*|/\*[\s\S]*?(?:\*/|\Z)'''
+    r'''|'(?:\\.|[^'\\\n])*'?|"(?:\\.|[^"\\\n])*"?|`(?:\\[\s\S]|[^`\\])*`?'''
+)
+STRING_TOKEN_PATTERN = re.compile(
+    r''''(?:\\.|[^'\\\n])*'?|"(?:\\.|[^"\\\n])*"?|`(?:\\[\s\S]|[^`\\])*`?'''
 )
 
 # Translator methods taking a key. `has` only probes for existence, so its key
@@ -176,21 +201,25 @@ class TranslatorBinding:
     """One next-intl translator binding in a source file.
 
     `namespace` is "" for the root translator and None when it is unresolvable.
+    `translator` is False for any other declaration of the name (a parameter,
+    a prop, a plain variable): calls under it are left to the generic scan.
     """
 
     offset: int
     name: str
     namespace: Optional[str]
     argument: str
+    translator: bool = True
 
 
 def parse_next_intl_namespace(argument: str) -> Optional[str]:
     """The namespace a useTranslations/getTranslations argument selects.
 
     "" means the root (no argument, or an object without `namespace`); None
-    means the namespace is chosen at runtime and cannot be resolved.
+    means the namespace is chosen at runtime and cannot be resolved. A
+    trailing comma (Prettier's multi-line call style) is ignored.
     """
-    arg = argument.strip()
+    arg = argument.strip().rstrip(",").strip()
     if not arg:
         return ""
     literal = NEXT_INTL_LITERAL_ARG.match(arg)
@@ -200,38 +229,162 @@ def parse_next_intl_namespace(argument: str) -> Optional[str]:
         if not NEXT_INTL_NAMESPACE_PROP.search(arg):
             return ""
         prop = NEXT_INTL_NAMESPACE_LITERAL.search(arg)
-        return prop.group(2) if prop else None
+        return prop.group(3) if prop else None
     return None
 
 
-def find_translator_bindings(content: str) -> List[TranslatorBinding]:
-    """Every next-intl translator binding in a file, in source order."""
-    return [
-        TranslatorBinding(
-            offset=match.start(),
-            name=match.group(1),
-            namespace=parse_next_intl_namespace(match.group(2)),
-            argument=match.group(2).strip(),
-        )
-        for match in NEXT_INTL_BINDING_PATTERN.finditer(content)
-    ]
+def _non_code_starts_ends(content: str) -> Tuple[List[int], List[int]]:
+    """Start and end offsets of every comment and string literal, in order."""
+    starts, ends = [], []
+    for match in NON_CODE_PATTERN.finditer(content):
+        starts.append(match.start())
+        ends.append(match.end())
+    return starts, ends
 
 
-def _binding_at(
-    bindings: List[TranslatorBinding], name: str, offset: int
-) -> Optional[TranslatorBinding]:
-    """The nearest binding of `name` above `offset`, if any.
+def _is_code(spans: Tuple[List[int], List[int]], offset: int) -> bool:
+    starts, ends = spans
+    index = bisect_right(starts, offset) - 1
+    return index < 0 or offset >= ends[index]
 
-    Several components in one file each bind their own `t`; a call belongs to
-    the one whose body it sits in, which is the closest binding before it.
+
+def _call_argument(content: str, open_paren: int) -> Optional[str]:
+    """The text between `(` at `open_paren` and its balancing `)`.
+
+    Nested parentheses (`(await params).locale`) are balanced and string
+    literals skipped, so a `)` inside either does not end the argument. None
+    when the call is never closed.
     """
-    nearest = None
-    for binding in bindings:
-        if binding.offset >= offset:
-            break
-        if binding.name == name:
-            nearest = binding
-    return nearest
+    depth = 0
+    position = open_paren
+    length = len(content)
+    while position < length:
+        char = content[position]
+        if char in "'\"`":
+            position = STRING_TOKEN_PATTERN.match(content, position).end()
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return content[open_paren + 1:position]
+        position += 1
+    return None
+
+
+def _arrow_params_start(content: str, close_paren: int) -> int:
+    """Offset of the `(` that balances the `)` at `close_paren`, or -1."""
+    depth = 0
+    for position in range(close_paren, -1, -1):
+        char = content[position]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                return position
+    return -1
+
+
+def _parameter_declarations(content: str) -> List[Tuple[int, str]]:
+    """(offset, name) for every identifier in a function's parameter list."""
+    declarations = []
+    param_lists = []
+    for match in FUNCTION_PARAMS_PATTERN.finditer(content):
+        params = _call_argument(content, match.end() - 1)
+        if params is not None:
+            param_lists.append((match.start(), params))
+    for match in ARROW_PARAMS_END_PATTERN.finditer(content):
+        start = _arrow_params_start(content, match.start())
+        if start >= 0:
+            param_lists.append((start, content[start + 1:match.start()]))
+    for match in ARROW_SINGLE_PARAM_PATTERN.finditer(content):
+        declarations.append((match.start(), match.group(1)))
+    for offset, params in param_lists:
+        for identifier in IDENTIFIER_PATTERN.finditer(params):
+            declarations.append((offset, identifier.group(0)))
+    return declarations
+
+
+def find_translator_bindings(content: str) -> List[TranslatorBinding]:
+    """Every declaration of a translator name in a file, in source order.
+
+    next-intl bindings carry their namespace. Any other declaration of the
+    same name (parameter, prop, plain variable) is kept as a non-translator
+    entry, so a later `t` that is not a next-intl translator is not resolved
+    against the previous component's namespace. Matches inside comments and
+    string literals are ignored.
+    """
+    candidates = list(NEXT_INTL_BINDING_PATTERN.finditer(content))
+    if not candidates:
+        return []
+    spans = _non_code_starts_ends(content)
+
+    bindings = []
+    for match in candidates:
+        if not _is_code(spans, match.start()):
+            continue
+        argument = _call_argument(content, match.end() - 1)
+        if argument is None:
+            continue
+        bindings.append(
+            TranslatorBinding(
+                offset=match.start(),
+                name=match.group(1),
+                namespace=parse_next_intl_namespace(argument),
+                argument=argument.strip(),
+            )
+        )
+    if not bindings:
+        return []
+
+    names = {binding.name for binding in bindings}
+    translator_offsets = {binding.offset for binding in bindings}
+    others: List[Tuple[int, str]] = [
+        (match.start(), match.group(1))
+        for match in OTHER_DECLARATION_PATTERN.finditer(content)
+    ]
+    for match in DESTRUCTURING_DECLARATION_PATTERN.finditer(content):
+        others.extend(
+            (match.start(), identifier.group(0))
+            for identifier in IDENTIFIER_PATTERN.finditer(match.group(1))
+        )
+    others.extend(_parameter_declarations(content))
+
+    for offset, name in others:
+        if name in names and offset not in translator_offsets and _is_code(spans, offset):
+            bindings.append(
+                TranslatorBinding(
+                    offset=offset, name=name, namespace=None, argument="", translator=False
+                )
+            )
+    bindings.sort(key=lambda binding: binding.offset)
+    return bindings
+
+
+class _BindingIndex:
+    """Nearest-binding lookup per name, by binary search over offsets."""
+
+    def __init__(self, bindings: List[TranslatorBinding]):
+        self._offsets: Dict[str, List[int]] = {}
+        self._bindings: Dict[str, List[TranslatorBinding]] = {}
+        for binding in bindings:
+            self._offsets.setdefault(binding.name, []).append(binding.offset)
+            self._bindings.setdefault(binding.name, []).append(binding)
+
+    def at(self, name: str, offset: int) -> Optional[TranslatorBinding]:
+        """The nearest binding of `name` above `offset`, if any.
+
+        Several components in one file each bind their own `t`; a call belongs
+        to the one whose body it sits in, which is the closest binding before
+        it.
+        """
+        offsets = self._offsets.get(name)
+        if not offsets:
+            return None
+        index = bisect_left(offsets, offset) - 1
+        return self._bindings[name][index] if index >= 0 else None
 
 
 def _qualify(namespace: str, key: str) -> str:
@@ -256,12 +409,22 @@ def _translator_dynamic_pattern(names: Set[str]) -> re.Pattern:
     )
 
 
-def _line_of(content: str, offset: int) -> int:
-    return content.count("\n", 0, offset) + 1
+def _line_starts(content: str) -> List[int]:
+    """Offsets at which each line starts, for _line_of."""
+    return [0] + [match.end() for match in re.finditer("\n", content)]
+
+
+def _line_of(line_starts: List[int], offset: int) -> int:
+    return bisect_right(line_starts, offset)
 
 
 def _record_key(result: ScanResult, key: str, filepath: str, lineno: int) -> None:
     result.key_locations.setdefault(key, []).append((filepath, lineno))
+
+
+# Placeholder for an unresolvable namespace in a dynamic key's pattern. It
+# starts with an interpolation, so the pattern yields no static prefix.
+UNRESOLVABLE_NAMESPACE_PLACEHOLDER = "${{{}}}"
 
 
 def scan_translator_calls(
@@ -278,17 +441,19 @@ def scan_translator_calls(
     if not bindings:
         return handled
 
+    line_starts = _line_starts(content)
     for binding in bindings:
-        if binding.namespace is None:
+        if binding.translator and binding.namespace is None:
             result.unresolvable_bindings.append(
-                (binding.argument, filepath, _line_of(content, binding.offset))
+                (binding.argument, filepath, _line_of(line_starts, binding.offset))
             )
 
     names = {binding.name for binding in bindings}
+    index = _BindingIndex(bindings)
 
     for match in _translator_call_pattern(names).finditer(content):
-        binding = _binding_at(bindings, match.group(1), match.start())
-        if binding is None:
+        binding = index.at(match.group(1), match.start())
+        if binding is None or not binding.translator:
             continue
         handled.add(match.start(3))
         if binding.namespace is None:
@@ -299,26 +464,39 @@ def scan_translator_calls(
         if match.group(2) == NEXT_INTL_PROBE_METHOD:
             result.literal_keys.add(key)
         else:
-            _record_key(result, key, filepath, _line_of(content, match.start()))
+            _record_key(result, key, filepath, _line_of(line_starts, match.start()))
 
     for match in _translator_dynamic_pattern(names).finditer(content):
-        binding = _binding_at(bindings, match.group(1), match.start())
-        if binding is None:
+        binding = index.at(match.group(1), match.start())
+        if binding is None or not binding.translator:
             continue
         handled.add(match.start(2))
-        if binding.namespace is None:
-            continue
         # Qualifying before prefix extraction also covers `` t(`${k}`) ``: the
         # namespace bounds what it reaches, so the prefix is `<namespace>.`.
+        # An unresolvable namespace is still listed, behind a placeholder
+        # that yields no prefix.
+        namespace = binding.namespace
+        if namespace is None:
+            namespace = UNRESOLVABLE_NAMESPACE_PLACEHOLDER.format(binding.argument)
         result.dynamic_keys.append(
             (
-                _qualify(binding.namespace, match.group(3)),
+                _qualify(namespace, match.group(3)),
                 filepath,
-                _line_of(content, match.start()),
+                _line_of(line_starts, match.start()),
             )
         )
 
     return handled
+
+
+def _handled_by_translator(
+    line: str, offset: int, match: re.Match, handled: Set[int]
+) -> bool:
+    """Whether a generic match on `line` (at `offset`) is a resolved call."""
+    if not handled:
+        return False
+    paren = _generic_call_paren(line, match)
+    return paren is not None and offset + paren in handled
 
 
 def _generic_call_paren(line: str, match: re.Match) -> Optional[int]:
@@ -513,7 +691,6 @@ def scan_source_files(
 ) -> ScanResult:
     """Scan source files for translation key usage."""
     result = ScanResult()
-    key_locations = result.key_locations
     dynamic_keys = result.dynamic_keys
 
     for root, dirs, files in os.walk(source_dir):
@@ -538,21 +715,20 @@ def scan_source_files(
 
             handled = scan_translator_calls(content, filepath, result)
 
-            line_offset = 0
-            for lineno, line in enumerate(content.splitlines(keepends=True), 1):
-                offset = line_offset
-                line_offset += len(line)
-                # Drop the line break, whichever splitlines() split on.
-                parts = line.splitlines()
-                line = parts[0] if parts else ""
+            lines = content.splitlines()
+            # Line offsets are only needed to match resolved translator calls,
+            # so files without next-intl bindings skip computing them.
+            offsets = [0] * len(lines)
+            if handled:
+                line_offset = 0
+                for index, raw in enumerate(content.splitlines(keepends=True)):
+                    offsets[index] = line_offset
+                    line_offset += len(raw)
 
-                def handled_by_translator(match: re.Match) -> bool:
-                    paren = _generic_call_paren(line, match)
-                    return paren is not None and offset + paren in handled
-
+            for lineno, (line, offset) in enumerate(zip(lines, offsets), 1):
                 # Check for dynamic keys
                 for match in DYNAMIC_KEY_PATTERN.finditer(line):
-                    if handled_by_translator(match):
+                    if _handled_by_translator(line, offset, match, handled):
                         continue
                     dynamic_keys.append((match.group(1), filepath, lineno))
 
@@ -567,7 +743,7 @@ def scan_source_files(
                 # Check for static keys
                 for pattern in TRANSLATION_PATTERNS:
                     for match in pattern.finditer(line):
-                        if handled_by_translator(match):
+                        if _handled_by_translator(line, offset, match, handled):
                             continue
                         key = match.group(1)
 
@@ -583,9 +759,7 @@ def scan_source_files(
                         if not is_key_shaped(key):
                             continue
 
-                        if key not in key_locations:
-                            key_locations[key] = []
-                        key_locations[key].append((filepath, lineno))
+                        _record_key(result, key, filepath, lineno)
 
     return result
 
@@ -762,6 +936,15 @@ def format_plain_text(
             )
             lines.append(
                 "         Verify a key is truly dead before deleting it."
+            )
+            lines.append("")
+        if unresolvable_bindings:
+            lines.append(
+                f"WARNING: {len(unresolvable_bindings)} unresolvable translator(s); "
+                "keys reached only through them are still listed here."
+            )
+            lines.append(
+                "         See Unresolvable Translators below before deleting a key."
             )
             lines.append("")
         if unused:

@@ -795,6 +795,79 @@ check(
     audit.dynamic_prefixes(result.dynamic_keys) == {"orders."},
 )
 
+result = scan_snippet(
+    "const t = await getTranslations({ locale: (await params).locale, namespace: 'orders' });\n"
+    "t('columns.date');\n"
+)
+check(
+    "next-intl: an object argument with a nested call keeps its namespace",
+    set(result.key_locations) == {"orders.columns.date"}
+    and result.unresolvable_bindings == [],
+)
+
+result = scan_snippet(
+    "const t = await getTranslations(\n  \"very.long.namespace\",\n);\nt('title');\n"
+)
+check(
+    "next-intl: a trailing comma after a literal namespace stays resolvable",
+    set(result.key_locations) == {"very.long.namespace.title"}
+    and result.unresolvable_bindings == [],
+)
+
+check(
+    "next-intl: a binding with a type annotation is detected",
+    scan_keys("const t: Translator = useTranslations('orders');\nt('columns.date');\n")
+    == {"orders.columns.date"},
+)
+
+check(
+    "next-intl: a quoted namespace key is parsed",
+    scan_keys("const t = await getTranslations({ 'namespace': 'orders' });\nt('title');\n")
+    == {"orders.title"},
+)
+
+result = scan_snippet(
+    "const t = await getTranslations({ locale: cfg.namespace });\nt('orders.title');\n"
+)
+check(
+    "next-intl: a property value named namespace is not the namespace property",
+    set(result.key_locations) == {"orders.title"} and result.unresolvable_bindings == [],
+)
+
+check(
+    "next-intl: a binding in a comment does not capture later calls",
+    scan_keys(
+        "/**\n * const t = useTranslations('docs')\n */\n"
+        "// const t = useTranslations('docs');\n"
+        "const s = \"const t = useTranslations('docs')\";\n"
+        "const { t } = useTranslation();\n"
+        "t('nav.home');\n"
+    )
+    == {"nav.home"},
+)
+
+check(
+    "next-intl: a later t parameter is not resolved against the previous binding",
+    scan_keys(
+        "function Orders() { const t = useTranslations('orders'); return t('title'); }\n"
+        "function Row({ t }) { return t('common.save'); }\n"
+        "const Cell = ({ t }: Props) => t('common.cancel');\n"
+    )
+    == {"orders.title", "common.save", "common.cancel"},
+)
+
+result = scan_snippet("const t = useTranslations(ns);\nt(`status.${s}`);\n")
+check(
+    "next-intl: a dynamic key on an unresolvable translator stays listed without a prefix",
+    [pattern for pattern, _f, _l in result.dynamic_keys] == ["${ns}.status.${s}"]
+    and audit.dynamic_prefixes(result.dynamic_keys) == set(),
+)
+
+check(
+    "next-intl: the unused section warns about unresolvable translators",
+    "WARNING: 1 unresolvable translator(s)" in text,
+)
+
 
 # --- summary ---
 
