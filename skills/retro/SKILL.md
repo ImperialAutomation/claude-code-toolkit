@@ -202,8 +202,9 @@ git branch -r --list 'origin/retro-*'
 ```
 
 For a branch without a PR, `git diff --name-only origin/<base>...origin/<branch>`. If
-one already changes your target doc, read its version and join it (commit onto that
-branch, or base yours on it) instead of writing a parallel copy. Name it in the summary.
+one already changes your target doc, read its version and join it instead of writing a
+parallel copy: the apply step in Phase 4 then runs `retro-pr.sh prepare` with
+`--join <branch>`. Name it in the summary.
 
 ### For docs/development/ files (when directory exists)
 
@@ -436,9 +437,69 @@ changes and the after-numbers by running them again afterwards. If "New document
 name the candidates that were examined and why they did not fit: a different mechanism,
 not just a different incident.
 
-**Wait for confirmation before making any changes.**
+**Make no change before the confirmation below.**
 
-After confirmation, make all changes and commit with message format:
+### Confirm per artefact group
+
+Ask with `AskUserQuestion`, not by waiting for free text: one question per artefact
+group that has proposals, all in one call. A group without proposals is not asked.
+
+| Group | Covers | Options, recommended first |
+|---|---|---|
+| Memory files | memory topic files, `MEMORY.md` | Apply all (Recommended) / Choose per item / Skip |
+| Project docs | CLAUDE.md, `docs/development/`, `scripts/` | Apply all as PR (Recommended) / Choose per item / Skip |
+| Toolkit issues and comments | issues and comments from Phase 3b | Create all / Choose per item / Skip |
+
+Each option's description says what it will do in this retro ("write 2 memory files,
+update `MEMORY.md`"), so the question stands on its own without the summary in view.
+The free-text "Other" answer stays available on every question: read it as a
+correction for that group ("apply, but leave out the line about X"), apply it, and ask
+again only when it is ambiguous.
+
+**Choose per item** gets a follow-up call: per group, `multiSelect` questions whose
+options are its proposals, one-line label each, and the user ticks the ones to apply.
+A question holds at most 4 options and a call at most 4 questions, so split the group
+into chunks of 4 (headers like `Memory 1/2`), up to 16 items per call. Name any items
+beyond 16 in the last question's text; they are applied only when the "Other" answer
+names them. **An item that is not ticked is not applied**: an empty answer never means
+"apply".
+
+### Apply, fixed per group
+
+Only what was approved, in this order:
+
+**Memory files.** Write them directly with Write/Edit. Memory is not a git repository:
+no branch, no commit.
+
+**Project docs.** Never committed on the checked-out branch or the base branch, and
+never in the live toolkit checkout. Always through `retro-pr.sh` (`--help` for exit
+codes), in three steps:
+
+1. `~/.claude/bin/retro-pr.sh --repo <project-root> prepare <slug>`, with
+   `--join <retro-branch>` when the parallel-branch check found one touching the same
+   doc. Take `WORKTREE:`, `BRANCH:` and `BASE:` from its output. The base is
+   `origin/develop` when it exists, otherwise the origin default branch, whatever is
+   checked out. Exit 1: show its stderr to the user and stop this group; never fall
+   back to writing in the current tree.
+2. Write the approved changes under `<worktree>`, with absolute paths only. Take the
+   after-numbers for the summary there:
+   `~/.claude/bin/claude-md-index-report.sh <worktree>` and
+   `~/.claude/bin/doc-budget-check.sh <worktree>/docs/`. Then
+   `git -C <worktree> add <paths>` and, in a call of its own so the trailer hook
+   applies, `~/.claude/bin/git-commit.sh --repo <worktree> --file
+   /tmp/<project>-retro-commit-msg-<slug>.txt` with the message format below.
+3. Write the PR body (artefacts and the consolidation section of the summary) to
+   `/tmp/<project>-retro-pr-body-<slug>.md`, then
+   `~/.claude/bin/retro-pr.sh publish <worktree> --title "retro: capture <brief description>" --body-file <that file>`.
+   It pushes, opens the PR to the base without merging, and removes the worktree; the
+   branch stays on origin. Report its `PR_URL:`. A joined branch with an open PR gets
+   that PR back, with its title and body replaced by yours: read the open PR's body
+   first and write one that covers the whole branch.
+
+**Toolkit issues and comments.** As in "For toolkit candidates" and Phase 3b, each
+body scanned before it is published.
+
+Commit message format:
 
 ```
 retro: capture <brief description>
@@ -447,6 +508,10 @@ Artefacts:
 - <list of files created/modified>
 ```
 
+Nothing this skill publishes (PR bodies, issue bodies, comments, commit messages)
+contains an em-dash. Check each file before it goes out: `grep -n "—" <file>` must
+find nothing.
+
 ## Rules
 
 - Never store credentials or secrets. Always reference environment variables.
@@ -454,6 +519,8 @@ Artefacts:
 - Run `~/.claude/bin/claude-md-index-report.sh` before proposing any new document, and name the candidates examined in the summary. Folding into the document that already describes the mechanism is the default; a new document needs a stated reason why none fit.
 - Fold in via the `Also:` line; append only a new detection, remedy or counterexample. Over the byte budget (`doc-budget-check.sh`), split by theme. Join an open `retro-*` branch that touches the same doc.
 - The always-loaded `CLAUDE.md` set is paid for in every session and every sub-agent. Report its net line growth and the byte delta of every touched doc in the summary; `+0` is a good retro, not an empty one.
+- Confirm per artefact group with `AskUserQuestion`; an item the user did not approve is not applied.
+- Project docs go through `retro-pr.sh` (prepare, commit in the worktree, publish): never a commit on the checked-out or base branch, never a merge.
 - Keep procedures concise. Future sessions need to scan them quickly.
 - If the session had no knowledge worth capturing, say so. Do not invent artefacts.
 - For design decisions, capture the reasoning and the alternatives considered — not just the final choice.
