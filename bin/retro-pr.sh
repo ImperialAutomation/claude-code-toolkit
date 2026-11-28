@@ -142,6 +142,9 @@ prepare() {
         branch="$join"
         existing=$(awk -F'\t' -v b="$branch" '$2 == b { print $1; exit }' <<< "$(worktree_list "$root")")
         if [[ -n "$existing" ]]; then
+            # A registration whose directory is gone (prunable) would otherwise
+            # pass as clean and be handed out as a tree that does not exist.
+            [[ -d "$existing" ]] || die "$branch is registered at $existing, which no longer exists; run git worktree prune first"
             is_dirty "$existing" && die "$existing (on $branch) has uncommitted changes; commit or discard them there first"
             path="$existing"
         else

@@ -159,6 +159,11 @@ check "the refusal names the tree" "yes" "$(contains "$(cat "$T/stderr")" "$WT5"
 check "and leaves the draft alone" "draft" "$(cat "$WT5/notes.md")"
 check "joining a branch that does not exist exits 1" "1" \
     "$(status_of "$R5" prepare ignored --join retro-2026-01-02-nope)"
+# A registered worktree whose directory was deleted must not pass as clean.
+rm -rf "$WT5"
+check "a joined worktree whose directory is gone exits 1" "1" \
+    "$(status_of "$R5" prepare ignored --join retro-2026-01-02-auth-notes)"
+check "and points at git worktree prune" "yes" "$(contains "$(cat "$T/stderr")" "git worktree prune")"
 
 echo "== 6. publish pushes, opens a PR to the base and removes the worktree =="
 R6=$(make_repo shop6 main develop)
