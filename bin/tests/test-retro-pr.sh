@@ -160,6 +160,54 @@ check "and leaves the draft alone" "draft" "$(cat "$WT5/notes.md")"
 check "joining a branch that does not exist exits 1" "1" \
     "$(status_of "$R5" prepare ignored --join retro-2026-01-02-nope)"
 
+echo "== 6. publish pushes, opens a PR to the base and removes the worktree =="
+R6=$(make_repo shop6 main develop)
+OUT=$(run "$R6" prepare deploy-notes)
+WT6=$(field "$OUT" WORKTREE)
+BRANCH6=$(field "$OUT" BRANCH)
+DEVELOP_SHA=$(git -C "$R6" rev-parse origin/develop)
+echo "## Deploy" > "$WT6/CLAUDE.md"
+git -C "$WT6" add CLAUDE.md
+git -C "$WT6" commit -q -m "retro: capture deploy notes"
+echo "Retro body" > "$T/body6.md"
+: > "$GH_LOG"
+OUT=$(run "$R6" publish "$WT6" --title "retro: capture deploy notes" --body-file "$T/body6.md")
+check "publish exits 0" "0" "$?"
+check "publish prints the PR URL" "https://github.com/acme/shop/pull/41" "$(field "$OUT" PR_URL)"
+check "publish reports the removed worktree" "$WT6" "$(field "$OUT" REMOVED)"
+check "the worktree directory is gone" "no" "$([[ -e "$WT6" ]] && echo yes || echo no)"
+check "the worktree is no longer registered" "no" \
+    "$(git -C "$R6" worktree list --porcelain | grep -q "$WT6" && echo yes || echo no)"
+check "the branch is on origin" "$(git -C "$R6" rev-parse "$BRANCH6")" \
+    "$(git -C "$T/shop6.git" rev-parse --verify -q "refs/heads/$BRANCH6")"
+check "the PR targets develop with the body file" "yes" \
+    "$(contains "$(cat "$GH_LOG")" "pr create --title retro: capture deploy notes --base develop --body-file $T/body6.md")"
+check "nothing merged: no gh pr merge" "no" "$(contains "$(cat "$GH_LOG")" "pr merge")"
+check "nothing committed on origin/develop" "$DEVELOP_SHA" "$(git -C "$T/shop6.git" rev-parse refs/heads/develop)"
+check "caller's tree is still on main" "main" "$(git -C "$R6" branch --show-current)"
+check "caller's tree is still clean" "" "$(git -C "$R6" status --porcelain)"
+
+echo "== 7. publish refuses =="
+OUT=$(run "$R6" prepare unsaved-notes)
+WT7=$(field "$OUT" WORKTREE)
+: > "$GH_LOG"
+check "a worktree without commits exits 1" "1" \
+    "$(status_of "$R6" publish "$WT7" --title t --body-file "$T/body6.md")"
+check "and says there is nothing to publish" "yes" "$(contains "$(cat "$T/stderr")" "nothing to publish")"
+# Committed work plus an unsaved draft: only the dirty check can refuse here.
+git -C "$WT7" commit -q --allow-empty -m "retro: capture part one"
+echo "draft" > "$WT7/notes.md"
+check "a worktree with uncommitted changes exits 1" "1" \
+    "$(status_of "$R6" publish "$WT7" --title t --body-file "$T/body6.md")"
+check "and keeps the worktree" "draft" "$(cat "$WT7/notes.md")"
+check "the main worktree exits 1" "1" "$(status_of "$R6" publish "$R6" --title t --body-file "$T/body6.md")"
+git -C "$R6" worktree add -q -b feature/y "$T/shop6-feature" origin/main 2>/dev/null
+check "a worktree not on retro-* exits 1" "1" \
+    "$(status_of "$R6" publish "$T/shop6-feature" --title t --body-file "$T/body6.md")"
+check "no refusal reached gh" "" "$(cat "$GH_LOG")"
+check "publish without --title exits 2" "2" "$(status_of "$R6" publish "$WT7" --body-file "$T/body6.md")"
+check "publish without a worktree exits 2" "2" "$(status_of "$R6" publish --title t --body-file "$T/body6.md")"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

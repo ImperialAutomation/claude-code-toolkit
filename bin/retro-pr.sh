@@ -176,7 +176,43 @@ prepare() {
     echo "BASE: $base"
 }
 
+publish() {
+    local wt="" title="" body="" root main branch base ahead
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title) [[ $# -ge 2 ]] || usage; title="$2"; shift 2 ;;
+            --body-file) [[ $# -ge 2 ]] || usage; body="$2"; shift 2 ;;
+            -*) usage ;;
+            *) [[ -z "$wt" ]] || usage; wt="$1"; shift ;;
+        esac
+    done
+    [[ -n "$wt" && -n "$title" && -n "$body" ]] || usage
+
+    root=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || die "$wt is not inside a git worktree"
+    main=$(main_worktree_root "$root")
+    # publish ends by removing the tree, so it only accepts the kind prepare made.
+    [[ "$root" != "$main" ]] || die "$root is the main worktree, not a retro worktree"
+    branch=$(git -C "$root" branch --show-current)
+    [[ "$branch" == "$BRANCH_PREFIX"* ]] || die "$root is on '${branch:-a detached HEAD}', not a ${BRANCH_PREFIX}* branch"
+    is_dirty "$root" && die "$root has uncommitted changes; commit them with git-commit.sh --repo $root first"
+
+    git -C "$root" fetch -q origin >&2 \
+        || echo "retro-pr.sh: fetching origin failed; using the last fetched refs." >&2
+    base=$(retro_base "$root") \
+        || die "no base: origin/$DEVELOP does not exist and origin/HEAD is not set (git remote set-head origin --auto)"
+    ahead=$(git -C "$root" rev-list --count "origin/$base..HEAD" 2>/dev/null) || die "cannot compare $branch with origin/$base"
+    [[ "$ahead" -gt 0 ]] || die "nothing to publish: $branch has no commits ahead of origin/$base"
+
+    "$BIN_DIR/git-push-pr-merge.sh" --repo "$root" --base "$base" --title "$title" \
+        --body-file "$body" --no-merge \
+        || die "push or PR failed; $root is kept"
+
+    git -C "$main" worktree remove "$root" >&2 || die "PR opened, but removing $root failed"
+    echo "REMOVED: $root"
+}
+
 case "$COMMAND" in
     prepare) prepare "$@" ;;
+    publish) publish "$@" ;;
     *) usage ;;
 esac
