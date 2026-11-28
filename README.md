@@ -167,6 +167,7 @@ strip-ansi.sh /tmp/vitest.txt            # -> /tmp/vitest.txt.clean
 |--------|-------|-------------|
 | `git-find-base-branch` | `git-find-base-branch [--repo DIR \| repo-dir]` | Detect the base branch of the current branch, or of the given worktree |
 | `git-resolve-worktree.sh` | `git-resolve-worktree.sh [--issue N] [--create SLUG] [hint]` | Resolve a worktree hint to one absolute path. Refuses to guess: zero or several matches exit non-zero and list the candidates with their branches. `--create` never answers with the live toolkit checkout: it creates or reuses the sibling `../<repo>-<N>` instead, and is a no-op in every other repo ([why](CLAUDE.md)) |
+| `retro-pr.sh` | `retro-pr.sh [--repo DIR] prepare <slug> [--join <retro-branch>]` / `retro-pr.sh publish <worktree> --title T --body-file F` | `/retro`'s project docs as a PR. `prepare` creates a linked worktree on `retro-<YYYY-MM-DD>-<slug>` from `origin/develop`, or from the origin default branch when there is no `develop`, whatever is checked out; `--join` reuses an existing `retro-*` branch and refuses a dirty tree on it. `publish` refuses uncommitted or no work, opens the PR via `git-push-pr-merge.sh --no-merge` and removes the worktree; the branch stays |
 | `git-cleanup-merged-branch.sh` | `git-cleanup-merged-branch.sh [--delete-remote\|--keep-remote] [feature] [base]` | Checkout base, fast-forward it to its upstream, delete merged feature branch; never prompts without a terminal (`--help` for the defaults); refuses when the tree is not on the named feature branch (or the base named with it). In the live toolkit repo: fast-forward the live checkout, remove the merged linked worktree and its branch, from either tree |
 | `toolkit-live-repo.sh` | `toolkit-live-repo.sh [--repo DIR]` | Exit 0 and print the live checkout's path when DIR's main worktree is the live toolkit checkout, else exit 1. Read-only; `/finish` asks it before refusing a local merge |
 | `extract-issue-from-branch.sh` | `extract-issue-from-branch.sh` | Extract issue number from current branch name |
@@ -454,6 +455,7 @@ claude-code-toolkit/
 │   ├── hook-post-edit-lint.sh     ← PostToolUse hook: ruff lint after Write/Edit
 │   ├── hook-post-prune-branch-config.sh ← PostToolUse hook: drop config of deleted branches
 │   ├── doc-budget-check.sh        ← per-file byte budget for docs (used by /retro)
+│   ├── retro-pr.sh                ← /retro's project docs as a PR from a retro-* worktree
 │   ├── permission-friction.py     ← scan transcripts for permission friction (used by /retro)
 │   ├── test-permission-friction.py ← standalone tests for the above
 │   ├── decision-metrics.py        ← agreement with recommendations, reversals of agent decisions
@@ -715,7 +717,7 @@ flowchart TD
 
 Knowledge moves from a working session into the shared toolkit in three steps:
 
-1. `/retro` captures knowledge from any working session (debug, implementation, configuration, deployment) as project-local artefacts: scripts, CLAUDE.md procedures, design decisions, auto-memory entries.
+1. `/retro` captures knowledge from any working session (debug, implementation, configuration, deployment) as project-local artefacts: scripts, CLAUDE.md procedures, design decisions, auto-memory entries. The user approves per artefact group with a few clicks; memory is written directly, project docs go out as a PR from a `retro-*` worktree (`retro-pr.sh`), never as a commit on the checked-out branch.
 2. A finding that is reusable across projects also becomes a GitHub issue in this repo, written without anything that identifies the source project. Next to its local version, the source project gets a note to replace it once that issue is merged.
 3. `/implement <issue>` in this repo builds the generalised version with a branch, tests and a PR. After the merge, the source project acts on its note: the local script becomes a thin wrapper around the toolkit version (or goes), and its CLAUDE.md points at the toolkit.
 

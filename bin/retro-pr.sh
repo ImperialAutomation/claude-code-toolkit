@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# retro-pr.sh — Put /retro's project-doc changes on a retro-* branch in a
+# retro-pr.sh: put /retro's project-doc changes on a retro-* branch in a
 # linked worktree, then open them as a PR and remove the worktree.
 #
 # Why this exists
